@@ -42,6 +42,9 @@
     if (!S.BattleProblem)       S.BattleProblem       = {};    // filled by core/battles.js
     if (!S.ActionResult)        S.ActionResult        = {};    // filled by core/actions.js
     if (!S.GeneralTask)         S.GeneralTask         = {};    // filled by core/specialists/orders.js
+    if (!S.WaveStep)            S.WaveStep            = {};    // filled by modules/adventures/state.js
+    if (!S.RunStatus)           S.RunStatus           = {};    // filled by modules/adventures/state.js
+    if (!S.RunPause)            S.RunPause            = {};    // filled by modules/adventures/state.js
 
     // Failure kinds of the kernel file API (kernel/17_files.js).
     S.FileError = {

@@ -8,7 +8,7 @@
  * with S.core.actions.attempt, which sends and verifies.
  *
  * Bundle slot: core, after adventures.js and before buildings.js. Every
- * reference to another core (specialists, zone) happens at call time, so the
+ * reference to another core (specialists, zone, locale) happens at call time, so the
  * top level only fills S.TroopClass and assigns S.core.army.
  *
  * Two facts are taken from the client code rather than observed in play, so
@@ -76,6 +76,22 @@
 
     function isEmpty(map) {
         return total(map) === 0;
+    }
+
+    // "12 Type, 3 Other" for display: types sorted, zero amounts left out, a
+    // type shown by its localised name when the client knows one. An empty or
+    // missing army reads as a dash. S.core.locale is read at call time.
+    function text(army) {
+        var keys = [];
+        var out = [];
+        var i;
+        army = army || {};
+        for (var k in army) if (has(army, k) && army[k] > 0) keys.push(k);
+        keys.sort();
+        for (i = 0; i < keys.length; i++) {
+            out.push(army[keys[i]] + ' ' + (S.core.locale.res(keys[i]) || keys[i]));
+        }
+        return out.length ? out.join(', ') : '—';
     }
 
     // Exact per type; a type missing on one side counts as 0, so {} matches {}.
@@ -544,6 +560,7 @@
         minus:         minus,
         total:         total,
         isEmpty:       isEmpty,
+        text:          text,
         matches:       matches,
         classOf:       classOf,
         planSupply:    planSupply,

@@ -20,8 +20,13 @@
  * key is ignored without any migration, because only keys present in these
  * defaults are read.
  *
- * There is no `enabled` key: nothing in this module runs on the scheduler
- * tick yet, so there is nothing to switch on or off.
+ * The run request and the running wave executor's state are not settings
+ * either: they live in their own steward file (see state.js), written whole
+ * on every change, because the host's merging write would keep stale keys of
+ * a shrinking object.
+ *
+ * There is no `enabled` key: the executor only acts while the user has
+ * started a run, and Pause and Stop in the menu switch it off.
  */
 
 (function (S) {

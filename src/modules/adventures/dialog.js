@@ -41,10 +41,6 @@
 
     function esc(v) { return H().escape(v); }
 
-    function has(obj, key) {
-        return Object.prototype.hasOwnProperty.call(obj, key);
-    }
-
     function notify(text) {
         if (S.kernel.ui && S.kernel.ui.notify) S.kernel.ui.notify(text);
     }
@@ -63,27 +59,6 @@
 
     function span(cls, text) {
         return '<span class="' + cls + '">' + esc(text) + '</span>';
-    }
-
-    function sortedKeys(map) {
-        var keys = [];
-        for (var k in map) {
-            if (has(map, k)) keys.push(k);
-        }
-        keys.sort();
-        return keys;
-    }
-
-    // "12 Type, 3 Other"; unit ids shown by their localised name when known.
-    function armyText(army) {
-        var keys = sortedKeys(army || {});
-        var out = [];
-        for (var i = 0; i < keys.length; i++) {
-            if (!(army[keys[i]] > 0)) continue;
-            var name = S.core.locale.res(keys[i]);
-            out.push(army[keys[i]] + ' ' + (name || keys[i]));
-        }
-        return out.length ? out.join(', ') : '—';
     }
 
     function startDir() {
@@ -273,9 +248,9 @@
         errorRow($c);
 
         var buffs = S.core.buffs.speedBuffs();
-        var run = S.modules.adventures.run;
-        if (run) {
-            $c.append(h.gridRow([[12, span('steward-muted', run.statusText(run.current()))]]));
+        var store = S.modules.adventures.state;
+        if (store) {
+            $c.append(h.gridRow([[12, span('steward-muted', store.status())]]));
         }
 
         var recs = t.list();
@@ -350,7 +325,7 @@
             generals++;
             units = S.core.army.add(units, l.army);
         }
-        var text = generals + ' general line' + (generals === 1 ? '' : 's') + ', ' + armyText(units) +
+        var text = generals + ' general line' + (generals === 1 ? '' : 's') + ', ' + S.core.army.text(units) +
             ', ' + ld.problems.length + ' problem' + (ld.problems.length === 1 ? '' : 's');
         return span(ld.ok ? 'steward-muted' : 'steward-bad', text);
     }

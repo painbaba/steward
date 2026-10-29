@@ -149,7 +149,7 @@ boot: function () {
 
 Eager is friendlier for debugging — you can inspect `settings.json` and see what every module expects. Prefer it.
 
-`write` deep-merges into the stored object, so a key or array entry that was stored once is not removed by a later `write` that leaves it out. Records a module creates and deletes (for example adventure run templates, one JSON file per record) do not belong in settings. Keep them in files under `Steward.kernel.files.stewardDir('<module>/<folder>')`, which returns `{ dir, where }` or `null`, and write each one with `Steward.kernel.files.writeText`.
+`write` deep-merges into the stored object, so a key or array entry that was stored once is not removed by a later `write` that leaves it out. Records a module creates and deletes (for example adventure run templates, one JSON file per record) do not belong in settings. Keep them in files under `Steward.kernel.files.stewardDir('<module>/<folder>')`, which returns `{ dir, where }` or `null`, and write each one with `Steward.kernel.files.writeText`. A module's run state that must survive a client restart is the same case (the adventures run file, `run.json`): it goes in a steward file written with `writeText`, not in settings.
 
 ## Enqueueing actions
 

@@ -104,6 +104,22 @@ t.test('matches: a different amount does not match', function () {
     assert.strictEqual(s.army.matches({ Rifle: 5 }, { Rifle: 6 }), false);
 });
 
+// ---- text -------------------------------------------------------------------
+
+t.test('text: sorted, zero amounts skipped, localised names with key fallback', function () {
+    var s = setup();
+    s.S.core.locale.res = function (key) { return key === 'Rifle' ? 'Riflemen' : null; };
+    assert.strictEqual(s.army.text({ Sabre: 3, Rifle: 12, Bow: 0 }), '12 Riflemen, 3 Sabre');
+});
+
+t.test('text: an empty or missing army reads as a dash', function () {
+    var s = setup();
+    assert.strictEqual(s.army.text({}), '—');
+    assert.strictEqual(s.army.text({ Rifle: 0 }), '—');
+    assert.strictEqual(s.army.text(null), '—');
+    assert.strictEqual(s.army.text(), '—');
+});
+
 // ---- classOf ----------------------------------------------------------------
 
 t.test('classOf: Empty for no troops', function () {

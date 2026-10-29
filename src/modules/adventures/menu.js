@@ -1,9 +1,11 @@
 /*
  * Adventures submenu of the native ~Steward~ menu.
  *
- * Layout: "Run templates…", a status line, "End repetition", "Clear run
- * request", then one entry per readable template labelled with the maps
- * available for its adventure. The list is flat instead of grouped by
+ * Layout: "Run templates…", the run status line, "Pause run", "Resume
+ * run", "End repetition", "Stop run", then one entry per readable template
+ * labelled with the maps available for its adventure. Choosing a template
+ * starts or requests a run of it. Every row only changes run state; the
+ * scheduler's plan() does the work. The list is flat instead of grouped by
  * adventure category: grouping needs the adventure definitions, which are
  * empty while the game is not loaded at menu build, so the groups would
  * change after load. Template labels are user-chosen and sorted, so a flat
@@ -54,6 +56,18 @@
         };
     }
 
+    // A row that calls one run command, looked up when chosen so a reloaded
+    // run.js is the one called.
+    function command(label, name) {
+        return {
+            label: label,
+            onSelect: function () {
+                var run = S.modules.adventures.run;
+                if (run) run[name]();
+            }
+        };
+    }
+
     function items() {
         var recs = records();
         lastSignature = signature(recs);
@@ -68,25 +82,15 @@
             { separator: true },
             {
                 label: function () {
-                    var run = S.modules.adventures.run;
-                    return run ? run.statusText(run.current()) : '';
+                    var state = S.modules.adventures.state;
+                    return state ? state.status() : '';
                 },
                 enabled: false
             },
-            {
-                label: 'End repetition',
-                onSelect: function () {
-                    var run = S.modules.adventures.run;
-                    if (run) run.endRepetition();
-                }
-            },
-            {
-                label: 'Clear run request',
-                onSelect: function () {
-                    var run = S.modules.adventures.run;
-                    if (run) run.clear();
-                }
-            },
+            command('Pause run', 'pause'),
+            command('Resume run', 'resume'),
+            command('End repetition', 'endRepetition'),
+            command('Stop run', 'stop'),
             { separator: true }
         ];
 

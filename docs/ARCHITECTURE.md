@@ -49,7 +49,7 @@ Steward
 │   ├── quests          ← quest pool and claim action
 │   └── resources       ← resource amount and free population reads
 ├── modules
-│   ├── adventures      ← run templates and run request (sends nothing)
+│   ├── adventures      ← run templates, run request and the wave executor
 │   └── <id>            ← exposed only if the module chooses to publish state
 └── (shared enums)
     ├── Priority

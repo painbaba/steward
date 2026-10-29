@@ -63,11 +63,11 @@ t.test('adventures registers with a function menu and no ui', function () {
 
 t.test('menu without templates lists the fixed rows and a placeholder', function () {
     var s = setup({ buffs: [] });
-    assert.deepStrictEqual(menuLabels(s), ['Run templates…', '---', 'No run requested',
-        'End repetition', 'Clear run request', '---', 'No templates yet']);
+    assert.deepStrictEqual(menuLabels(s), ['Run templates…', '---', 'No run requested', 'Pause run',
+        'Resume run', 'End repetition', 'Stop run', '---', 'No templates yet']);
     var items = s.H.module('adventures').menu.items();
     assert.strictEqual(items[2].enabled, false);
-    assert.strictEqual(items[6].enabled, false);
+    assert.strictEqual(items[8].enabled, false);
 });
 
 t.test('menu lists templates in label order with their map counts', function () {
@@ -78,7 +78,7 @@ t.test('menu lists templates in label order with their map counts', function () 
     s.tpl.save(record({}), 1000);
     s.tpl.save(record({ label: 'Alpha', adventure: 'Other' }), 2000);
     var labels = menuLabels(s);
-    assert.deepStrictEqual(labels.slice(6), ['Alpha ×0', 'Black Knights ×3']);
+    assert.deepStrictEqual(labels.slice(8), ['Alpha ×0', 'Black Knights ×3']);
 });
 
 t.test('boot seeds lastDir only and ignores an old stored default horseshoe', function () {
@@ -317,7 +317,7 @@ function runSetup(maps, extra) {
     var S = H.Steward;
     var id = S.modules.adventures.templates.save(record({}), 1000).id;
     var prompts = [];
-    var s = { H: H, S: S, id: id, alerts: alerts, prompts: prompts, confirms: [], run: S.modules.adventures.run };
+    var s = { fs: fs, H: H, S: S, id: id, alerts: alerts, prompts: prompts, confirms: [], run: S.modules.adventures.run };
     H.ctx.prompt = function (text, def) {
         prompts.push({ text: text, def: def });
         return s.answer === undefined ? def : s.answer;
@@ -436,25 +436,39 @@ t.test('endRepetition sets count 1 and ended; count 1 or no request alerts', fun
     assert.strictEqual(s.H.queued().length, 0);
 });
 
-t.test('clear removes the request; clearing again alerts', function () {
+t.test('stop removes the request and queued module entries; stopping again alerts', function () {
     var s = runSetup(5);
     s.answer = '2';
     s.run.start(s.id);
     s.alerts.length = 0;
-    assert.strictEqual(s.run.clear(), true);
+    assert.strictEqual(s.run.stop(), true);
     assert.strictEqual(s.run.current(), null);
-    assert.strictEqual(s.run.clear(), false);
+    assert.strictEqual(s.run.stop(), false);
     assert.strictEqual(s.alerts.length, 2);
     assert.strictEqual(s.H.queued().length, 0);
 });
 
-t.test('the request lives on the namespace, so a fresh read of run sees it', function () {
+t.test('the request lives on the namespace and in the run file', function () {
     var s = runSetup(5);
     s.answer = '2';
     s.run.start(s.id);
     assert.strictEqual(s.S.modules.adventures.runState.request.count, 2);
+    var files = Object.keys(s.fs.disk).filter(function (k) { return /run.json$/.test(k); });
+    assert.strictEqual(files.length, 1);
+    assert.strictEqual(JSON.parse(s.fs.disk[files[0]]).request.count, 2);
     s.S.modules.adventures.runState.request = null;
     assert.strictEqual(s.S.modules.adventures.run.current(), null);
+});
+
+t.test('start off the run island asks to view it and stores nothing', function () {
+    var s = runSetup(3);
+    s.S.core.adventures.zoneIdOf = function () { return 7; };
+    s.S.core.zone.id = function () { return 1; };
+    s.answer = '2';
+    assert.strictEqual(s.run.start(s.id), false);
+    assert.strictEqual(s.run.current(), null);
+    assert.strictEqual(s.alerts.length, 1);
+    assert.ok(/island, then choose the template again/.test(s.alerts[0]), s.alerts[0]);
 });
 
 // ---- menu sync ----------------------------------------------------------------------

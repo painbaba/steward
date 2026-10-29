@@ -1,0 +1,1000 @@
+'use strict';
+
+// Wave executor of the adventures module: run state file, executor steps,
+// attack pacer, quest watcher, start command and scheduler wiring. The game
+// is the army/actions stub host; a small "world" applies the effect of each
+// order the way the client would, and play() runs the queued entries in
+// order with a test clock that advances by each entry's delay.
+
+var t = require('../runner');
+var harness = require('../harness');
+var airfs = require('../stubs/airfs');
+var A = require('../stubs/army');
+var AC = require('../stubs/actions');
+
+var assert = t.assert;
+
+var ZONE = 7;
+var RUN_FILE = 'C:/client/steward/adventures/run.json';
+var LOADOUT = 'C:/b/loadout.txt';
+var ADVENTURE_MANAGER = 'com.bluebyte.tso.adventure.logic::AdventureManager';
+
+function plain(v) { return JSON.parse(JSON.stringify(v)); }
+
+function keyOf(spec) { return spec.GetUniqueID().toKeyString(); }
+
+function writeJson(fs, path, data) { fs.disk[path] = JSON.stringify(data); }
+
+// ---- world ----------------------------------------------------------------
+
+// The world's view of the core library: camps, camp buffs and quests. Core
+// functions live in the bundle, so a script reload needs this applied again.
+function patchCore(w) {
+    var S = w.S;
+    S.core.buildings.byGrid = function (grid) {
+        if (!w.camps[grid]) return null;
+        return { grid: grid, GetStreetGridEntry: function () { return grid + 1000; } };
+    };
+    S.core.buildings.isEnemy = function (b) { return !!b && w.camps[b.grid] === true; };
+
+    S.core.buffs.camp = function (name, grid) {
+        var done = false;
+        return {
+            label: 'buff ' + name + ' -> ' + grid,
+            timeoutMs: 15000,
+            send: function () { w.buffs.push({ name: name, grid: grid, t: w.t }); done = true; return true; },
+            check: function () { return done; }
+        };
+    };
+
+    S.core.quests.finished = function () {
+        if (w.quests === null) return null;
+        return w.quests.filter(function (q) { return q.finished; });
+    };
+    S.core.quests.claim = function (key, opts) {
+        w.claims.push({ key: key, opts: opts });
+        return {
+            label: 'claim quest ' + key,
+            timeoutMs: 15000,
+            send: function () {
+                w.quests = w.quests.filter(function (q) { return q.key !== key; });
+                return true;
+            },
+            check: function () { return true; }
+        };
+    };
+}
+
+// o.generals: AC.general list (the zone's specialist list, mutable through
+// w.fighters); o.free: free pool map; o.camps: grid -> true (enemy) or 'own';
+// o.quests: [{ key, name, finished, last }] or null (unreadable);
+// o.fs: an airfs disk to boot on (fresh boot on the same disk).
+function world(o) {
+    o = o || {};
+    var fs = o.fs || airfs.make();
+    var alerts = [];
+    var H = harness.boot({ host: { air: fs.air, showGameAlert: function (m) { alerts.push(m); } } });
+    var S = H.Steward;
+    var fighters = (o.generals || []).slice(0);
+    A.install(H, { fighters: fighters, units: A.unitCatalogue([], ['Rifle', 'Bow']) });
+    var sent = AC.wire(H);
+    var gi = H.host.game.gi;
+
+    var w = {
+        fs: fs, H: H, S: S, sent: sent, alerts: alerts, fighters: fighters,
+        t: 1000000,
+        free: o.free || { Rifle: 100, Bow: 100 },
+        camps: o.camps || { 100: true, 200: true, 300: true },
+        quests: o.quests === undefined ? [] : o.quests,
+        auto: { move: true, attack: true, star: true, raise: true, unload: true },
+        orders: [], raises: [], unloads: [], buffs: [], claims: [],
+        pending: [], entries: [],
+        adventures: [{ adventureName: 'BlackKnights', zoneID: ZONE }]
+    };
+    w.st = S.modules.adventures.state;
+    w.ex = S.modules.adventures.executor;
+    w.mod = H.module('adventures');
+
+    w.st.now = function () { return w.t; };
+    gi.mCurrentViewedZoneID = ZONE;
+    H.host.game.zone.GetArmy = function () { return A.armyOf(w.free); };
+
+    w.byKey = function (key) {
+        for (var i = 0; i < fighters.length; i++) if (keyOf(fighters[i]) === key) return fighters[i];
+        return null;
+    };
+
+    // Order codes come from the orders table, so the test follows it.
+    var RAW = S.core.specialists.orders.RAW_CODES;
+    w.code = { move: RAW[S.GeneralTask.Move], attack: RAW[S.GeneralTask.Attack], star: RAW[S.GeneralTask.ToStar] };
+    var sendAction = gi.SendServerAction;
+    gi.SendServerAction = function (id, p1, p2, p3, data) {
+        sendAction.apply(this, arguments);
+        var key = data && data.uniqueID ? data.uniqueID.toKeyString() : null;
+        w.orders.push({ key: key, code: p1, grid: p2, t: w.t });
+        var g = w.byKey(key);
+        if (!g) return;
+        if (p1 === w.code.move && w.auto.move) g.state.grid = p2;
+        if (p1 === w.code.attack && w.auto.attack) g.state.task = { type: w.code.attack };
+        if (p1 === w.code.star && w.auto.star) fighters.splice(fighters.indexOf(g), 1);
+    };
+
+    // Raise: message 1031 with the full target composition.
+    var sendMessage = gi.mClientMessages.SendMessagetoServer;
+    gi.mClientMessages.SendMessagetoServer = function (id, zone, data) {
+        sendMessage.apply(this, arguments);
+        if (id !== 1031) return;
+        var key = data.armyHolderSpecialistVO.uid;
+        w.raises.push(key);
+        var g = w.byKey(key);
+        if (!g || !w.auto.raise) return;
+        var want = {};
+        data.unitSquads.items.forEach(function (r) { want[r.name_string] = r.amount; });
+        Object.keys(want).forEach(function (u) {
+            var draw = want[u] - (g.state.army[u] || 0);
+            if (draw > 0) w.free[u] = (w.free[u] || 0) - draw;
+        });
+        g.state.army = want;
+    };
+
+    sent.registerDef('MilitarySystem::cMilitaryUtil', {
+        SendRaiseArmyToServer: function (host, spec) {
+            w.unloads.push(keyOf(spec));
+            if (!w.auto.unload) return;
+            Object.keys(spec.state.army).forEach(function (u) {
+                w.free[u] = (w.free[u] || 0) + spec.state.army[u];
+            });
+            spec.state.army = {};
+        }
+    });
+
+    sent.registerDef(ADVENTURE_MANAGER, {
+        getInstance: function () {
+            return {
+                getAdventures: function () { return w.adventures; },
+                isMyAdventure: function () { return true; }
+            };
+        }
+    });
+
+    patchCore(w);
+
+    return w;
+}
+
+// Moves the captured queue into w.pending, keeping FIFO order.
+function drain(w) {
+    w.pending = w.pending.concat(w.H.queued());
+    w.H.clearQueued();
+}
+
+// One scheduler tick: plan() only when isReady, tagged with the module as
+// the scheduler does.
+function tick(w) {
+    if (!w.mod.isReady({ zone: { id: w.S.core.zone.id() } })) return false;
+    w.S.kernel._currentModule = 'adventures';
+    try { w.mod.plan({}); }
+    finally { w.S.kernel._currentModule = null; }
+    drain(w);
+    return true;
+}
+
+// Runs queued entries one by one (core.attempt through actions.step, the
+// pacer through executor.pace) until none is left or until() holds. Each
+// entry advances the clock by its delay and runs under its own module tag,
+// so a re-enqueue inherits it as in the kernel queue.
+function play(w, until) {
+    drain(w);
+    for (var n = 0; n < 2000 && w.pending.length; n++) {
+        var e = w.pending.shift();
+        w.entries.push(e);
+        w.t += e.delay || 0;
+        w.S.kernel._currentModule = e.moduleId;
+        try {
+            if (e.name === 'core.attempt') w.S.core.actions.step(e.params);
+            else if (e.name === w.ex.PACE_ACTION) w.ex.pace(e.params);
+        } finally {
+            w.S.kernel._currentModule = null;
+        }
+        drain(w);
+        if (until && until()) return n + 1;
+    }
+    return n;
+}
+
+// Ticks and plays until the run is no longer Running or `max` ticks passed.
+function runOut(w, max) {
+    for (var i = 0; i < (max || 40); i++) {
+        var r = w.st.run();
+        if (!r || r.status !== w.S.RunStatus.Running) return;
+        tick(w);
+        play(w);
+    }
+}
+
+// A run at `step` of wave index `waveIndex` over the given wave files.
+function startRun(w, paths, over) {
+    over = over || {};
+    var S = w.S;
+    var keys = {};
+    w.fighters.forEach(function (g) { keys[keyOf(g)] = true; });
+    var r = w.st.newRun({
+        id: 42, templateId: 't1', label: 'Black Knights', adventure: 'BlackKnights', zoneId: ZONE,
+        paths: paths, loadoutPath: LOADOUT, loadoutKeys: over.loadoutKeys || keys,
+        waveIndex: over.waveIndex || 0
+    });
+    if (over.step) r.step = over.step;
+    w.st.begin({ templateId: 't1', label: 'Black Knights', adventure: 'BlackKnights', count: 1, ended: false, requested: w.t }, r);
+    return w.st.run();
+}
+
+function stepName(w) { return w.st.nameOf(w.S.WaveStep, w.st.run().step); }
+
+function attacksOf(w, key) {
+    return w.orders.filter(function (o) { return o.code === w.code.attack && (!key || o.key === key); });
+}
+
+// Two attack lines (the second 5 s after the first), a buff 2 s after that.
+function attackWorld(o) {
+    o = o || {};
+    var g1 = AC.general({ uid: '1.1', name: 'Anna', grid: 10, army: { Rifle: 5 } });
+    var g2 = AC.general({ uid: '1.2', name: 'Bert', grid: 20, army: { Rifle: 3 } });
+    var w = world({ generals: [g1, g2].concat(o.extra || []) });
+    var wave = {
+        '1.1': { grid: 10, target: 100, army: { Rifle: 5 }, order: 1, name: 'Anna' },
+        '1.2': { grid: 20, target: 200, army: { Rifle: 3 }, order: 2, time: 5000, name: 'Bert' },
+        buff_fire: { type: 'buff', name: 'Fire', target: 300, order: 3, time: 2000 }
+    };
+    writeJson(w.fs, 'C:/b/w1.txt', wave);
+    writeJson(w.fs, 'C:/b/w2.txt', wave);
+    w.g1 = g1;
+    w.g2 = g2;
+    return w;
+}
+
+// ---- state ------------------------------------------------------------------
+
+t.test('state: a run round-trips through a fresh boot on the same disk', function () {
+    var w = attackWorld();
+    var r = startRun(w, ['C:/b/w1.txt', 'C:/b/w2.txt'], { waveIndex: 1, step: w.S.WaveStep.Load });
+    r.lines['1.1'] = { sentAt: 5, seen: true, sentOnce: true };
+    w.st.save();
+    var before = plain(r);
+
+    var w2 = world({ fs: w.fs });
+    assert.strictEqual(w2.st.run(), null);
+    w2.mod.boot();
+    assert.deepStrictEqual(plain(w2.st.run()), before);
+    assert.strictEqual(w2.st.current().request.label, 'Black Knights');
+    assert.strictEqual(w2.st.current().loaded, true);
+});
+
+t.test('state: clear() writes run null and request null with no stale keys', function () {
+    var w = attackWorld();
+    startRun(w, ['C:/b/w1.txt']);
+    w.st.clear();
+    var data = JSON.parse(w.fs.disk[RUN_FILE]);
+    assert.deepStrictEqual(Object.keys(data).sort(), ['request', 'run', 'version']);
+    assert.strictEqual(data.run, null);
+    assert.strictEqual(data.request, null);
+    assert.strictEqual(data.version, w.st.FILE_VERSION);
+});
+
+t.test('state: an unknown step loads as Gate', function () {
+    var w = attackWorld();
+    var r = startRun(w, ['C:/b/w1.txt']);
+    r.step = 'WaveBogus';
+    w.st.save();
+    var w2 = world({ fs: w.fs });
+    w2.st.load();
+    assert.strictEqual(w2.st.run().step, w2.S.WaveStep.Gate);
+    assert.strictEqual(w2.st.run().status, w2.S.RunStatus.Running);
+});
+
+t.test('state: status text for Running, Paused and Done', function () {
+    var w = attackWorld();
+    startRun(w, ['C:/b/w1.txt', 'C:/b/w2.txt'], { step: w.S.WaveStep.Supply });
+    assert.strictEqual(w.st.status(), 'Running: Black Knights, wave 1/2, Supply');
+    w.st.pause(w.S.RunPause.User, 'paused by you');
+    assert.strictEqual(w.st.status(), 'Paused: Black Knights, wave 1/2, Supply: paused by you');
+    w.st.done();
+    assert.strictEqual(w.st.status(), 'Waves done: Black Knights (2 waves)');
+    w.st.clear();
+    assert.strictEqual(w.st.status(), 'No run requested');
+});
+
+t.test('state: a run file without loadoutKeys loads Paused WaveFile', function () {
+    var w = attackWorld();
+    var r = startRun(w, ['C:/b/w1.txt']);
+    delete r.loadoutKeys;
+    w.st.save();
+    var w2 = world({ fs: w.fs });
+    w2.st.load();
+    var r2 = w2.st.run();
+    assert.strictEqual(r2.status, w2.S.RunStatus.Paused);
+    assert.strictEqual(r2.pause.reason, w2.S.RunPause.WaveFile);
+    assert.ok(/no loadout keys/.test(r2.pause.message), r2.pause.message);
+});
+
+t.test('state: loadoutKeys survive a restart; a wave key outside them then pauses WaveFile', function () {
+    var w = attackWorld();
+    var keys = { '1.1': true, '1.2': true };
+    startRun(w, ['C:/b/w1.txt', 'C:/b/w3.txt'], { loadoutKeys: keys });
+    writeJson(w.fs, 'C:/b/w3.txt', { '1.9': { grid: 10, target: 100, army: { Rifle: 1 }, order: 1 } });
+
+    var w2 = world({ fs: w.fs, generals: [w.g1, w.g2] });
+    w2.mod.boot();
+    assert.deepStrictEqual(plain(w2.st.run().loadoutKeys), keys);
+    w2.st.run().waveIndex = 1;
+    tick(w2);
+    var r = w2.st.run();
+    assert.strictEqual(r.status, w2.S.RunStatus.Paused);
+    assert.strictEqual(r.pause.reason, w2.S.RunPause.WaveFile);
+    assert.ok(/1\.9/.test(r.pause.message) && /not in the loadout/.test(r.pause.message), r.pause.message);
+});
+
+t.test('state: an existing { request: null } runState gains run: null', function () {
+    var w = attackWorld();
+    w.S.modules.adventures.runState = { request: null };
+    var H2 = harness.reload(w.H);
+    var rs = H2.Steward.modules.adventures.runState;
+    assert.ok(Object.prototype.hasOwnProperty.call(rs, 'run'));
+    assert.strictEqual(rs.run, null);
+    assert.strictEqual(rs.request, null);
+});
+
+t.test('state: every newRun field survives a fresh boot', function () {
+    var w = attackWorld();
+    var r = startRun(w, ['C:/b/w1.txt', 'C:/b/w2.txt'], { waveIndex: 1 });
+    var w2 = world({ fs: w.fs });
+    w2.mod.boot();
+    var loaded = w2.st.run();
+    assert.deepStrictEqual(Object.keys(loaded).sort(), Object.keys(w2.st.newRun()).sort());
+    assert.deepStrictEqual(plain(loaded), plain(r));
+    assert.strictEqual(loaded.templateId, 't1');
+    assert.strictEqual(loaded.loadoutPath, LOADOUT);
+    assert.deepStrictEqual(plain(loaded.paths), ['C:/b/w1.txt', 'C:/b/w2.txt']);
+    assert.strictEqual(loaded.waveIndex, 1);
+});
+
+// ---- Gate -------------------------------------------------------------------
+
+t.test('Gate: a missing field general waits, then pauses GeneralMissing', function () {
+    var w = attackWorld();
+    w.fighters.splice(1, 1);                       // 1.2 not on the island
+    startRun(w, ['C:/b/w1.txt'], { loadoutKeys: { '1.1': true, '1.2': true } });
+    tick(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    assert.strictEqual(stepName(w), 'Gate');
+    w.t += w.ex.GATE_MISSING_MS - 1;
+    tick(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    w.t += 2;
+    tick(w);
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Paused);
+    assert.strictEqual(r.pause.reason, w.S.RunPause.GeneralMissing);
+    assert.ok(/1\.2/.test(r.pause.general), r.pause.general);
+    assert.strictEqual(r.pause.target, 200);
+    assert.strictEqual(w.orders.length, 0);
+});
+
+t.test('Gate: a Star line whose general is absent does not block Gate', function () {
+    var w = attackWorld();
+    writeJson(w.fs, 'C:/b/s1.txt', {
+        '1.1': { grid: 10, target: 100, army: { Rifle: 5 }, order: 1 },
+        '1.3': { grid: 0, army: {}, order: 2 }
+    });
+    startRun(w, ['C:/b/s1.txt'], { loadoutKeys: { '1.1': true, '1.3': true } });
+    tick(w);
+    assert.strictEqual(stepName(w), 'Position');
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+});
+
+// ---- Position ---------------------------------------------------------------
+
+t.test('Position: only off-grid field lines get a move', function () {
+    var w = attackWorld();
+    w.g2.state.grid = 55;
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    tick(w);
+    play(w);
+    var moves = w.orders.filter(function (o) { return o.code === w.code.move; });
+    assert.deepStrictEqual(moves.map(function (o) { return [o.key, o.grid]; }), [['1.2', 20]]);
+    tick(w);
+    assert.strictEqual(stepName(w), 'Supply');
+});
+
+t.test('Position: not placeable goes to Settle without a send, settled twice pauses NotPlaceable', function () {
+    var w = attackWorld();
+    w.g2.state.grid = 55;
+    w.sent.placeable = 3;
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    tick(w);
+    var r = w.st.run();
+    assert.strictEqual(stepName(w), 'Settle');
+    assert.strictEqual(r.settleFrom, w.S.WaveStep.Position);
+    assert.strictEqual(r.blocker.key, '1.2');
+    assert.strictEqual(w.H.queued().length + w.pending.length, 0);
+    tick(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    assert.strictEqual(w.st.run().settled, 1);
+    tick(w);
+    r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Paused);
+    assert.strictEqual(r.pause.reason, w.S.RunPause.NotPlaceable);
+    assert.strictEqual(r.pause.target, 20);
+    assert.strictEqual(w.orders.length, 0);
+});
+
+t.test('Position: a star general that leaves the list is done; Resume passes Gate and Position without a send', function () {
+    var w = attackWorld();
+    var g3 = AC.general({ uid: '1.3', name: 'Cleo', grid: 30 });
+    w.fighters.push(g3);
+    writeJson(w.fs, 'C:/b/s1.txt', {
+        '1.1': { grid: 10, target: 100, army: { Rifle: 5 }, order: 1 },
+        '1.3': { grid: 0, army: {}, order: 2 }
+    });
+    startRun(w, ['C:/b/s1.txt'], { step: w.S.WaveStep.Position });
+    tick(w);
+    play(w);
+    var stars = w.orders.filter(function (o) { return o.code === w.code.star; });
+    assert.deepStrictEqual(stars.map(function (o) { return o.key; }), ['1.3']);
+    assert.strictEqual(w.byKey('1.3'), null);
+    tick(w);
+    assert.strictEqual(stepName(w), 'Supply');
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+
+    w.S.modules.adventures.run.pause();
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Paused);
+    w.S.modules.adventures.run.resume();
+    assert.strictEqual(stepName(w), 'Gate');
+    var sends = w.orders.length;
+    tick(w);
+    play(w);
+    assert.strictEqual(stepName(w), 'Position');
+    tick(w);
+    play(w);
+    assert.strictEqual(stepName(w), 'Supply');
+    assert.strictEqual(w.orders.length, sends);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+});
+
+// ---- Supply / Load ----------------------------------------------------------
+
+t.test('Supply/Load: covered raises once per differing line and none for a matching one', function () {
+    var w = attackWorld();
+    w.g2.state.army = { Rifle: 1 };
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Supply });
+    tick(w);
+    assert.strictEqual(stepName(w), 'Load');
+    tick(w);
+    assert.strictEqual(stepName(w), 'Verify');
+    play(w);
+    assert.deepStrictEqual(w.raises, ['1.2']);
+    assert.deepStrictEqual(plain(w.g2.state.army), { Rifle: 3 });
+    tick(w);
+    assert.strictEqual(stepName(w), 'Reach');
+    assert.strictEqual(w.unloads.length, 0);
+});
+
+t.test('Supply: short with an idle donor outside the wave unloads only that donor, then Load', function () {
+    var donor = AC.general({ uid: '1.4', name: 'Dora', grid: 40, army: { Rifle: 6 } });
+    var useless = AC.general({ uid: '1.5', name: 'Emil', grid: 50, army: { Bow: 9 } });
+    var w = attackWorld({ extra: [donor, useless] });
+    w.free = {};
+    w.g2.state.army = {};
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Supply });
+    tick(w);
+    assert.strictEqual(stepName(w), 'Unload');
+    assert.deepStrictEqual(plain(w.st.run().donors), ['1.4']);
+    tick(w);
+    play(w);
+    assert.deepStrictEqual(w.unloads, ['1.4']);
+    tick(w);
+    assert.strictEqual(stepName(w), 'Supply');
+    tick(w);
+    assert.strictEqual(stepName(w), 'Load');
+    assert.deepStrictEqual(w.unloads, ['1.4']);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+});
+
+t.test('Supply: short on the whole island pauses TroopsShort listing units, with no send', function () {
+    var w = attackWorld();
+    w.free = { Rifle: 1 };
+    w.g2.state.army = {};
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Supply });
+    tick(w);
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Paused);
+    assert.strictEqual(r.pause.reason, w.S.RunPause.TroopsShort);
+    assert.ok(r.pause.message.indexOf(w.S.core.army.text({ Rifle: 2 })) >= 0, r.pause.message);
+    assert.strictEqual(w.raises.length + w.unloads.length + w.orders.length, 0);
+    assert.strictEqual(w.pending.length, 0);
+});
+
+t.test('Verify: a mismatch twice pauses LoadMismatch', function () {
+    var w = attackWorld();
+    w.auto.raise = false;
+    w.g2.state.army = { Rifle: 1 };
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Load });
+    tick(w);
+    play(w);
+    tick(w);
+    assert.strictEqual(stepName(w), 'Load');
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    tick(w);
+    play(w);
+    tick(w);
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Paused);
+    assert.strictEqual(r.pause.reason, w.S.RunPause.LoadMismatch);
+    assert.ok(/1\.2/.test(r.pause.message), r.pause.message);
+    // Two rounds of one raise, each sent at most twice by the attempt runner.
+    assert.ok(w.raises.length >= 2 && w.raises.length <= 4, String(w.raises.length));
+});
+
+// ---- Reach / Settle ---------------------------------------------------------
+
+t.test('Settle: unreachable while a fighter attacks stays in Settle', function () {
+    var fighting = AC.general({ uid: '1.6', grid: 60 });
+    var w = attackWorld({ extra: [fighting] });
+    fighting.state.task = { type: w.code.attack };
+    w.sent.pathLen = 0;
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Reach });
+    tick(w);
+    assert.strictEqual(stepName(w), 'Settle');
+    for (var i = 0; i < 5; i++) tick(w);
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Running);
+    assert.strictEqual(stepName(w), 'Settle');
+    assert.strictEqual(r.settled, 0);
+    assert.strictEqual(r.settleFrom, w.S.WaveStep.Reach);
+});
+
+t.test('watcher: a finished non-last quest is claimed, the last never', function () {
+    var w = attackWorld();
+    w.sent.pathLen = 0;
+    w.quests = [
+        { key: 'q1', name: 'Scout', finished: true, last: false },
+        { key: 'q9', name: 'Final', finished: true, last: true },
+        { key: 'q2', name: 'Open', finished: false, last: false }
+    ];
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Reach });
+    for (var i = 0; i < 4; i++) { tick(w); play(w); }
+    assert.deepStrictEqual(w.claims.map(function (c) { return c.key; }), ['q1']);
+    assert.ok(!w.claims[0].opts || !w.claims[0].opts.allowLast);
+    assert.ok(w.H.logs().some(function (l) { return /quest Scout claimed/.test(l.args.join(' ')); }));
+});
+
+t.test('Settle: a path that appears goes back to Reach and on to Attack', function () {
+    var fighting = AC.general({ uid: '1.6', grid: 60 });
+    var w = attackWorld({ extra: [fighting] });
+    fighting.state.task = { type: w.code.attack };
+    w.sent.pathLen = 0;
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Reach });
+    tick(w);
+    tick(w);
+    assert.strictEqual(stepName(w), 'Settle');
+    w.sent.pathLen = 1;
+    tick(w);
+    assert.strictEqual(stepName(w), 'Reach');
+    assert.strictEqual(w.st.run().blocker, null);
+    tick(w);
+    assert.strictEqual(stepName(w), 'Attack');
+});
+
+t.test('Settle: still unreachable once settled pauses Unreachable naming line, general and target', function () {
+    var w = attackWorld();
+    w.sent.pathLen = 0;
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Reach });
+    tick(w);
+    tick(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    tick(w);
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Paused);
+    assert.strictEqual(r.pause.reason, w.S.RunPause.Unreachable);
+    assert.ok(/Anna/.test(r.pause.general) && /1\.1/.test(r.pause.general), r.pause.general);
+    assert.strictEqual(r.pause.target, 100);
+    assert.ok(/no path/.test(r.pause.message), r.pause.message);
+    assert.strictEqual(w.orders.length, 0);
+});
+
+// ---- Attack -----------------------------------------------------------------
+
+t.test('Attack: lines go out in parsed order, each gap at least its time, buff to its camp, tagged entries', function () {
+    var w = attackWorld();
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Attack });
+    var t0 = w.t;
+    tick(w);
+    assert.strictEqual(w.pending.length, 1);
+    assert.strictEqual(w.pending[0].name, w.ex.PACE_ACTION);
+    play(w);
+    var sends = attacksOf(w).map(function (o) { return { key: o.key, t: o.t, grid: o.grid }; });
+    assert.deepStrictEqual(sends.map(function (s) { return s.key; }), ['1.1', '1.2']);
+    assert.deepStrictEqual(sends.map(function (s) { return s.grid; }), [100, 200]);
+    assert.strictEqual(w.buffs.length, 1);
+    assert.strictEqual(w.buffs[0].grid, 300);
+    assert.strictEqual(w.buffs[0].name, 'Fire');
+    var r = w.st.run();
+    assert.strictEqual(r.lines['1.1'].sentAt, sends[0].t);
+    // At once: one pacer gap plus the attempt runner's step before the send.
+    assert.ok(sends[0].t - t0 <= w.ex.PACE_MS + w.S.kernel.TIMEOUTS.QUEUE_ACTION_GAP_MS, 'first line at once');
+    assert.ok(sends[1].t >= r.lines['1.1'].sentAt + 5000, 'second gap');
+    assert.ok(w.buffs[0].t >= r.lines['1.2'].sentAt + 2000, 'buff gap');
+    assert.ok(w.buffs[0].t > sends[1].t);
+    var paces = w.entries.filter(function (e) { return e.name === w.ex.PACE_ACTION; });
+    assert.ok(paces.length > 3, 'pacer re-enqueued itself');
+    w.entries.forEach(function (e) { assert.strictEqual(e.moduleId, 'adventures', e.name); });
+    tick(w);
+    assert.strictEqual(stepName(w), 'Confirm');
+    tick(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done);
+});
+
+t.test('Attack: line 1 seen early still holds line 2 until line1.sentAt + time', function () {
+    var w = attackWorld();
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Attack });
+    tick(w);
+    var seenAt = null;
+    play(w, function () {
+        if (seenAt === null && w.st.run().lines['1.1'] && w.st.run().lines['1.1'].seen) seenAt = w.t;
+        return attacksOf(w, '1.2').length > 0;
+    });
+    var r = w.st.run();
+    assert.ok(seenAt !== null && seenAt < r.lines['1.1'].sentAt + 5000, 'line 1 verified inside the gap');
+    assert.ok(attacksOf(w, '1.2')[0].t >= r.lines['1.1'].sentAt + 5000);
+});
+
+t.test('Attack: a pacer run while line 2 is in flight starts no second attempt', function () {
+    var w = attackWorld();
+    var r = startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Attack });
+    tick(w);
+    // Stop as soon as line 2's attempt is queued but has not run.
+    play(w, function () {
+        return w.pending.some(function (e) {
+            return e.name === 'core.attempt' && /1\.2/.test(e.params[0].def.label) && e.params[0].sends === 0;
+        });
+    });
+    var attempts = function () {
+        return w.pending.filter(function (e) { return e.name === 'core.attempt'; }).length;
+    };
+    var before = attempts();
+    w.S.kernel._currentModule = 'adventures';
+    w.ex.pace([r.id, r.waveIndex]);
+    w.S.kernel._currentModule = null;
+    drain(w);
+    assert.strictEqual(attempts(), before);
+    play(w);
+    assert.strictEqual(attacksOf(w, '1.2').length, 1);
+});
+
+// ---- Confirm ----------------------------------------------------------------
+
+t.test('Confirm: every line seen moves to Gate of the next wave; the last wave ends Done', function () {
+    var w = attackWorld();
+    startRun(w, ['C:/b/w1.txt', 'C:/b/w2.txt'], { step: w.S.WaveStep.Attack });
+    tick(w);
+    play(w);
+    tick(w);
+    assert.strictEqual(stepName(w), 'Confirm');
+    tick(w);
+    var r = w.st.run();
+    assert.strictEqual(r.waveIndex, 1);
+    assert.strictEqual(stepName(w), 'Gate');
+    assert.deepStrictEqual(plain(r.lines), {});
+    // The first battles are over: both generals are idle for wave 2.
+    w.g1.state.task = null;
+    w.g2.state.task = null;
+    runOut(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done);
+    assert.strictEqual(attacksOf(w).length, 4);
+});
+
+t.test('Confirm: an attack not observed pauses AttackNotSeen; Resume re-enters Gate without resending seen lines', function () {
+    var w = attackWorld();
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Attack });
+    // Line 2's attack is never observed.
+    var orig = w.S.core.specialists.orders.attack;
+    w.S.core.specialists.orders.attack = function (key, target, grid) {
+        w.auto.attack = key !== '1.2';
+        return orig(key, target, grid);
+    };
+    tick(w);
+    play(w);
+    tick(w);
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Paused);
+    assert.strictEqual(r.pause.reason, w.S.RunPause.AttackNotSeen);
+    assert.ok(/1\.2/.test(r.pause.general), r.pause.general);
+    assert.strictEqual(r.pause.target, 200);
+    assert.strictEqual(r.lines['1.1'].seen, true);
+
+    w.S.core.specialists.orders.attack = orig;
+    w.auto.attack = true;
+    w.S.modules.adventures.run.resume();
+    assert.strictEqual(stepName(w), 'Gate');
+    assert.strictEqual(w.st.run().lines['1.2'].sentAt, null);
+    runOut(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done);
+    assert.strictEqual(attacksOf(w, '1.1').length, 1);
+    assert.ok(attacksOf(w, '1.2').length >= 2);
+});
+
+// ---- Reload -----------------------------------------------------------------
+
+// A script reload: the same files run again into the same context. The
+// module namespace (run state, memory-only round) survives, the queue does
+// not, and the test's handles are re-pointed at the new bundle.
+function reloadBundle(w) {
+    w.H = harness.reload(w.H);
+    w.H.clearQueued();
+    w.pending = [];
+    w.S = w.H.Steward;
+    w.st = w.S.modules.adventures.state;
+    w.ex = w.S.modules.adventures.executor;
+    w.mod = w.H.module('adventures');
+    w.st.now = function () { return w.t; };
+    patchCore(w);
+}
+
+// Plays the attack until line 1 went out, then reloads the script and leaves
+// dropping the round to the bundle load.
+function reloadAfterLine1(w) {
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Attack });
+    tick(w);
+    play(w, function () { return attacksOf(w, '1.1').length === 1; });
+    reloadBundle(w);
+    assert.strictEqual(w.st.current().round, null);
+    assert.ok(w.st.run().lines['1.1'].sentAt !== null);
+    assert.strictEqual(w.st.run().lines['1.1'].seen, false);
+}
+
+t.test('Reload: a line with sentAt is never resent; attacking now counts as seen', function () {
+    var w = attackWorld();
+    reloadAfterLine1(w);
+    tick(w);
+    assert.strictEqual(w.st.run().lines['1.1'].seen, true);
+    runOut(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done);
+    assert.strictEqual(attacksOf(w, '1.1').length, 1);
+    assert.strictEqual(attacksOf(w, '1.2').length, 1);
+});
+
+t.test('Reload: idle with the camp still there pauses AttackUnconfirmed', function () {
+    var w = attackWorld();
+    w.auto.attack = false;
+    reloadAfterLine1(w);
+    tick(w);
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Paused);
+    assert.strictEqual(r.pause.reason, w.S.RunPause.AttackUnconfirmed);
+    assert.strictEqual(r.pause.target, 100);
+    assert.strictEqual(attacksOf(w).length, 1);
+    assert.strictEqual(w.pending.length, 0);
+});
+
+t.test('Reload: idle with the camp gone counts as seen with a warning', function () {
+    var w = attackWorld();
+    w.auto.attack = false;
+    reloadAfterLine1(w);
+    delete w.camps[100];
+    tick(w);
+    assert.strictEqual(w.st.run().lines['1.1'].seen, true);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    assert.ok(w.H.logs().some(function (l) { return l.level === 'warn' && /gone after a send before reload/.test(l.args.join(' ')); }));
+    assert.strictEqual(attacksOf(w, '1.1').length, 1);
+});
+
+// Plays until line 2's attempt is queued but has not run (no send marker yet).
+function playToLine2InFlight(w) {
+    play(w, function () {
+        return w.pending.some(function (e) {
+            return e.name === 'core.attempt' && /1\.2/.test(e.params[0].def.label) && e.params[0].sends === 0;
+        });
+    });
+}
+
+t.test('Reload: with line 2 in flight the pacer does not stall and line 2 goes out once', function () {
+    var w = attackWorld();
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Attack });
+    tick(w);
+    playToLine2InFlight(w);
+    assert.ok(w.st.current().round, 'a round exists');
+    reloadBundle(w);
+    assert.strictEqual(w.st.current().round, null);
+    runOut(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done);
+    assert.strictEqual(attacksOf(w, '1.1').length, 1);
+    assert.strictEqual(attacksOf(w, '1.2').length, 1);
+});
+
+// The kernel drops queue entries without any adventures code running: Steward
+// Pause empties the whole queue (queue.reset), turning the module off removes
+// only its own entries (queue.cancelByModule). The kernel queue is stubbed to
+// capture entries, so both are applied to the captured and pending entries.
+function kernelReset(w) {
+    w.H.clearQueued();
+    w.pending = [];
+}
+
+function kernelCancelByModule(w, moduleId) {
+    drain(w);
+    w.pending = w.pending.filter(function (e) { return e.moduleId !== moduleId; });
+}
+
+// Line 2's attempt is dropped by the kernel; no reload and no dropRound run,
+// so the executor itself must notice the orphaned round.
+function assertOrphanedRoundRecovers(w) {
+    var before = w.entries.length;
+    runOut(w, 20);
+    var paces = w.entries.slice(before).filter(function (e) { return e.name === w.ex.PACE_ACTION; }).length;
+    assert.ok(paces < 100, 'pacer entries after the drop: ' + paces);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done, 'step ' + stepName(w));
+    assert.strictEqual(attacksOf(w, '1.1').length, 1);
+    assert.strictEqual(attacksOf(w, '1.2').length, 1);
+}
+
+t.test('Kernel pause: a queue reset with line 2 in flight does not stall; each line goes out once', function () {
+    var w = attackWorld();
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Attack });
+    tick(w);
+    playToLine2InFlight(w);
+    assert.ok(w.st.current().round, 'a round exists');
+    kernelReset(w);
+    assert.ok(w.st.current().round, 'the kernel leaves the round in place');
+    assertOrphanedRoundRecovers(w);
+});
+
+t.test('Module disable: cancelling the module queue with line 2 in flight does not stall; each line goes out once', function () {
+    var w = attackWorld();
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Attack });
+    tick(w);
+    playToLine2InFlight(w);
+    assert.ok(w.st.current().round, 'a round exists');
+    kernelCancelByModule(w, 'adventures');
+    assert.strictEqual(w.pending.length, 0, 'every pending entry belongs to the module');
+    assert.ok(w.st.current().round, 'the kernel leaves the round in place');
+    assertOrphanedRoundRecovers(w);
+});
+
+t.test('Replace: an aborted replace drops the round; the old run still sends the in-flight line once', function () {
+    var w = startWorld();
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Attack });
+    tick(w);
+    playToLine2InFlight(w);
+    assert.ok(w.st.current().round, 'a round exists');
+    // The user agrees to replace, then cancels the count prompt.
+    w.H.ctx.confirm = function () { return true; };
+    w.H.ctx.prompt = function () { return null; };
+    assert.strictEqual(w.S.modules.adventures.run.start(w.tplId), false);
+    assert.strictEqual(w.st.current().round, null);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    runOut(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done);
+    assert.strictEqual(attacksOf(w, '1.1').length, 1);
+    assert.strictEqual(attacksOf(w, '1.2').length, 1);
+});
+
+t.test('Resume: a pause after a sent and won attack resumes without an Unreachable pause', function () {
+    var w = attackWorld();
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Attack });
+    tick(w);
+    play(w, function () { return attacksOf(w, '1.1').length === 1; });
+    // The camp fell to that attack; the user pauses before it was confirmed.
+    delete w.camps[100];
+    w.g1.state.task = null;
+    w.st.pause(w.S.RunPause.User, 'paused by you');
+    assert.strictEqual(w.S.modules.adventures.run.resume(), true);
+    assert.strictEqual(w.st.run().lines['1.1'].sentAt, null);
+    assert.strictEqual(w.st.run().lines['1.1'].sentOnce, true);
+    runOut(w);
+    var r = w.st.run();
+    assert.notStrictEqual(r.pause && r.pause.reason, w.S.RunPause.Unreachable);
+    assert.strictEqual(r.status, w.S.RunStatus.Done);
+    assert.strictEqual(attacksOf(w, '1.1').length, 1);
+    assert.strictEqual(attacksOf(w, '1.2').length, 1);
+});
+
+// ---- Zone -------------------------------------------------------------------
+
+t.test('Zone: isReady is false off the run zone', function () {
+    var w = attackWorld();
+    startRun(w, ['C:/b/w1.txt']);
+    assert.strictEqual(w.mod.isReady({ zone: { id: ZONE } }), true);
+    assert.strictEqual(w.mod.isReady({ zone: { id: ZONE + 1 } }), false);
+    w.H.host.game.gi.mCurrentViewedZoneID = ZONE + 1;
+    assert.strictEqual(tick(w), false);
+    assert.strictEqual(stepName(w), 'Gate');
+});
+
+t.test('Zone: the pacer returns without re-enqueue off the run zone', function () {
+    var w = attackWorld();
+    var r = startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Attack });
+    tick(w);
+    w.pending = [];
+    w.H.host.game.gi.mCurrentViewedZoneID = ZONE + 1;
+    w.S.kernel._currentModule = 'adventures';
+    w.ex.pace([r.id, r.waveIndex]);
+    w.S.kernel._currentModule = null;
+    assert.strictEqual(w.H.queued().length, 0);
+    assert.strictEqual(w.orders.length + w.buffs.length, 0);
+});
+
+// ---- Start ------------------------------------------------------------------
+
+// A saved template of two waves; prompt answers come from w.answers in order.
+function startWorld(waveTwo) {
+    var w = attackWorld();
+    var H = w.H;
+    writeJson(w.fs, LOADOUT, {
+        '1.1': { grid: 10, army: { Rifle: 5 } },
+        '1.2': { grid: 20, army: { Rifle: 3 } }
+    });
+    if (waveTwo) writeJson(w.fs, 'C:/b/w2.txt', waveTwo);
+    H.host.game.gi.mCurrentPlayer.getAvailableBuffs_vector = function () {
+        return [A.buffEntry({ type: 'Adventure', resource: 'BlackKnights', amount: 3 })];
+    };
+    w.tplId = w.S.modules.adventures.templates.save({
+        label: 'Black Knights', adventure: 'BlackKnights', loadout: LOADOUT,
+        waves: ['C:/b/w1.txt', 'C:/b/w2.txt'], speedBuff: 'SpeedBuffDefault'
+    }, 1000).id;
+    w.answers = [];
+    w.prompts = [];
+    H.ctx.prompt = function (text, def) {
+        w.prompts.push({ text: text, def: def });
+        return w.answers.length ? w.answers.shift() : def;
+    };
+    H.ctx.confirm = function () { return true; };
+    return w;
+}
+
+t.test('Start: a viewed open map asks the start wave and stores a run at its Gate', function () {
+    var w = startWorld();
+    w.answers = ['2', '2'];
+    assert.strictEqual(w.S.modules.adventures.run.start(w.tplId), true);
+    assert.strictEqual(w.prompts.length, 2);
+    assert.ok(/Start at which wave of "Black Knights"\? 1\.\.2/.test(w.prompts[1].text), w.prompts[1].text);
+    assert.strictEqual(w.prompts[1].def, '1');
+    var r = w.st.run();
+    assert.strictEqual(r.waveIndex, 1);
+    assert.strictEqual(r.step, w.S.WaveStep.Gate);
+    assert.strictEqual(r.status, w.S.RunStatus.Running);
+    assert.strictEqual(r.zoneId, ZONE);
+    assert.deepStrictEqual(plain(r.paths), ['C:/b/w1.txt', 'C:/b/w2.txt']);
+    assert.strictEqual(r.loadoutPath, LOADOUT);
+    assert.deepStrictEqual(plain(r.loadoutKeys), { '1.1': true, '1.2': true });
+    assert.strictEqual(w.st.current().request.count, 2);
+    assert.strictEqual(JSON.parse(w.fs.disk[RUN_FILE]).run.waveIndex, 1);
+    assert.strictEqual(w.H.queued().length, 0);
+});
+
+t.test('Start: an invalid start wave stores nothing', function () {
+    var w = startWorld();
+    w.answers = ['1', '3'];
+    assert.strictEqual(w.S.modules.adventures.run.start(w.tplId), false);
+    assert.strictEqual(w.st.run(), null);
+    assert.strictEqual(w.st.current().request, null);
+    assert.ok(w.alerts.some(function (a) { return /Not a wave number/.test(a); }));
+});
+
+t.test('Start: a fatal start check stores nothing', function () {
+    var w = startWorld({ '1.7': { grid: 10, target: 100, army: { Rifle: 1 }, order: 1 } });
+    w.answers = ['1', '1'];
+    assert.strictEqual(w.S.modules.adventures.run.start(w.tplId), false);
+    assert.strictEqual(w.st.run(), null);
+    assert.strictEqual(w.st.current().request, null);
+    assert.ok(w.alerts.some(function (a) { return /cannot start/.test(a) && /1\.7/.test(a); }), w.alerts.join(' | '));
+});
+
+// ---- wiring -----------------------------------------------------------------
+
+t.test('wiring: isReady is false with no run and with a paused run', function () {
+    var w = attackWorld();
+    assert.strictEqual(w.mod.isReady({ zone: { id: ZONE } }), false);
+    startRun(w, ['C:/b/w1.txt']);
+    assert.strictEqual(w.mod.isReady({ zone: { id: ZONE } }), true);
+    w.st.pause(w.S.RunPause.User, 'paused by you');
+    assert.strictEqual(w.mod.isReady({ zone: { id: ZONE } }), false);
+});
