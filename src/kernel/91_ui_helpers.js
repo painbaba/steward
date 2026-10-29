@@ -11,6 +11,9 @@
  *   h.update('collect', { enabled: true });          // patch + mark dirty
  *
  * The buffer is committed when the user presses Save; Close discards.
+ *
+ * gridRow cell content is HTML (it may carry host image markup), so
+ * callers pass user strings through escape() first.
  */
 
 (function (S) {
@@ -249,6 +252,20 @@
     }
 
     // ---------------------------------------------------------------
+    // HTML-escape a user string for html() content such as gridRow
+    // cells. null/undefined become an empty string.
+    // ---------------------------------------------------------------
+    function escape(s) {
+        if (s === null || typeof s === 'undefined') return '';
+        return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    // ---------------------------------------------------------------
 
     if (!S.kernel.ui) S.kernel.ui = {};
     S.kernel.ui.helpers = {
@@ -263,7 +280,8 @@
         helpIcon:  helpIcon,
         newBadge:  newBadge,
         settings:  settings,
-        update:    update
+        update:    update,
+        escape:    escape
     };
 
 }(Steward));

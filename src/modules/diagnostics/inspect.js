@@ -23,6 +23,14 @@
         'mGOContainer', 'mGOComponent'
     ];
 
+    // Getters probed on a specialist's current task. The army dump reads
+    // this same list, so a getter added here shows up in both. Getters a
+    // task does not have are skipped.
+    var TASK_GETTERS = [
+        'GetType', 'GetOriginalType', 'GetSubType', 'GetState',
+        'IsRunning', 'GetRemainingTime', 'GetNewGarrisonGridIdx'
+    ];
+
     function shouldSkip(key) {
         if (!key || typeof key !== 'string') return true;
         if (key.charAt(0) === '_' && key.charAt(1) === '_') return true;   // __anything__
@@ -160,9 +168,8 @@
                 var task = obj.GetTask();
                 if (task) {
                     lines.push('--- task ---');
-                    var taskGetters = ['GetType', 'GetSubType', 'GetState', 'IsRunning'];
-                    for (var y = 0; y < taskGetters.length; y++) {
-                        var tg = taskGetters[y];
+                    for (var y = 0; y < TASK_GETTERS.length; y++) {
+                        var tg = TASK_GETTERS[y];
                         if (typeof task[tg] !== 'function') continue;
                         lines.push('  task.' + tg + '()  ' + callerOf(task, tg));
                     }
@@ -186,6 +193,8 @@
     }
 
     S.modules.diagnostics.inspect = {
+        TASK_GETTERS: TASK_GETTERS,
+        callerOf: callerOf,
         describe: describe,
         logLines: logLines,
         shortValue: shortValue

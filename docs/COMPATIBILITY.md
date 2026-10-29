@@ -107,7 +107,7 @@ Using any of the following will either parse-fail or throw at runtime, and in ma
 - `Object.assign` — unreliable; use explicit copies.
 - `Object.values`, `Object.entries` — not supported; iterate `Object.keys` and look up.
 - Computed property names `{ [key]: value }`.
-- ES3 reserved words (e.g. `typeof`, `default`, `delete`, `class`, `new`) as unquoted object keys or dot-properties — the whole file then fails to parse silently (the script never runs and no error is logged). Quote the key and use bracket access: `{ 'default': 1 }`, `x['default']`.
+- ES3 reserved words (e.g. `typeof`, `default`, `delete`, `class`, `new`) as unquoted object keys or dot-properties — the whole file then fails to parse silently (the script never runs and no error is logged). A quoted key in an object literal (`{ 'default': 1 }`) is safe, because the build keeps object keys quoted. A bracket read with a literal reserved word (`x['default']`) is not: the build's minifier rewrites it to `x.default`. So never read or write a property by name with a reserved word; pick another name (`isDefault`, `shortBefore`). `tests/kernel/air-reserved.test.js` fails on a literal reserved subscript in `src/`.
 
 ## Steward source patterns
 

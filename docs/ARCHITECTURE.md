@@ -27,6 +27,7 @@ Steward
 ├── kernel
 │   ├── log, warn, error
 │   ├── settings        ← read(module), write(module, obj)
+│   ├── files           ← file API: writableDir, readText, writeText, list, remove, browse
 │   ├── register({...}) ← module registration
 │   ├── scheduler       ← internal — tick loop, cursors
 │   ├── queue           ← internal — FIFO action queue
@@ -38,8 +39,13 @@ Steward
 │   ├── deposits
 │   ├── packets
 │   ├── locale
-│   └── events
+│   ├── events
+│   ├── adventures      ← adventure definitions (read-only)
+│   ├── army            ← troop pool, squads, supply plan (read-only)
+│   ├── battles         ← battle-file loader and validator
+│   └── buffs           ← buff stock and definitions (read-only)
 ├── modules
+│   ├── adventures      ← run templates and dry run (sends nothing)
 │   └── <id>            ← exposed only if the module chooses to publish state
 └── (shared enums)
     ├── Priority
@@ -48,7 +54,14 @@ Steward
     ├── SpecialistStatus
     ├── SkillModifier
     ├── ExplorerTask
-    └── GeologistTask
+    ├── GeologistTask
+    ├── TroopClass
+    ├── BattleLine
+    ├── BattleProblem
+    ├── SpeedBuffChoice
+    ├── FileError
+    ├── FileLocation
+    └── LogLevel
 ```
 
 ## Module pattern
@@ -81,6 +94,8 @@ The build script (`scripts/build.js`) concatenates files in this order:
 The numeric prefixes inside `src/kernel/` matter: `00_namespace.js` runs before `40_registry.js` runs before `70_lifecycle.js`. Once the kernel is fully attached, core files can rely on `Steward.kernel.*` being there. By the time module files are concatenated, both kernel and core are available.
 
 `05_reload.js` runs right after the namespace. When the host reloads userscripts into the same page and global, the new bundle finds the previous instance there and shuts it down before any later kernel file replaces its `Steward.kernel.*` slots. Every later kernel file must therefore come after it.
+
+`17_files.js` follows the same rule and sits before `20_logger.js`, because the logger resolves its own log file through the file API.
 
 ## Lifecycle
 

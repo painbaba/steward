@@ -95,6 +95,33 @@
         return typeof ms.geoDefTask === 'number' ? ms.geoDefTask : null;
     }
 
+    // Folder the host's own battle-template dialog opens in. Mirrors
+    // SaveLoadTemplate.getLastDir + getRealPath (host 0-common.js) for the
+    // 'battle' module, without its final documentsDirectory fallback: the
+    // caller picks its own default. Returns a path string or null.
+    function battleTemplateDir() {
+        var lastDir = null;
+        try {
+            if (typeof settings !== 'undefined' && settings && typeof settings.read === 'function') {
+                lastDir = settings.read('battlelastDir');
+            }
+        } catch (e) {
+            S.kernel.warn('host', 'settings.read(battlelastDir) threw: ' + e);
+            lastDir = null;
+        }
+        var ms = hostMainSettings();
+        var shortcuts = ms && typeof ms.shortcutsDir === 'string' && ms.shortcutsDir !== ''
+            ? ms.shortcutsDir : null;
+
+        // The host treats any stored value other than null as set; its read()
+        // already turns missing and empty values into null.
+        if (typeof lastDir === 'string' && lastDir !== '') {
+            if (ms && ms.shortAsGlobalRelative && shortcuts) return shortcuts + lastDir;
+            return lastDir;
+        }
+        return shortcuts;
+    }
+
     function isAvailable() {
         return hostMainSettings() !== null;
     }
@@ -107,7 +134,8 @@
         explDefTaskGlobal:  explDefTaskGlobal,
         geoDefTaskByName:   geoDefTaskByName,
         geoDefTaskGlobal:   geoDefTaskGlobal,
-        isAvailable:        isAvailable
+        isAvailable:        isAvailable,
+        battleTemplateDir:  battleTemplateDir
     };
 
 }(Steward));

@@ -149,6 +149,8 @@ boot: function () {
 
 Eager is friendlier for debugging — you can inspect `settings.json` and see what every module expects. Prefer it.
 
+`write` deep-merges into the stored object, so a key or array entry that was stored once is not removed by a later `write` that leaves it out. Records a module creates and deletes (for example adventure run templates, one JSON file per record) do not belong in settings. Keep them in files under `Steward.kernel.files.stewardDir('<module>/<folder>')`, which returns `{ dir, where }` or `null`, and write each one with `Steward.kernel.files.writeText`.
+
 ## Enqueueing actions
 
 `plan` should not perform side effects directly. It should enqueue actions:
@@ -237,6 +239,8 @@ Menu items are always enabled. The native menu is built once, on init (later cha
 
 Dashboard settings go through a buffer: `h.settings(id)` returns it, `h.update(id, patch)` merges changes into it, and the dashboard Save button writes them to the module's settings. Keep state that describes the current moment out of the buffer; a session-only value is cleared when the menu entry reopens the dashboard.
 
+A module can also own a dialog of its own, opened from its `menu` items, when a dashboard tab does not fit (the adventures module's template dialog is the example). Such a module registers only a `menu`, so it gets no dashboard section and no quick toggle. Its dialog uses its own `Modal` id, calls `S.kernel.ui.ensureStyle(id)` before it is first shown so it shares the dashboard stylesheet, and passes every user string through `h.escape` before it reaches the page. Opening a modal hides the dashboard. A zone load closes host modals and drops unsaved edits.
+
 UI primitives are host-provided; see [`TSO_API.md`](TSO_API.md).
 
 ## Error handling
@@ -259,6 +263,8 @@ tick N:  isReady(ctx) → plan(ctx) → kernel drains queue
 ```
 
 There is no module unload. When the host reloads scripts, the new bundle shuts down the previous instance's scheduler, queue and status interval, and the old module closures are orphaned. Do not start timers of your own (`setInterval`, `setTimeout` loops): they are not stopped on reload and would keep running beside the new instance. Plan work through `plan(ctx)` so the kernel owns the timing. If you need to disable a module at runtime, gate everything behind `settings.enabled` in `isReady`.
+
+One exception exists: a diagnostic chain that is bounded, read-only and stops itself on reload. It captures `S.kernel.lifecycle` when it starts; each tick returns without work or re-arming once `S.kernel.lifecycle` is a different object, because every bundle load assigns a new one. The diagnostics generals sampler (`src/modules/diagnostics/army.js`) is the example. Anything that acts on the game still plans through `plan(ctx)`.
 
 ## Naming and discoverability
 

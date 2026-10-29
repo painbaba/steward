@@ -59,6 +59,31 @@
         try { return g.mHomePlayer || null; } catch (e) { return null; }
     }
 
+    // Id of the player whose army and specialists are "own" in the current zone.
+    // Falls back to the home player when the zone call is unavailable.
+    function playerId() {
+        try {
+            if (typeof game !== 'undefined' && game && game.player &&
+                typeof game.player.GetPlayerId === 'function') {
+                return game.player.GetPlayerId();
+            }
+        } catch (e) { /* fall through to the home player */ }
+        try {
+            var hp = homePlayer();
+            if (hp && typeof hp.GetPlayerId === 'function') return hp.GetPlayerId();
+        } catch (e2) { /* swallow */ }
+        return null;
+    }
+
+    function adventureName() {
+        if (!isAdventure()) return null;
+        try {
+            var z = current();
+            if (z && z.mAdventureName) return z.mAdventureName;
+        } catch (e) { /* swallow */ }
+        return null;
+    }
+
     function viewedPlayer() {
         var g = gi();
         if (!g) return null;
@@ -93,6 +118,8 @@
         isHome:       isHome,
         isAdventure:  isAdventure,
         homePlayer:   homePlayer,
+        playerId:     playerId,
+        adventureName: adventureName,
         viewedPlayer: viewedPlayer,
         visit:        visit,
         scrollTo:     scrollTo

@@ -498,6 +498,29 @@
             h.button('Run', { onClick: dumpHostSnapshot })));
         $rows.append(h.formRow('Dump kernel state',
             h.button('Run', { onClick: dumpKernelState })));
+
+        // Army probes live in army.js; resolved per click so a reloaded
+        // bundle's functions are the ones that run.
+        function army() { return S.modules.diagnostics.army; }
+        $rows.append(h.formRow('Dump generals (task, squads)',
+            h.button('Run', { onClick: function () { army().dumpGenerals(); } })));
+        $rows.append(h.formRow('Dump army (free, assigned, units)',
+            h.button('Run', { onClick: function () { army().dumpArmy(); } })));
+        $rows.append(h.formRow('Dump quests on this zone',
+            h.button('Run', { onClick: function () { army().dumpQuests(); } })));
+        $rows.append(h.formRow('Dump active adventures',
+            h.button('Run', { onClick: function () { army().dumpAdventures(); } })));
+        $rows.append(h.formRow('Dump adventure and buff definitions',
+            h.button('Run', { onClick: function () { army().dumpDefinitions(); } })));
+
+        function samplerLabel() { return army().samplerRunning() ? 'Stop' : 'Start'; }
+        var $sample = h.button(samplerLabel(), {
+            onClick: function () {
+                army().toggleSampler();
+                $sample.text(samplerLabel());
+            }
+        });
+        $rows.append(h.formRow('Sample generals every 5 s for 3 min', $sample));
     }
 
     S.modules.diagnostics.renderSection             = renderSection;

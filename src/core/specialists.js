@@ -291,9 +291,16 @@
     }
 
     function troopCapacity(spec) {
-        // No reliable instance-level getter found in the spike. The
-        // description's getMaxTroopCount or similar may exist; try a few.
+        // The instance getter GetMaxMilitaryUnits() is what autoTSO reads for
+        // a general's troop limit, so it comes first. The description
+        // getters stay as fallbacks for specialist types that lack it.
         if (!spec) return 0;
+        try {
+            if (typeof spec.GetMaxMilitaryUnits === 'function') {
+                var max = spec.GetMaxMilitaryUnits();
+                if (typeof max === 'number' && max > 0) return max;
+            }
+        } catch (e0) { /* fall through to the description */ }
         var desc = specDescription(spec);
         if (desc) {
             try {

@@ -6,15 +6,12 @@
  *   2. A rotating file at <client install>/steward/logs/console.log
  *      (next to the AIR client binaries — predictable / easy to find).
  *
- * Path resolution: AIR's `applicationDirectory.resolvePath(...)` returns a
- * File classified as read-only application content; writing to it raises
- * `SecurityError: fileWriteResource`. We round-trip through `.nativePath`
- * and `new air.File(path)` to drop the classification — the same trick
- * autoTSO uses (user_auto.js:163) and the host's own user-script manager
- * (0-manager.js:131). Confirmed on the live AIR runtime via probe at
- * _temp/diagnostics/user_steward_pathprobe.js. Falls back to
- * applicationStorageDirectory and then documentsDirectory if the
- * round-trip somehow fails (read-only install layout, etc.).
+ * Path resolution: the AIR path plumbing (the applicationDirectory
+ * round trip, recursive directory creation and the storage / documents
+ * fallback chain) lives in kernel/17_files.js as writableDir, so the log and
+ * every other file steward writes follow one location policy. The logger
+ * only picks the 'steward/logs' folder and reports where it landed.
+ * log.filePath() returns the native path of the current log file (or null).
  *
  * The logger boots in a "console only, all categories enabled" mode. Once
  * Steward.kernel.settings.load() runs, configure() picks up persisted prefs.
@@ -25,12 +22,7 @@
 
 (function (S) {
 
-    var LEVEL = {
-        DEBUG: 'DEBUG',
-        LOG:   'LOG',
-        WARN:  'WARN',
-        ERROR: 'ERROR'
-    };
+    var LEVEL = S.LogLevel;
 
     var state = {
         enabled:        true,
@@ -84,117 +76,61 @@
                 }
             }
             if (!state.consoleSink) return;
-            if (level === LEVEL.ERROR && state.consoleSink.error) state.consoleSink.error(line);
-            else if (level === LEVEL.WARN && state.consoleSink.warn) state.consoleSink.warn(line);
+            if (level === LEVEL.Error && state.consoleSink.error) state.consoleSink.error(line);
+            else if (level === LEVEL.Warn && state.consoleSink.warn) state.consoleSink.warn(line);
             else if (state.consoleSink.log) state.consoleSink.log(line);
         } catch (e) { /* never propagate */ }
     }
 
-    // air.File.createDirectory() does NOT recurse on Adobe AIR — calling
-    // it on a/b/c when a/ doesn't exist throws. We walk down the path so
-    // each segment is created on demand. Also surfaces the failure point
-    // explicitly to the console sink (file logging is the failure target,
-    // so we can't rely on emitToFile here).
-    function createDirectoryRecursive(dir) {
-        if (!dir) return false;
-        if (dir.exists) return true;
-        try {
-            var parent = dir.parent;
-            if (parent && !parent.exists) {
-                if (!createDirectoryRecursive(parent)) return false;
-            }
-            dir.createDirectory();
-            return dir.exists;
-        } catch (e) {
-            emitToConsole(LEVEL.ERROR,
-                '[ERROR] [' + timestamp() + '] [logger] createDirectory failed for ' +
-                (dir && dir.nativePath ? dir.nativePath : '?') + ': ' + e);
-            return false;
-        }
-    }
-
-    // Round-trip a relative path under applicationDirectory through
-    // .nativePath so the resulting File is unclassified by AIR (writable
-    // instead of read-only application content). Returns null on any
-    // failure.
-    function applicationDirRoundTrip(relPath) {
-        try {
-            var resolved = air.File.applicationDirectory.resolvePath(relPath);
-            if (!resolved || !resolved.nativePath) return null;
-            return new air.File(resolved.nativePath);
-        } catch (e) {
-            emitToConsole(LEVEL.WARN,
-                '[WARN] [' + timestamp() + '] [logger] round-trip resolve threw for ' +
-                relPath + ': ' + e);
-            return null;
-        }
+    // Path resolution and the location fallback live in kernel/17_files.js
+    // (writableDir), shared with every other file steward writes. Its notes
+    // go straight to the console sink: the log file is what is being
+    // resolved, so emitToFile cannot be used here.
+    function consoleNote(level, message) {
+        emitToConsole(level, format(level, 'logger', message));
     }
 
     function ensureLogFile() {
         if (state.logFile) return state.logFile;
         if (typeof air === 'undefined' || !air.File) return null;
 
-        // Primary: <client install>/steward/logs/console.log via the
-        // round-trip trick. Predictable location next to the client
-        // binaries. autoTSO writes its own log this way; the host's
-        // user-script manager uses the identical pattern when saving
-        // remote scripts to disk.
+        var r = null;
         try {
-            var primaryFile = applicationDirRoundTrip('steward/logs/console.log');
-            if (primaryFile) {
-                var primaryDir = primaryFile.parent;
-                if (createDirectoryRecursive(primaryDir)) {
-                    state.logDir  = primaryDir;
-                    state.logFile = primaryFile;
-                    emitToConsole(LEVEL.LOG,
-                        '[LOG] [' + timestamp() + '] [logger] writing to ' +
-                        state.logFile.nativePath);
-                    return state.logFile;
-                }
-            }
-        } catch (e) {
-            emitToConsole(LEVEL.WARN,
-                '[WARN] [' + timestamp() + '] [logger] applicationDirectory round-trip failed: ' + e);
+            r = S.kernel.files.writableDir('steward/logs', consoleNote);
+        } catch (e) { r = null; }
+
+        if (!r) {
+            emitToConsole(LEVEL.Error,
+                format(LEVEL.Error, 'logger', 'no writable log location — file output disabled'));
+            state.fileEnabled = false;
+            return null;
         }
 
-        // Fallback 1: per-app storage. Buried in AppData but always writable.
         try {
-            var dir = air.File.applicationStorageDirectory.resolvePath('steward/logs');
-            if (createDirectoryRecursive(dir)) {
-                state.logDir  = dir;
-                state.logFile = dir.resolvePath('console.log');
-                emitToConsole(LEVEL.WARN,
-                    '[WARN] [' + timestamp() + '] [logger] applicationDirectory unavailable, using applicationStorageDirectory ' +
-                    state.logFile.nativePath);
-                return state.logFile;
-            }
+            state.logDir  = r.dir;
+            state.logFile = r.dir.resolvePath('console.log');
         } catch (e) {
-            emitToConsole(LEVEL.ERROR,
-                '[ERROR] [' + timestamp() + '] [logger] storage dir resolve threw: ' + e);
+            state.logDir  = null;
+            state.logFile = null;
+            emitToConsole(LEVEL.Error,
+                format(LEVEL.Error, 'logger', 'log file resolve threw: ' + e + ' — file output disabled'));
+            state.fileEnabled = false;
+            return null;
         }
 
-        // Fallback 2: user documents. Last-ditch — both above must have
-        // failed for this to fire. Should never happen on a healthy AIR
-        // runtime.
-        try {
-            var alt = air.File.documentsDirectory.resolvePath('steward/logs');
-            if (createDirectoryRecursive(alt)) {
-                state.logDir  = alt;
-                state.logFile = alt.resolvePath('console.log');
-                emitToConsole(LEVEL.WARN,
-                    '[WARN] [' + timestamp() + '] [logger] storage dir unavailable, using documents fallback ' +
-                    state.logFile.nativePath);
-                return state.logFile;
-            }
-        } catch (e) {
-            emitToConsole(LEVEL.ERROR,
-                '[ERROR] [' + timestamp() + '] [logger] documents fallback threw: ' + e);
+        if (r.where === S.FileLocation.Application) {
+            emitToConsole(LEVEL.Log,
+                format(LEVEL.Log, 'logger', 'writing to ' + state.logFile.nativePath));
+        } else if (r.where === S.FileLocation.Storage) {
+            emitToConsole(LEVEL.Warn,
+                format(LEVEL.Warn, 'logger', 'applicationDirectory unavailable, using applicationStorageDirectory ' +
+                    state.logFile.nativePath));
+        } else {
+            emitToConsole(LEVEL.Warn,
+                format(LEVEL.Warn, 'logger', 'storage dir unavailable, using documents fallback ' +
+                    state.logFile.nativePath));
         }
-
-        emitToConsole(LEVEL.ERROR,
-            '[ERROR] [' + timestamp() + '] [logger] no writable log location — file output disabled');
-        state.fileEnabled = false;
-        return null;
+        return state.logFile;
     }
 
     function rotateIfNeeded() {
@@ -250,17 +186,17 @@
         var category = args[0] || 'kernel';
         // DEBUG-level is gated by an explicit master switch — these messages
         // are dropped silently when debugEnabled is false (default).
-        if (level === LEVEL.DEBUG && !state.debugEnabled) return;
+        if (level === LEVEL.Debug && !state.debugEnabled) return;
         if (!shouldEmit(category)) return;
         var line = format(level, category, joinArgs(args, 1));
         emitToConsole(level, line);
         emitToFile(line);
     }
 
-    function debug() { emit(LEVEL.DEBUG, arguments); }
-    function log()   { emit(LEVEL.LOG,   arguments); }
-    function warn()  { emit(LEVEL.WARN,  arguments); }
-    function error() { emit(LEVEL.ERROR, arguments); }
+    function debug() { emit(LEVEL.Debug, arguments); }
+    function log()   { emit(LEVEL.Log,   arguments); }
+    function warn()  { emit(LEVEL.Warn,  arguments); }
+    function error() { emit(LEVEL.Error, arguments); }
 
     log.isEnabled = function (category) {
         return shouldEmit(category);
@@ -268,6 +204,17 @@
 
     debug.isEnabled = function (category) {
         return state.debugEnabled && shouldEmit(category);
+    };
+
+    // Native path of the log file, resolving it on first use; null when no
+    // writable location exists.
+    log.filePath = function () {
+        try {
+            var f = ensureLogFile();
+            return f ? f.nativePath : null;
+        } catch (e) {
+            return null;
+        }
     };
 
     log.configure = function (cfg) {

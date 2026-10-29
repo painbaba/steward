@@ -170,7 +170,7 @@
       },
       {
         "selector": "MemberExpression[computed=false][property.name=/^(break|case|catch|continue|default|delete|do|else|finally|for|function|if|in|instanceof|new|return|switch|this|throw|try|typeof|var|void|while|with|abstract|boolean|byte|char|class|const|debugger|double|enum|export|extends|final|float|goto|implements|import|int|interface|long|native|package|private|protected|public|short|static|super|synchronized|throws|transient|volatile|null|true|false)$/]",
-        "message": "Reserved words as dot-properties fail to parse in Adobe AIR 32 (ES3 grammar). Use bracket access x['name']."
+        "message": "Reserved words as dot-properties fail to parse in Adobe AIR 32 (ES3 grammar), and the build turns x['name'] back into x.name. Rename the property."
       }
     ]
   }

@@ -25,6 +25,10 @@
  *      Tabs: Status | Specialists | Quests | Buildings | Events | Tools | Misc
  *      (Mail/Trades is intentionally deferred until those modules ship.)
  *
+ *   Module dialogs share the dashboard stylesheet through ensureStyle(id),
+ *   which scopes the same rules to each modal id; the scope list is kept on
+ *   the <style> element so it survives a script reload.
+ *
  * Settings buffer (explicit Save semantics):
  *   - Modal opens → buffer snapshot of each module's settings.
  *   - Modules render via helpers.settings(id) which proxies the buffer.
@@ -402,140 +406,212 @@
     // Dashboard modal — autoTSO-mirror layout
     // -----------------------------------------------------------------
 
-    // Inject the scoped stylesheet on first dashboard open. The host's
-    // bootstrap.min.css forces .modal-body { height:60% } and a parchment
-    // background image; both need overriding with !important.
-    function ensureDashboardStyle() {
-        if (document.getElementById('steward-dashboard-style')) return;
-        var css = [
-            // ---- modal frame ----
-            // The host paints the wood chrome on .modal-header / .modal-body /
-            // .modal-footer (window_top.png + window_middle.png + window_bottom.png).
-            // We DON'T override those — autoTSO uses exactly the same chrome
-            // and looks great. We only override layout (padding, height) and
-            // our colour palette.
-            '#StewardDashboard .modal-dialog{width:1000px;max-width:96%;}',
-            '#StewardDashboard .modal-content{color:#e8e1cf;}',
+    // Stylesheet rules without a scope prefix: scopeCss() prefixes every
+    // selector with each modal id that shares the look (the dashboard and
+    // module dialogs), so the rules exist once. The host's bootstrap.min.css
+    // forces .modal-body { height:60% } and a parchment background image;
+    // both need overriding with !important.
+    var STYLE_ID = 'steward-dashboard-style';
+    var STYLE_RULES = [
+        // ---- modal frame ----
+        // The host paints the wood chrome on .modal-header / .modal-body /
+        // .modal-footer (window_top.png + window_middle.png + window_bottom.png).
+        // We DON'T override those — autoTSO uses exactly the same chrome
+        // and looks great. We only override layout (padding, height) and
+        // our colour palette.
+        '.modal-dialog{width:1000px;max-width:96%;}',
+        '.modal-content{color:#e8e1cf;}',
 
-            // ---- title bar (keep wood background) ----
-            '#StewardDashboard .modal-header{padding:14px 22px 12px !important;' +
-                'border-bottom:1px solid rgba(0,0,0,.3);}',
-            // Pure white + a soft dark text-shadow so the title pops off the
-            // wood regardless of how the host renders window_top.png.
-            '#StewardDashboard .modal-header .modal-title,' +
-                '#StewardDashboard .modal-header h4{color:#fff;font-size:20px;' +
-                'font-weight:600;letter-spacing:.3px;margin:0;' +
-                'text-shadow:0 1px 2px rgba(0,0,0,.6);}',
-            '#StewardDashboard .modal-header .close{color:#f8f1d9;opacity:.85;' +
-                'text-shadow:none;font-size:24px;line-height:1;}',
-            '#StewardDashboard .modal-header .close:hover{color:#fff;opacity:1;}',
+        // ---- title bar (keep wood background) ----
+        '.modal-header{padding:14px 22px 12px !important;' +
+            'border-bottom:1px solid rgba(0,0,0,.3);}',
+        // Pure white + a soft dark text-shadow so the title pops off the
+        // wood regardless of how the host renders window_top.png.
+        '.modal-header .modal-title,' +
+            '.modal-header h4{color:#fff;font-size:20px;' +
+            'font-weight:600;letter-spacing:.3px;margin:0;' +
+            'text-shadow:0 1px 2px rgba(0,0,0,.6);}',
+        '.modal-header .close{color:#f8f1d9;opacity:.85;' +
+            'text-shadow:none;font-size:24px;line-height:1;}',
+        '.modal-header .close:hover{color:#fff;opacity:1;}',
 
-            // ---- body (keep wood background, override host .modal-body { height:60%; padding:15px }) ----
-            '#StewardDashboard .modal-body{padding:0 !important;height:auto !important;' +
-                'overflow:visible;color:#e8e1cf;}',
+        // ---- body (keep wood background, override host .modal-body { height:60%; padding:15px }) ----
+        '.modal-body{padding:0 !important;height:auto !important;' +
+            'overflow:visible;color:#e8e1cf;}',
 
-            // ---- tab bar ----
-            '#StewardDashboard .steward-tabs{display:block;padding:12px 20px 0;' +
-                'border-bottom:1px solid rgba(0,0,0,.3);}',
-            '#StewardDashboard .steward-tabs:after{content:"";display:block;clear:both;height:0;}',
-            '#StewardDashboard .steward-tab{float:left;padding:9px 22px;color:#5dade2;' +
-                'text-decoration:none;font-size:15px;font-weight:500;cursor:pointer;' +
-                'border-radius:6px 6px 0 0;margin-right:4px;}',
-            '#StewardDashboard .steward-tab:hover{background:rgba(93,173,226,.12);' +
-                'color:#5dade2;text-decoration:none;}',
-            '#StewardDashboard .steward-tab.active{background:#3d8fc6;color:#fff;}',
-            '#StewardDashboard .steward-tab.active:hover{background:#3d8fc6;color:#fff;}',
+        // ---- tab bar ----
+        '.steward-tabs{display:block;padding:12px 20px 0;' +
+            'border-bottom:1px solid rgba(0,0,0,.3);}',
+        '.steward-tabs:after{content:"";display:block;clear:both;height:0;}',
+        '.steward-tab{float:left;padding:9px 22px;color:#5dade2;' +
+            'text-decoration:none;font-size:15px;font-weight:500;cursor:pointer;' +
+            'border-radius:6px 6px 0 0;margin-right:4px;}',
+        '.steward-tab:hover{background:rgba(93,173,226,.12);' +
+            'color:#5dade2;text-decoration:none;}',
+        '.steward-tab.active{background:#3d8fc6;color:#fff;}',
+        '.steward-tab.active:hover{background:#3d8fc6;color:#fff;}',
 
-            // ---- panel (per-tab content) ----
-            '#StewardDashboard .steward-panel{padding:16px 22px 20px;height:480px;' +
-                'overflow-y:auto;}',
+        // ---- panel (per-tab content) ----
+        '.steward-panel{padding:16px 22px 20px;height:480px;' +
+            'overflow-y:auto;}',
 
-            // ---- section header / form rows ----
-            // Sections render as a flat sequence of BS3 rows on the panel.
-            // The header row uses cells with the host's `tblHeader` class
-            // (parchment + black text + 23px height — defined in
-            // bootstrap.min.css). Form rows are plain BS3 .row with col-*
-            // cells from gridRow().
-            //
-            // tblHeader rounded corners are applied to the first / last cell
-            // of each header (matches utils.createTableRow output).
-            '#StewardDashboard .steward-row{margin:0;padding:6px 0;font-size:13px;' +
-                'color:#e8e1cf;border-bottom:1px solid rgba(0,0,0,.15);}',
-            '#StewardDashboard .steward-row:last-child{border-bottom:none;}',
-            '#StewardDashboard .steward-row-disabled{background:rgba(120,40,30,.25);}',
-            '#StewardDashboard .steward-row-ctl{text-align:right;}',
-            '#StewardDashboard .steward-row-help{color:#a09a85;font-size:11px;' +
-                'margin-left:8px;}',
-            '#StewardDashboard .steward-row-hint{color:#b8b0a3;font-size:12px;' +
-                'padding-left:18px;}',
+        // ---- section header / form rows ----
+        // Sections render as a flat sequence of BS3 rows on the panel.
+        // The header row uses cells with the host's `tblHeader` class
+        // (parchment + black text + 23px height — defined in
+        // bootstrap.min.css). Form rows are plain BS3 .row with col-*
+        // cells from gridRow().
+        //
+        // tblHeader rounded corners are applied to the first / last cell
+        // of each header (matches utils.createTableRow output).
+        '.steward-row{margin:0;padding:6px 0;font-size:13px;' +
+            'color:#e8e1cf;border-bottom:1px solid rgba(0,0,0,.15);}',
+        '.steward-row:last-child{border-bottom:none;}',
+        '.steward-row-disabled{background:rgba(120,40,30,.25);}',
+        '.steward-row-ctl{text-align:right;}',
+        '.steward-row-help{color:#a09a85;font-size:11px;' +
+            'margin-left:8px;}',
+        '.steward-row-hint{color:#b8b0a3;font-size:12px;' +
+            'padding-left:18px;}',
 
-            '#StewardDashboard .tblHeader{padding-top:3px !important;' +
-                'padding-bottom:3px !important;line-height:23px;' +
-                'font-weight:600;}',
-            '#StewardDashboard .steward-tbl-first{border-radius:10px 0 0 10px;}',
-            '#StewardDashboard .steward-tbl-last{border-radius:0 10px 10px 0;}',
-            '#StewardDashboard .steward-section-title{font-size:14px;color:#000;}',
-            '#StewardDashboard .steward-section-icon{display:inline-block;' +
-                'margin-right:4px;}',
-            '#StewardDashboard .steward-section-action{color:#2c5fb5;' +
-                'text-decoration:none;font-size:13px;font-weight:500;' +
-                'float:right;line-height:23px;}',
-            '#StewardDashboard .steward-section-action:hover{text-decoration:underline;' +
-                'color:#2c5fb5;}',
+        '.tblHeader{padding-top:3px !important;' +
+            'padding-bottom:3px !important;line-height:23px;' +
+            'font-weight:600;}',
+        '.steward-tbl-first{border-radius:10px 0 0 10px;}',
+        '.steward-tbl-last{border-radius:0 10px 10px 0;}',
+        '.steward-section-title{font-size:14px;color:#000;}',
+        '.steward-section-icon{display:inline-block;' +
+            'margin-right:4px;}',
+        '.steward-section-action{color:#2c5fb5;' +
+            'text-decoration:none;font-size:13px;font-weight:500;' +
+            'float:right;line-height:23px;}',
+        '.steward-section-action:hover{text-decoration:underline;' +
+            'color:#2c5fb5;}',
 
-            // Pad the row that follows a tblHeader so the table doesn't feel
-            // crammed against the band.
-            '#StewardDashboard .row.steward-row{padding-left:14px;padding-right:14px;}',
+        // Pad the row that follows a tblHeader so the table doesn't feel
+        // crammed against the band.
+        '.row.steward-row{padding-left:14px;padding-right:14px;}',
 
-            // Idle/busy variants of a per-explorer row — different accent
-            // colour without changing the underlying row layout.
-            '#StewardDashboard .row.steward-row-idle{color:#cfe6ce;}',
-            '#StewardDashboard .row.steward-row-busy{color:#d8c89c;}',
+        // Idle/busy variants of a per-explorer row — different accent
+        // colour without changing the underlying row layout.
+        '.row.steward-row-idle{color:#cfe6ce;}',
+        '.row.steward-row-busy{color:#d8c89c;}',
 
-            // ---- input / dropdown ----
-            '#StewardDashboard .steward-input,' +
-                '#StewardDashboard .steward-dropdown{background:linear-gradient(180deg,#f5e8c8 0%,#e0c898 100%);' +
-                'color:#2a2418;border:1px solid #5a4a30;border-radius:3px;' +
-                'padding:5px 10px;font-size:13px;font-family:inherit;' +
-                'box-shadow:0 1px 0 rgba(255,255,255,.3) inset;line-height:normal;}',
-            '#StewardDashboard .steward-dropdown{padding-right:24px;cursor:pointer;}',
+        // ---- input / dropdown ----
+        '.steward-input,' +
+            '.steward-dropdown{background:linear-gradient(180deg,#f5e8c8 0%,#e0c898 100%);' +
+            'color:#2a2418;border:1px solid #5a4a30;border-radius:3px;' +
+            'padding:5px 10px;font-size:13px;font-family:inherit;' +
+            'box-shadow:0 1px 0 rgba(255,255,255,.3) inset;line-height:normal;}',
+        '.steward-dropdown{padding-right:24px;cursor:pointer;}',
 
-            // ---- button ----
-            '#StewardDashboard .steward-btn{background:linear-gradient(180deg,#f5e8c8 0%,#e0c898 100%);' +
-                'color:#2a2418;border:1px solid #5a4a30;padding:6px 22px;' +
-                'border-radius:4px;font-size:13px;font-weight:500;font-family:inherit;' +
-                'cursor:pointer;line-height:normal;' +
-                'box-shadow:0 1px 0 rgba(255,255,255,.4) inset,0 1px 2px rgba(0,0,0,.3);}',
-            '#StewardDashboard .steward-btn:hover{background:linear-gradient(180deg,#faedd2,#e8d2a8);}',
-            '#StewardDashboard .steward-btn-sm{padding:3px 12px;font-size:12px;}',
+        // ---- button ----
+        '.steward-btn{background:linear-gradient(180deg,#f5e8c8 0%,#e0c898 100%);' +
+            'color:#2a2418;border:1px solid #5a4a30;padding:6px 22px;' +
+            'border-radius:4px;font-size:13px;font-weight:500;font-family:inherit;' +
+            'cursor:pointer;line-height:normal;' +
+            'box-shadow:0 1px 0 rgba(255,255,255,.4) inset,0 1px 2px rgba(0,0,0,.3);}',
+        '.steward-btn:hover{background:linear-gradient(180deg,#faedd2,#e8d2a8);}',
+        '.steward-btn-sm{padding:3px 12px;font-size:12px;}',
 
-            // ---- decorative bits ----
-            '#StewardDashboard .steward-help-i{display:inline-block;width:18px;height:18px;' +
-                'border-radius:50%;background:#5dade2;color:#fff;font-style:italic;' +
-                'font-size:11px;font-weight:600;line-height:18px;text-align:center;' +
-                'margin-left:6px;cursor:help;vertical-align:middle;}',
-            '#StewardDashboard .steward-new-badge{display:inline-block;' +
-                'background:linear-gradient(180deg,#e34a3c,#b8362a);color:#fff;' +
-                'font-size:9px;font-weight:700;padding:2px 6px;border-radius:8px;' +
-                'letter-spacing:.5px;border:1px solid #5a1a14;margin-left:6px;' +
-                'vertical-align:middle;}',
-            '#StewardDashboard code{background:rgba(255,255,255,.06);color:#d8d0bd;' +
-                'padding:1px 5px;border-radius:2px;font-size:11px;}',
-            '#StewardDashboard strong{color:#f5e9c4;}',
+        // ---- decorative bits ----
+        '.steward-help-i{display:inline-block;width:18px;height:18px;' +
+            'border-radius:50%;background:#5dade2;color:#fff;font-style:italic;' +
+            'font-size:11px;font-weight:600;line-height:18px;text-align:center;' +
+            'margin-left:6px;cursor:help;vertical-align:middle;}',
+        '.steward-new-badge{display:inline-block;' +
+            'background:linear-gradient(180deg,#e34a3c,#b8362a);color:#fff;' +
+            'font-size:9px;font-weight:700;padding:2px 6px;border-radius:8px;' +
+            'letter-spacing:.5px;border:1px solid #5a1a14;margin-left:6px;' +
+            'vertical-align:middle;}',
+        'code{background:rgba(255,255,255,.06);color:#d8d0bd;' +
+            'padding:1px 5px;border-radius:2px;font-size:11px;}',
+        'strong{color:#f5e9c4;}',
 
-            // ---- footer (keep wood background) ----
-            '#StewardDashboard .modal-footer{padding:12px 22px !important;' +
-                'border-top:1px solid rgba(0,0,0,.4);text-align:left;margin:0;}',
-            '#StewardDashboard .modal-footer:after{content:"";display:block;clear:both;height:0;}',
-            '#StewardDashboard .modal-footer .steward-btn{margin:0;}',
-            '#StewardDashboard .modal-footer .steward-btn-save{float:left;}',
-            '#StewardDashboard .modal-footer .steward-btn-close{float:right;}',
-            '#StewardDashboard .modal-footer .steward-btn[disabled]{opacity:.5;cursor:default;}'
-        ].join('');
-        var $style = $('<style>', { type: 'text/css', id: 'steward-dashboard-style' });
-        if ($style[0].styleSheet) $style[0].styleSheet.cssText = css;
-        else                       $style[0].appendChild(document.createTextNode(css));
-        $('head').append($style);
+        // ---- footer (keep wood background) ----
+        '.modal-footer{padding:12px 22px !important;' +
+            'border-top:1px solid rgba(0,0,0,.4);text-align:left;margin:0;}',
+        '.modal-footer:after{content:"";display:block;clear:both;height:0;}',
+        '.modal-footer .steward-btn{margin:0;}',
+        '.modal-footer .steward-btn-save{float:left;}',
+        '.modal-footer .steward-btn-close{float:right;}',
+        '.modal-footer .steward-btn[disabled]{opacity:.5;cursor:default;}',
+
+        // ---- shared classes for module dialogs ----
+        // Sortable lists (jQuery UI) and status colours used by dialogs that
+        // borrow this stylesheet through ensureStyle().
+        '.steward-list{list-style:none;margin:0;padding:0;}',
+        '.steward-list li{padding:5px 8px;margin:2px 0;background:rgba(0,0,0,.18);' +
+            'border-radius:4px;cursor:move;}',
+        '.steward-list .ui-sortable-placeholder{visibility:visible !important;' +
+            'background:rgba(93,173,226,.2);}',
+        '.steward-bad{color:#f3a299;}',
+        '.steward-warn{color:#f0c47c;}',
+        '.steward-ok{color:#9fd8a8;}',
+        '.steward-muted{color:#a09a85;}'
+    ];
+
+    // Prefix every selector of every rule with '#<id> ' for each id. Only
+    // the selector part (before the first '{') is split on ',', so commas
+    // inside a body such as linear-gradient(...) stay intact.
+    function scopeCss(rules, ids) {
+        var out = [];
+        for (var r = 0; r < rules.length; r++) {
+            var rule = rules[r];
+            var brace = rule.indexOf('{');
+            if (brace < 0) continue;
+            var sels = rule.substring(0, brace).split(',');
+            var scoped = [];
+            for (var i = 0; i < ids.length; i++) {
+                for (var j = 0; j < sels.length; j++) {
+                    var sel = sels[j].replace(/^\s+|\s+$/g, '');
+                    if (sel) scoped.push('#' + ids[i] + ' ' + sel);
+                }
+            }
+            out.push(scoped.join(',') + rule.substring(brace));
+        }
+        return out.join('');
+    }
+
+    // Scope list for the shared stylesheet: the dashboard first, then the
+    // ids already recorded in `attr` (comma-separated) in order, then
+    // modalId when new. Empties and duplicates are dropped.
+    function mergeScopes(attr, modalId) {
+        var list = [dashboard.modalId];
+        var parts = attr ? String(attr).split(',') : [];
+        parts.push(modalId || '');
+        for (var i = 0; i < parts.length; i++) {
+            var id = parts[i].replace(/^\s+|\s+$/g, '');
+            if (id && list.indexOf(id) < 0) list.push(id);
+        }
+        return list;
+    }
+
+    // Make the shared stylesheet cover modalId. The scope list lives on the
+    // <style> element (data-scopes), not in this closure: after a script
+    // reload the new bundle starts with fresh closures while the old element
+    // and any open dialog stay in the page, so a closure list would drop a
+    // dialog's scope. The element is looked up by id on every call and only
+    // rewritten when its scope list changes.
+    function ensureStyle(modalId) {
+        var el = document.getElementById(STYLE_ID);
+        var current = el ? el.getAttribute('data-scopes') : '';
+        var key = mergeScopes(current, modalId).join(',');
+        if (el && current === key) return;
+        var css = scopeCss(STYLE_RULES, key.split(','));
+        if (!el) {
+            var $style = $('<style>', { type: 'text/css', id: STYLE_ID });
+            el = $style[0];
+            if (el.styleSheet) el.styleSheet.cssText = css;
+            else               el.appendChild(document.createTextNode(css));
+            $('head').append($style);
+        } else if (el.styleSheet) {
+            el.styleSheet.cssText = css;
+        } else {
+            while (el.firstChild) el.removeChild(el.firstChild);
+            el.appendChild(document.createTextNode(css));
+        }
+        el.setAttribute('data-scopes', key);
     }
 
     function openDashboard(initialTabId) {
@@ -543,7 +619,7 @@
             S.kernel.error('ui', 'host Modal class unavailable — cannot open dashboard');
             return;
         }
-        ensureDashboardStyle();
+        ensureStyle(dashboard.modalId);
         dashboard.buffer = {};
         dashboard.dirty = {};
         dashboard.activeTab = initialTabId || 'specialists';
@@ -867,6 +943,10 @@
     S.kernel.ui.closeDashboard   = closeDashboard;
     S.kernel.ui.bufferedSettings = bufferedSettings;
     S.kernel.ui.markDirty        = markDirty;
+
+    S.kernel.ui.ensureStyle      = ensureStyle;
+    S.kernel.ui.scopeCss         = scopeCss;
+    S.kernel.ui.mergeScopes      = mergeScopes;
 
     var statusUpdater = setInterval(refreshStatus, S.kernel.TIMEOUTS.STATUS_UPDATE_MS);
 

@@ -1,6 +1,6 @@
 # autoTSO ↔ Steward Feature Parity
 
-> Status: snapshot at Steward v0.4.0 (commit `c8a4f30`).
+> Status: snapshot at Steward v0.5.0.
 > Source: `autoTSO/user_auto.js` (8174 lines, single file).
 >
 > Purpose: catalogue every autoTSO subsystem so we don't ship Steward
@@ -76,7 +76,7 @@ These are the master on/off switches autoTSO surfaces in the menu (`aUI.menu.fea
 | autoTSO | Steward | Status |
 |---|---|---|
 | Category filter (adventure/combat/geologists/explorers) | `Steward.kernel.log.isEnabled(category)` plus per-category map | ✓ |
-| File rotation | `applicationDirectory/auto/logs/console.log.{N}` | `applicationStorageDirectory/steward/logs/console.log.{N}` | ✓ |
+| File rotation | `applicationDirectory/auto/logs/console.log.{N}` | `<client>/steward/logs/console.log.{N}` | ✓ |
 | DEBUG-level gating | implicit (single level) | explicit `Steward.kernel.debug` with `debugEnabled` master | ✓ Steward improvement |
 | Console + file dual sink | yes | yes | ✓ |
 
@@ -191,8 +191,9 @@ These are the master on/off switches autoTSO surfaces in the menu (`aUI.menu.fea
 ### aAdventure — Adventures
 | autoTSO | Steward | Status |
 |---|---|---|
-| Adventure templates (per-step plan) | — | ✗ |
-| Speed buff selection | — depends on aBuffs | ✗ |
+| Adventure templates (per-step plan) | `modules/adventures` run templates (one JSON file per template, dialog, dry run) | ~ |
+| Speed buff selection | per template plus a default, read-only (`core/buffs`) | ~ |
+| Import autoTSO run templates (`auto/templates/*.json` + `auto/settings.json` labels) | — | ✗ (planned follow-up) |
 | Black Vortex toggle | — | ✗ |
 | Step-by-step execution | — | ✗ |
 | Camp elimination tracking | — | ✗ |
@@ -207,7 +208,7 @@ These are the master on/off switches autoTSO surfaces in the menu (`aUI.menu.fea
 ### aUtils — Utilities
 | autoTSO | Steward | Status |
 |---|---|---|
-| `aUtils.file.{Read, Write, Path, validatePath}` | not needed — host owns settings | n/a |
+| `aUtils.file.{Read, Write, Path, validatePath}` | `S.kernel.files` (read, safe write, list, delete, browse) | ✓ |
 | `aUtils.format.num` | not yet | ~ |
 | `aUtils.friends.getRandom` | — | ✗ |
 | `aUtils.game.{restart, sendSpecialistPacket, uID, …}` | partially in `core/packets`, `core/specialists.dispatch` | ~ |

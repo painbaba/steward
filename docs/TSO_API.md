@@ -20,62 +20,46 @@ Steward modules **must not rely on globals introduced by other userscripts** (e.
 ## Adobe AIR — file system
 
 ```js
-air.File.applicationDirectory                       // installed app dir (READ-ONLY in production)
-air.File.applicationStorageDirectory                // writable, persistent — use this for settings/logs
+air.File.applicationDirectory                       // client install dir (writes need the round trip below)
+air.File.applicationStorageDirectory                // per-user app storage (AppData), writable
 air.File.documentsDirectory                         // user docs
 air.File.userDirectory
 ```
 
-Steward writes settings through the host's `settings` global (see [`HOST_INTEGRATION.md`](analysis/HOST_INTEGRATION.md)) and writes logs into the host's `auto/logs/` directory (same place autoTSO writes — TSO-Portable's `applicationDirectory` is writable):
+Steward keeps its files under `<client install>/steward/` (for example `steward/logs/console.log`). Every path goes through `Steward.kernel.files`, which tries these locations in order:
+
+1. `applicationDirectory`, reached by the round trip: `air.File.applicationDirectory.resolvePath(rel).nativePath`, then `new air.File(thatPath)`.
+2. `applicationStorageDirectory`, when the install folder refuses the directory.
+3. `documentsDirectory`, as the last resort.
+
+`Steward.kernel.files.writableDir(rel)` returns `{ dir, where }`, with `where` set to a `Steward.FileLocation` value (`Steward.FileLocation.Application`, `.Storage` or `.Documents`), or `null` when none works. `stewardDir(sub)` is the same under `steward/`. Modules do not build `air.File` or `air.FileStream` objects themselves; they use the file API:
+
+| Call | Purpose |
+|------|---------|
+| `readText(path)` | `{ ok, text }`, or `{ ok: false, error, message }` with an `S.FileError` code. Strips a leading UTF-8 byte order mark. |
+| `writeText(path, text)` | Writes `<path>.tmp`, then moves it over the target, so a failed write leaves the old file in place. |
+| `list(dir, suffix)` | Files in `dir` whose name ends with `suffix`, sorted by name. `x.json.tmp` never matches `.json`. |
+| `remove(path)` | Deletes a file; `true` when it was removed. |
+| `info(path)` | `exists`, `isDirectory`, `size`, `modified`, `name`, `parent`, `nativePath`. |
+| `browse(opts, onPick)` | Native open dialog with `air.FileFilter`; `air.FileListEvent.SELECT_MULTIPLE` when `multiple` is set. `opts.filters` is a list of `{ label, pattern }` (default: one "All files" filter); battle files pass `Steward.core.battles.BROWSE_FILTERS`. `onPick(paths)` runs on selection, nothing on cancel. |
+
+`air.File.createDirectory()` does not create parents, so the file API walks the path and creates each missing folder in turn.
+
+### Reading and writing
 
 ```js
-// Settings — delegate to the host:
-var s = settings.read(null, 'steward.collect');
-settings.store({ enabled: false }, 'steward.collect');
-
-// Logs — Steward writes to the standard AIR writable location:
-var logDir = air.File.applicationStorageDirectory.resolvePath('steward/logs');
-if (!logDir.exists) logDir.createDirectory();   // NOTE: not recursive!
-var logFile = logDir.resolvePath('console.log');
-```
-
-`applicationDirectory` (where `client.swf` lives) is read-only on most AIR distributions and throws `SecurityError: fileWriteResource` on write. autoTSO's `auto/logs/` works only because the portable distribution pre-creates that directory; from a clean AIR install you cannot create new paths there. Steward uses `applicationStorageDirectory` to avoid the dependency. Directory creation in Steward's logger is recursive — `air.File.createDirectory()` is *not* recursive on its own, so a one-step walk is used to create `steward/` then `steward/logs/`.
-
-### Reading
-
-```js
-var file = air.File.applicationStorageDirectory.resolvePath('steward/settings.json');
-if (file.exists) {
-    var stream = new air.FileStream();
-    stream.open(file, air.FileMode.READ);
-    var content = stream.readUTFBytes(file.size);
-    stream.close();
-    var data = JSON.parse(content);
+var dir = Steward.kernel.files.stewardDir('adventures/templates');   // { dir, where } or null
+if (dir) {
+    var path = dir.dir.resolvePath('t1.json').nativePath;
+    Steward.kernel.files.writeText(path, JSON.stringify(data, null, 2));
+    var back = Steward.kernel.files.readText(path);
+    if (back.ok) data = JSON.parse(back.text);
 }
-```
-
-### Writing
-
-```js
-var file   = air.File.applicationStorageDirectory.resolvePath('steward/settings.json');
-var stream = new air.FileStream();
-stream.open(file, air.FileMode.WRITE);          // overwrites
-stream.writeUTFBytes(JSON.stringify(data, null, 2));
-stream.close();
-```
-
-### Appending
-
-```js
-var stream = new air.FileStream();
-stream.open(logFile, air.FileMode.APPEND);
-stream.writeUTFBytes('[' + new Date().toISOString() + '] ' + msg + '\n');
-stream.close();
 ```
 
 ### Important: writability
 
-`applicationDirectory` is read-only in production. **Never write to subdirectories of the application directory.** Always use `applicationStorageDirectory`.
+A File obtained from `applicationDirectory.resolvePath(...)` is marked as read-only application content: writing to it, or creating a directory through it, throws `SecurityError: fileWriteResource`. Constructing a new `air.File` from its `nativePath` clears the mark. `Steward.kernel.files.appFile` does that round trip, the same one autoTSO uses (see [LOGGING.md](LOGGING.md#why-not-alongside-autotso)), and the fallbacks above cover a client that refuses it anyway.
 
 ## `game`
 
