@@ -26,8 +26,8 @@
  * Wave files are referenced by path and read fresh at every dry run; their
  * content is never copied into a template.
  *
- * The two module settings (default horseshoe, last picker folder) are read
- * and written only through the helpers below.
+ * The one module setting (last picker folder) is read and written only
+ * through the helpers below.
  */
 
 (function (S) {
@@ -97,16 +97,6 @@
         var whole = settings();
         whole[key] = value;
         return S.kernel.settings.write('adventures', whole);
-    }
-
-    function defaultSpeedBuff() {
-        return settings().defaultSpeedBuff;
-    }
-
-    // The default itself cannot be "Default": it is None or a horseshoe name.
-    function setDefaultSpeedBuff(v) {
-        if (v !== S.SpeedBuffChoice.None && !S.core.buffs.isSpeedBuff(v)) return false;
-        return setKey('defaultSpeedBuff', v);
     }
 
     function lastDir() {
@@ -309,20 +299,48 @@
     // Pure. A record's horseshoe choice: its own speedBuff, or Default when
     // that is missing, empty or not a string. The only place the
     // empty-means-Default rule lives, so records, runs and reports agree.
+    // Default means "the first speed buff in stock at use"; it exists for
+    // template files written before the module-wide default was dropped.
     function speedBuffChoice(rec) {
         return rec && typeof rec.speedBuff === 'string' && rec.speedBuff !== ''
             ? rec.speedBuff : S.SpeedBuffChoice.Default;
     }
 
+    // Pure over `buffs` as from S.core.buffs.speedBuffs(), which is already
+    // sorted by name, so this is the first speed buff in stock alphabetically.
+    // Null when none is in stock.
+    function firstAvailable(buffs) {
+        for (var i = 0; i < buffs.length; i++) {
+            if (typeof buffs[i].amount === 'number' && buffs[i].amount > 0) return buffs[i].name;
+        }
+        return null;
+    }
+
     // Pure. The horseshoe name a run would use, or null for none.
-    function resolveSpeedBuff(rec, defaultName) {
+    function resolveSpeedBuff(rec, buffs) {
         var choice = speedBuffChoice(rec);
         if (choice === S.SpeedBuffChoice.None) return null;
-        if (choice === S.SpeedBuffChoice.Default) {
-            if (!defaultName || defaultName === S.SpeedBuffChoice.None) return null;
-            return defaultName;
-        }
+        if (choice === S.SpeedBuffChoice.Default) return firstAvailable(buffs || []);
         return choice;
+    }
+
+    // Pure. The concrete choice the editor starts with: a Default record
+    // turns into the first speed buff in stock (None when nothing is), so the
+    // next save stores an explicit name.
+    function initialSpeedBuff(rec, buffs) {
+        var choice = speedBuffChoice(rec);
+        if (choice !== S.SpeedBuffChoice.Default) return choice;
+        return firstAvailable(buffs || []) || S.SpeedBuffChoice.None;
+    }
+
+    // Pure. The label to put in the editor after the adventure changed from
+    // prev to next, or null to keep the current text. A label that is empty
+    // or still equal to the previous adventure's name was not typed by the
+    // user, so it follows the adventure.
+    function autoLabel(current, prevAdventureLabel, nextAdventureLabel) {
+        var cur = str(current).replace(/^\s+|\s+$/g, '');
+        if (cur === '' || cur === str(prevAdventureLabel)) return str(nextAdventureLabel);
+        return null;
     }
 
     function buffOption(b) {
@@ -359,22 +377,9 @@
 
     // Pure over `buffs` as from S.core.buffs.speedBuffs(). `stored` is the
     // edited record's current choice.
-    function speedBuffOptions(buffs, defaultName, stored) {
-        buffs = buffs || [];
-        var defLabel = !defaultName || defaultName === S.SpeedBuffChoice.None
-            ? 'none' : buffLabel(buffs, defaultName);
-        var out = [
-            { value: S.SpeedBuffChoice.Default, label: 'Default (' + defLabel + ')', amount: null, warn: false },
-            { value: S.SpeedBuffChoice.None, label: 'None', amount: null, warn: false }
-        ];
-        return out.concat(buffOptions(buffs, stored));
-    }
-
-    // For the default-horseshoe row: no Default entry. `current` is the
-    // stored default, kept when it is no longer listed.
-    function defaultOptions(buffs, current) {
+    function speedBuffOptions(buffs, stored) {
         var out = [{ value: S.SpeedBuffChoice.None, label: 'None', amount: null, warn: false }];
-        return out.concat(buffOptions(buffs || [], current));
+        return out.concat(buffOptions(buffs || [], stored));
     }
 
     S.modules.adventures.templates = {
@@ -386,8 +391,6 @@
         dirPath:             dirPath,
         pathOf:              pathOf,
         settings:            settings,
-        defaultSpeedBuff:    defaultSpeedBuff,
-        setDefaultSpeedBuff: setDefaultSpeedBuff,
         lastDir:             lastDir,
         setLastDir:          setLastDir,
         normalize:           normalize,
@@ -401,10 +404,12 @@
         save:                save,
         remove:              remove,
         speedBuffChoice:     speedBuffChoice,
+        firstAvailable:      firstAvailable,
         resolveSpeedBuff:    resolveSpeedBuff,
+        initialSpeedBuff:    initialSpeedBuff,
+        autoLabel:           autoLabel,
         buffLabel:           buffLabel,
-        speedBuffOptions:    speedBuffOptions,
-        defaultOptions:      defaultOptions
+        speedBuffOptions:    speedBuffOptions
     };
 
 }(Steward));

@@ -83,3 +83,29 @@ t.test('speedBuffs: a definition map that cannot be enumerated falls back to the
     var s = setup({ buffs: INV, buffDefs: hostile });
     assert.deepStrictEqual(names(s.buffs.speedBuffs()), ['GeneralSpeedBuff_A']);
 });
+
+t.test('mapCounts sums Adventure entries per resource', function () {
+    var s = setup({
+        buffs: [
+            { type: 'Adventure', resource: 'AdvA', amount: 2 },
+            { type: 'Adventure', resource: 'AdvA', amount: 1, uid: 'second' },
+            { type: 'Adventure', resource: 'AdvB', amount: 4 },
+            { type: 'Adventure', resource: '', amount: 9, uid: 'empty' },
+            { type: 'GeneralSpeedBuff_A', amount: 5 }
+        ]
+    });
+    assert.deepStrictEqual(plain(s.buffs.mapCounts()), { AdvA: 3, AdvB: 4 });
+});
+
+t.test('mapCounts without a player is empty and logs nothing', function () {
+    var s = setup({ buffs: [{ type: 'Adventure', resource: 'AdvA', amount: 2 }] });
+    delete s.H.host.game.gi.mCurrentPlayer;
+    s.H.clearLogs();
+    assert.deepStrictEqual(plain(s.buffs.mapCounts()), {});
+    assert.strictEqual(s.H.logs().length, 0);
+});
+
+t.test('amount still ignores resource-bound entries of the map type', function () {
+    var s = setup({ buffs: [{ type: 'Adventure', resource: 'AdvA', amount: 2 }] });
+    assert.strictEqual(s.buffs.amount('Adventure'), 0);
+});

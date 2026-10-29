@@ -1,6 +1,6 @@
 # autoTSO ↔ Steward Feature Parity
 
-> Status: snapshot at Steward v0.5.0.
+> Status: snapshot at Steward v0.5.1.
 > Source: `autoTSO/user_auto.js` (8174 lines, single file).
 >
 > Purpose: catalogue every autoTSO subsystem so we don't ship Steward
@@ -192,7 +192,7 @@ These are the master on/off switches autoTSO surfaces in the menu (`aUI.menu.fea
 | autoTSO | Steward | Status |
 |---|---|---|
 | Adventure templates (per-step plan) | `modules/adventures` run templates (one JSON file per template, dialog, dry run) | ~ |
-| Speed buff selection | per template plus a default, read-only (`core/buffs`) | ~ |
+| Speed buff selection | per template, starts at the first in stock by name; read-only (`core/buffs`) | ~ |
 | Import autoTSO run templates (`auto/templates/*.json` + `auto/settings.json` labels) | — | ✗ (planned follow-up) |
 | Black Vortex toggle | — | ✗ |
 | Step-by-step execution | — | ✗ |
@@ -201,7 +201,9 @@ These are the master on/off switches autoTSO surfaces in the menu (`aUI.menu.fea
 | Lost-army recovery | — | ✗ |
 | Adventure monitor UI | — | ✗ |
 | `completeQuest` mid-adventure | — | ✗ |
-| `auto.start` / repeat counter | — | ✗ |
+| `auto.start` / repeat counter | menu start with run count and End repetition; request stored only, no executor | ~ |
+| Template menu with map counts | `~Steward~ > Adventures` lists templates with star-menu map counts | ✓ |
+| Extra template actions (todo) | — | ✗ (home loadout load, start adventure with Black Vortex option, send generals, visit adventure with auto-claim of quests, wait for departure, star generals, use speed buff, produce adventure items (skippable), apply adventure items, waves with kill-all, collect pickups, return home, load generals to end, module-wide retrain of lost units) |
 
 **Note**: `aAdventure` is autoTSO's flagship feature (~1700 lines). Touches every other subsystem. v0.8+ scope.
 

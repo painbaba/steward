@@ -26,7 +26,7 @@
 
     function speedBuffInfo(tpl, deps) {
         var choice = S.modules.adventures.templates.speedBuffChoice(tpl);
-        var name = S.modules.adventures.templates.resolveSpeedBuff(tpl, deps.defaultSpeedBuff);
+        var name = S.modules.adventures.templates.resolveSpeedBuff(tpl, deps.speedBuffs);
         var amount = null;
         var note = '';
         if (name === null) {
@@ -34,6 +34,7 @@
         } else {
             amount = deps.buffAmount(name);
             if (!amount) note = 'none in stock, a run would skip it';
+            else if (choice === S.SpeedBuffChoice.Default) note = 'first in stock';
         }
         return { choice: choice, name: name, amount: amount, note: note };
     }
@@ -176,7 +177,7 @@
             },
             inv:              inv,
             buffAmount:       function (name) { return S.core.buffs.amount(name); },
-            defaultSpeedBuff: S.modules.adventures.templates.defaultSpeedBuff(),
+            speedBuffs:       S.core.buffs.speedBuffs(),
             zoneAdventure:    zoneAdventure,
             onTemplateMap:    onTemplateMap
         };

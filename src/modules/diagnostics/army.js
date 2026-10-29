@@ -295,17 +295,21 @@
                               ' adventureName=' + fmt(S.core.zone.adventureName()));
         } catch (e0) { S.kernel.warn(cat, 'zone probe threw:', e0); }
         try {
-            var mgr = game.def('com.bluebyte.tso.adventure.logic::AdventureManager').getInstance();
-            var advs = list(mgr.getAdventures());
-            S.kernel.log(cat, 'adventures: ' + advs.length);
-            for (var i = 0; i < advs.length; i++) {
-                try {
-                    var adv = advs[i];
-                    var mine = '?';
-                    try { mine = fmt(mgr.isMyAdventure(adv)); } catch (e1) { mine = '[threw]'; }
-                    S.kernel.log(cat, '  zoneID=' + fmt(adv.zoneID) + ' adventureName=' + fmt(adv.adventureName) +
-                                      ' ownerPlayerID=' + fmt(adv.ownerPlayerID) + ' isMyAdventure=' + mine);
-                } catch (e2) { S.kernel.warn(cat, 'adventure ' + i + ' threw:', e2); }
+            var mgr = S.core.adventures.manager();
+            if (!mgr) {
+                S.kernel.error(cat, 'adventure manager unavailable');
+            } else {
+                var advs = list(mgr.getAdventures());
+                S.kernel.log(cat, 'adventures: ' + advs.length);
+                for (var i = 0; i < advs.length; i++) {
+                    try {
+                        var adv = advs[i];
+                        var mine = '?';
+                        try { mine = fmt(mgr.isMyAdventure(adv)); } catch (e1) { mine = '[threw]'; }
+                        S.kernel.log(cat, '  zoneID=' + fmt(adv.zoneID) + ' adventureName=' + fmt(adv.adventureName) +
+                                          ' ownerPlayerID=' + fmt(adv.ownerPlayerID) + ' isMyAdventure=' + mine);
+                    } catch (e2) { S.kernel.warn(cat, 'adventure ' + i + ' threw:', e2); }
+                }
             }
         } catch (e) { S.kernel.error(cat, 'adventure manager unavailable:', e); }
         S.kernel.log(cat, '--- end adventures ---');

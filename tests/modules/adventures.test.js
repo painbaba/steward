@@ -62,38 +62,57 @@ var UNITS = A.unitCatalogue(['EliteRifle'], ['Rifle', 'Sabre']);
 
 // ---- module ---------------------------------------------------------------
 
-t.test('adventures registers with a one-item Adventures menu and no ui', function () {
+function labelOf(item, pass) {
+    if (item.separator) return '---';
+    return typeof item.label === 'function' ? item.label(pass || {}) : item.label;
+}
+
+function menuLabels(s) {
+    var pass = {};
+    return plain(s.H.module('adventures').menu.items().map(function (it) { return labelOf(it, pass); }));
+}
+
+t.test('adventures registers with a function menu and no ui', function () {
     var s = setup();
     var mod = s.H.module('adventures');
     assert.ok(mod, 'registered');
     assert.strictEqual(mod.ui, null);
     assert.strictEqual(mod.menu.title, 'Adventures');
-    assert.strictEqual(mod.menu.items.length, 1);
+    assert.strictEqual(typeof mod.menu.items, 'function');
 });
 
-t.test('boot seeds defaults once and does not overwrite later values', function () {
+t.test('menu without templates lists the fixed rows and a placeholder', function () {
+    var s = setup({ buffs: [] });
+    assert.deepStrictEqual(menuLabels(s), ['Run templates…', '---', 'No run requested',
+        'End repetition', 'Clear run request', '---', 'No templates yet']);
+    var items = s.H.module('adventures').menu.items();
+    assert.strictEqual(items[2].enabled, false);
+    assert.strictEqual(items[6].enabled, false);
+});
+
+t.test('menu lists templates in label order with their map counts', function () {
+    var s = setup({ buffs: [
+        { type: 'Adventure', resource: 'BlackKnights', amount: 2 },
+        { type: 'Adventure', resource: 'BlackKnights', amount: 1, uid: 'b' }
+    ] });
+    s.tpl.save(record({}), 1000);
+    s.tpl.save(record({ label: 'Alpha', adventure: 'Other' }), 2000);
+    var labels = menuLabels(s);
+    assert.deepStrictEqual(labels.slice(6), ['Alpha ×0', 'Black Knights ×3']);
+});
+
+t.test('boot seeds lastDir only and ignores an old stored default horseshoe', function () {
     var s = setup();
     assert.strictEqual(s.H.settings.read('adventures'), null);
     s.H.module('adventures').boot();
     var seeded = s.H.settings.read('adventures');
-    assert.strictEqual(seeded.defaultSpeedBuff, 'GeneralSpeedBuff_Bronze');
     assert.strictEqual(seeded.lastDir, '');
+    assert.strictEqual(seeded.defaultSpeedBuff, undefined);
     s.tpl.setLastDir('C:/battles');
     s.H.module('adventures').boot();
     assert.strictEqual(s.H.settings.read('adventures').lastDir, 'C:/battles');
-});
-
-t.test('setDefaultSpeedBuff keeps lastDir and setLastDir keeps the default', function () {
-    var s = setup({ buffs: [], buffDefs: { GeneralSpeedBuff_A: {} } });
-    s.H.module('adventures').boot();
-    assert.strictEqual(s.tpl.setDefaultSpeedBuff('GeneralSpeedBuff_A'), true);
-    s.tpl.setLastDir('C:/x');
-    assert.strictEqual(s.tpl.defaultSpeedBuff(), 'GeneralSpeedBuff_A');
-    assert.strictEqual(s.tpl.lastDir(), 'C:/x');
-    assert.strictEqual(s.tpl.setDefaultSpeedBuff('SpeedBuffNone'), true);
-    assert.strictEqual(s.tpl.lastDir(), 'C:/x');
-    assert.strictEqual(s.tpl.setDefaultSpeedBuff('Nonsense'), false);
-    assert.strictEqual(s.tpl.defaultSpeedBuff(), 'SpeedBuffNone');
+    s.H.settings.write('adventures', { lastDir: 'C:/y', defaultSpeedBuff: 'GeneralSpeedBuff_A' });
+    assert.deepStrictEqual(plain(s.tpl.settings()), { lastDir: 'C:/y' });
 });
 
 // ---- validate -----------------------------------------------------------------
@@ -205,13 +224,44 @@ t.test('a write fault on save reports a file problem and keeps the old content',
 
 // ---- horseshoe ------------------------------------------------------------------
 
-t.test('resolveSpeedBuff: Default follows the setting, None and explicit are direct', function () {
+var STOCK = [
+    { name: 'GeneralSpeedBuff_A', label: 'A', amount: 0, effect: '' },
+    { name: 'GeneralSpeedBuff_B', label: 'B', amount: 3, effect: '' },
+    { name: 'GeneralSpeedBuff_C', label: 'C', amount: 5, effect: '' }
+];
+
+t.test('firstAvailable skips zero stock and returns null when none', function () {
+    var s = setup();
+    assert.strictEqual(s.tpl.firstAvailable(STOCK), 'GeneralSpeedBuff_B');
+    assert.strictEqual(s.tpl.firstAvailable([STOCK[0]]), null);
+    assert.strictEqual(s.tpl.firstAvailable([]), null);
+});
+
+t.test('initialSpeedBuff: Default takes the first in stock, else None; explicit choices are kept', function () {
+    var s = setup();
+    var f = s.tpl.initialSpeedBuff;
+    assert.strictEqual(f({ speedBuff: 'SpeedBuffDefault' }, STOCK), 'GeneralSpeedBuff_B');
+    assert.strictEqual(f({ speedBuff: 'SpeedBuffDefault' }, [STOCK[0]]), 'SpeedBuffNone');
+    assert.strictEqual(f({ speedBuff: 'GeneralSpeedBuff_C' }, STOCK), 'GeneralSpeedBuff_C');
+    assert.strictEqual(f({ speedBuff: 'SpeedBuffNone' }, STOCK), 'SpeedBuffNone');
+});
+
+t.test('resolveSpeedBuff: Default is the first in stock, None is null, explicit is kept', function () {
     var s = setup();
     var r = s.tpl.resolveSpeedBuff;
-    assert.strictEqual(r({ speedBuff: 'SpeedBuffDefault' }, 'GeneralSpeedBuff_A'), 'GeneralSpeedBuff_A');
-    assert.strictEqual(r({ speedBuff: 'SpeedBuffDefault' }, 'SpeedBuffNone'), null);
-    assert.strictEqual(r({ speedBuff: 'SpeedBuffNone' }, 'GeneralSpeedBuff_A'), null);
-    assert.strictEqual(r({ speedBuff: 'GeneralSpeedBuff_B' }, 'GeneralSpeedBuff_A'), 'GeneralSpeedBuff_B');
+    assert.strictEqual(r({ speedBuff: 'SpeedBuffDefault' }, STOCK), 'GeneralSpeedBuff_B');
+    assert.strictEqual(r({ speedBuff: 'SpeedBuffDefault' }, [STOCK[0]]), null);
+    assert.strictEqual(r({ speedBuff: 'SpeedBuffNone' }, STOCK), null);
+    assert.strictEqual(r({ speedBuff: 'GeneralSpeedBuff_A' }, STOCK), 'GeneralSpeedBuff_A');
+});
+
+t.test('autoLabel fills an empty or auto-filled label and keeps typed text', function () {
+    var s = setup();
+    var f = s.tpl.autoLabel;
+    assert.strictEqual(f('', 'Old', 'New'), 'New');
+    assert.strictEqual(f('Old', 'Old', 'New'), 'New');
+    assert.strictEqual(f('My run', 'Old', 'New'), null);
+    assert.strictEqual(f('   ', 'Old', 'New'), 'New');
 });
 
 t.test('speedBuffChoice: empty, missing and non-string fall back to Default; None and a name pass through', function () {
@@ -233,26 +283,16 @@ t.test('buffLabel: label when listed, name otherwise', function () {
     assert.strictEqual(s.tpl.buffLabel(buffs, 'GeneralSpeedBuff_Gone'), 'GeneralSpeedBuff_Gone');
 });
 
-t.test('speedBuffOptions: Default and None first, zero stock warns, stored unknown appended', function () {
+t.test('speedBuffOptions: None first, no Default, zero stock warns, stored unknown kept', function () {
     var s = setup();
-    var buffs = [
-        { name: 'GeneralSpeedBuff_A', label: 'A', amount: 3, effect: '' },
-        { name: 'GeneralSpeedBuff_B', label: 'B', amount: 0, effect: '' }
-    ];
-    var opts = s.tpl.speedBuffOptions(buffs, 'GeneralSpeedBuff_A', 'GeneralSpeedBuff_Gone');
+    var opts = s.tpl.speedBuffOptions(STOCK, 'GeneralSpeedBuff_Gone');
     assert.deepStrictEqual(plain(opts.map(function (o) { return o.value; })),
-        ['SpeedBuffDefault', 'SpeedBuffNone', 'GeneralSpeedBuff_A', 'GeneralSpeedBuff_B', 'GeneralSpeedBuff_Gone']);
-    assert.strictEqual(opts[0].label, 'Default (A)');
+        ['SpeedBuffNone', 'GeneralSpeedBuff_A', 'GeneralSpeedBuff_B', 'GeneralSpeedBuff_C', 'GeneralSpeedBuff_Gone']);
+    assert.strictEqual(opts[1].warn, true);
     assert.strictEqual(opts[2].warn, false);
-    assert.strictEqual(opts[3].warn, true);
     assert.strictEqual(opts[4].warn, true);
-    // A stored name that is listed, or a choice token, adds nothing.
-    assert.strictEqual(s.tpl.speedBuffOptions(buffs, 'SpeedBuffNone', 'GeneralSpeedBuff_B').length, 4);
-    assert.strictEqual(s.tpl.speedBuffOptions(buffs, 'SpeedBuffNone', 'SpeedBuffDefault').length, 4);
-    // The default row has no Default entry and keeps an unlisted current value.
-    var d = s.tpl.defaultOptions(buffs, 'GeneralSpeedBuff_Gone');
-    assert.deepStrictEqual(plain(d.map(function (o) { return o.value; })),
-        ['SpeedBuffNone', 'GeneralSpeedBuff_A', 'GeneralSpeedBuff_B', 'GeneralSpeedBuff_Gone']);
+    assert.strictEqual(s.tpl.speedBuffOptions(STOCK, 'SpeedBuffNone').length, 4);
+    assert.strictEqual(s.tpl.speedBuffOptions(STOCK, 'GeneralSpeedBuff_B').length, 4);
 });
 
 // ---- dry run, assemble with fake deps ------------------------------------------
@@ -289,7 +329,7 @@ function fakeDeps(files, over) {
             }
         },
         buffAmount: function () { return 0; },
-        defaultSpeedBuff: 'GeneralSpeedBuff_A',
+        speedBuffs: [{ name: 'GeneralSpeedBuff_A', amount: 0 }],
         zoneAdventure: 'BlackKnights',
         onTemplateMap: true
     };
@@ -347,17 +387,24 @@ t.test('assemble: a fatal and a warning from validation are counted separately',
     assert.strictEqual(d.warn, 1);
 });
 
-t.test('assemble: speed buff note at zero stock, in stock and for none', function () {
+t.test('assemble: speed buff note at zero stock, in stock, for Default and for none', function () {
     var s = setup();
     var L = s.S.BattleLine;
     var files = { 'lo.json': parsed([line('g1.0', L.Star, {})]) };
-    var tpl = { label: 'T', adventure: 'X', loadout: 'lo.json', waves: [], speedBuff: 'SpeedBuffDefault' };
+    var tpl = { label: 'T', adventure: 'X', loadout: 'lo.json', waves: [], speedBuff: 'GeneralSpeedBuff_A' };
     var zero = s.dry.assemble(tpl, fakeDeps(files));
     assert.strictEqual(zero.speedBuff.name, 'GeneralSpeedBuff_A');
     assert.ok(zero.speedBuff.note.indexOf('none in stock') === 0);
     var stocked = s.dry.assemble(tpl, fakeDeps(files, { buffAmount: function () { return 4; } }));
     assert.strictEqual(stocked.speedBuff.amount, 4);
     assert.strictEqual(stocked.speedBuff.note, '');
+    var def = s.dry.assemble({ label: 'T', adventure: 'X', loadout: 'lo.json', waves: [],
+        speedBuff: 'SpeedBuffDefault' }, fakeDeps(files, {
+        speedBuffs: [{ name: 'GeneralSpeedBuff_A', amount: 0 }, { name: 'GeneralSpeedBuff_B', amount: 2 }],
+        buffAmount: function () { return 2; }
+    }));
+    assert.strictEqual(def.speedBuff.name, 'GeneralSpeedBuff_B');
+    assert.strictEqual(def.speedBuff.note, 'first in stock');
     var none = s.dry.assemble({ label: 'T', adventure: 'X', loadout: 'lo.json', waves: [],
         speedBuff: 'SpeedBuffNone' }, fakeDeps(files));
     assert.strictEqual(none.speedBuff.name, null);
@@ -460,4 +507,180 @@ t.test('liveDeps without a template has no camp check and is not on the template
     var d = s.dry.liveDeps();
     assert.strictEqual(d.onTemplateMap, false);
     assert.strictEqual(d.ctx.camp, null);
+});
+
+// ---- run request ------------------------------------------------------------------
+
+// A booted setup with a saved Black Knights template and `maps` maps in stock.
+// prompt/confirm are host globals the harness does not provide, so each test
+// installs its own and the alerts are captured through showGameAlert.
+function runSetup(maps, extra) {
+    var alerts = [];
+    var fs = airfs.make();
+    var H = harness.boot({ host: { air: fs.air, showGameAlert: function (m) { alerts.push(m); } } });
+    var buffs = maps > 0 ? [{ type: 'Adventure', resource: 'BlackKnights', amount: maps }] : [];
+    A.install(H, { buffs: buffs });
+    var S = H.Steward;
+    var id = S.modules.adventures.templates.save(record({}), 1000).id;
+    var prompts = [];
+    var s = { H: H, S: S, id: id, alerts: alerts, prompts: prompts, confirms: [], run: S.modules.adventures.run };
+    H.ctx.prompt = function (text, def) {
+        prompts.push({ text: text, def: def });
+        return s.answer === undefined ? def : s.answer;
+    };
+    H.ctx.confirm = function (text) { s.confirms.push(text); return s.agree === true; };
+    if (extra && extra.open) {
+        var prev = H.host.game.def;
+        H.host.game.def = function (name) {
+            if (name === 'com.bluebyte.tso.adventure.logic::AdventureManager') {
+                return { getInstance: function () { return {
+                    getAdventures: function () { return [{ adventureName: 'BlackKnights' }]; },
+                    isMyAdventure: function () { return true; }
+                }; } };
+            }
+            return prev(name);
+        };
+    }
+    H.clearQueued();
+    return s;
+}
+
+t.test('countFrom: cancel, invalid, clamp and trimmed numbers', function () {
+    var s = setup();
+    var f = s.S.modules.adventures.run.countFrom;
+    assert.deepStrictEqual(plain(f(null, 5)), { ok: false, reason: 'cancel' });
+    assert.deepStrictEqual(plain(f('x', 5)), { ok: false, reason: 'invalid' });
+    assert.deepStrictEqual(plain(f('0', 5)), { ok: false, reason: 'invalid' });
+    assert.deepStrictEqual(plain(f('9', 5)), { ok: true, count: 5 });
+    assert.deepStrictEqual(plain(f(' 3 ', 5)), { ok: true, count: 3 });
+});
+
+t.test('statusText: no request, a request and an ended one', function () {
+    var s = setup();
+    var f = s.S.modules.adventures.run.statusText;
+    assert.strictEqual(f(null), 'No run requested');
+    assert.strictEqual(f({ label: 'Witch', count: 5, ended: false }), 'Requested: Witch ×5');
+    assert.strictEqual(f({ label: 'Witch', count: 1, ended: true }), 'Requested: Witch ×1, repetition ended');
+});
+
+t.test('start stores the count clamped to the maps and queues nothing', function () {
+    var s = runSetup(3);
+    s.answer = '10';
+    assert.strictEqual(s.run.start(s.id), true);
+    assert.strictEqual(s.run.current().count, 3);
+    assert.strictEqual(s.run.current().ended, false);
+    assert.strictEqual(s.run.current().templateId, s.id);
+    assert.strictEqual(s.prompts[0].def, '3');
+    assert.strictEqual(s.H.queued().length, 0);
+});
+
+t.test('start counts one more for an own open adventure', function () {
+    var s = runSetup(3, { open: true });
+    assert.strictEqual(s.run.start(s.id), true);
+    assert.strictEqual(s.prompts[0].def, '4');
+    assert.strictEqual(s.run.current().count, 4);
+    assert.strictEqual(s.H.queued().length, 0);
+});
+
+t.test('start with no maps alerts and stores nothing', function () {
+    var s = runSetup(0);
+    assert.strictEqual(s.run.start(s.id), false);
+    assert.strictEqual(s.prompts.length, 0);
+    assert.strictEqual(s.run.current(), null);
+    assert.strictEqual(s.alerts.length, 1);
+    assert.strictEqual(s.H.queued().length, 0);
+});
+
+t.test('start of an unreadable template alerts and stores nothing', function () {
+    var s = runSetup(2);
+    assert.strictEqual(s.run.start('missing'), false);
+    assert.strictEqual(s.run.current(), null);
+    assert.strictEqual(s.alerts.length, 1);
+});
+
+t.test('a cancelled or invalid prompt stores nothing', function () {
+    var s = runSetup(3);
+    s.answer = null;
+    assert.strictEqual(s.run.start(s.id), false);
+    assert.strictEqual(s.run.current(), null);
+    assert.strictEqual(s.alerts.length, 0);
+    s.answer = 'abc';
+    assert.strictEqual(s.run.start(s.id), false);
+    assert.strictEqual(s.run.current(), null);
+    assert.strictEqual(s.alerts.length, 1);
+    assert.strictEqual(s.H.queued().length, 0);
+});
+
+t.test('replacing a request needs confirm; declined keeps the old one', function () {
+    var s = runSetup(5);
+    s.answer = '2';
+    s.run.start(s.id);
+    s.answer = '4';
+    s.agree = false;
+    assert.strictEqual(s.run.start(s.id), false);
+    assert.strictEqual(s.confirms.length, 1);
+    assert.strictEqual(s.run.current().count, 2);
+    s.agree = true;
+    assert.strictEqual(s.run.start(s.id), true);
+    assert.strictEqual(s.run.current().count, 4);
+    assert.strictEqual(s.H.queued().length, 0);
+});
+
+t.test('endRepetition sets count 1 and ended; count 1 or no request alerts', function () {
+    var s = runSetup(5);
+    assert.strictEqual(s.run.endRepetition(), false);
+    assert.strictEqual(s.alerts.length, 1);
+    s.answer = '4';
+    s.run.start(s.id);
+    s.alerts.length = 0;
+    assert.strictEqual(s.run.endRepetition(), true);
+    assert.strictEqual(s.run.current().count, 1);
+    assert.strictEqual(s.run.current().ended, true);
+    assert.strictEqual(s.alerts.length, 1);
+    assert.strictEqual(s.run.endRepetition(), false);
+    assert.strictEqual(s.alerts.length, 2);
+    assert.strictEqual(s.H.queued().length, 0);
+});
+
+t.test('clear removes the request; clearing again alerts', function () {
+    var s = runSetup(5);
+    s.answer = '2';
+    s.run.start(s.id);
+    s.alerts.length = 0;
+    assert.strictEqual(s.run.clear(), true);
+    assert.strictEqual(s.run.current(), null);
+    assert.strictEqual(s.run.clear(), false);
+    assert.strictEqual(s.alerts.length, 2);
+    assert.strictEqual(s.H.queued().length, 0);
+});
+
+t.test('the request lives on the namespace, so a fresh read of run sees it', function () {
+    var s = runSetup(5);
+    s.answer = '2';
+    s.run.start(s.id);
+    assert.strictEqual(s.S.modules.adventures.runState.request.count, 2);
+    s.S.modules.adventures.runState.request = null;
+    assert.strictEqual(s.S.modules.adventures.run.current(), null);
+});
+
+// ---- menu sync ----------------------------------------------------------------------
+
+t.test('menu sync rebuilds only when the template set changed', function () {
+    var s = setup({ buffs: [] });
+    var calls = [];
+    s.S.kernel.ui.refreshModuleMenu = function (id) { calls.push(id); return true; };
+    var menu = s.S.modules.adventures.menu;
+    menu.items();
+    assert.strictEqual(menu.sync(), false);
+    assert.strictEqual(calls.length, 0);
+    var id = s.tpl.save(record({}), 1000).id;
+    assert.strictEqual(menu.sync(), true);
+    assert.deepStrictEqual(plain(calls), ['adventures']);
+    menu.items();
+    assert.strictEqual(menu.sync(), false);
+    var rec = s.tpl.get(id);
+    rec.label = 'Renamed';
+    s.tpl.save(rec, 2000);
+    assert.strictEqual(menu.sync(), true);
+    assert.strictEqual(calls.length, 2);
 });

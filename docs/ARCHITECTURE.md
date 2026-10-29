@@ -125,7 +125,7 @@ shutdown (script reload: the next bundle calls it on the previous instance)
   └─ flush settings and log
 ```
 
-The native menu writes a label only when its text changes. Label writes on native items are observed to grow the AIR client's object count, so an unchanged label is skipped on each tick.
+The native menu writes a label only when its text changes. Label writes on native items are observed to grow the AIR client's object count, so an unchanged label is skipped on each tick. A module's own submenu is rebuilt only on a user action (`S.kernel.ui.refreshModuleMenu`); everything else updates labels in place.
 
 The tick interval defaults to **10 seconds** (configurable via `Steward.kernel.settings.read('scheduler').tickInterval`).
 

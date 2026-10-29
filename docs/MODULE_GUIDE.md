@@ -110,7 +110,7 @@ That's a complete module. After `npm run build` it'll be bundled into `user_stew
 | `plan`     | yes      | `(ctx)→void` | Called when `isReady` returns true. Errors are swallowed and logged. |
 | `boot`     | no       | `()→void` | One-shot, called after registration completes.                   |
 | `ui`       | no       | object    | Dashboard section: `{ tab, section: { id, title, icon, render } }`. See [UI](#ui). |
-| `menu`     | no       | object    | Native `~Steward~` submenu: `{ title, items: [{ label, onSelect }] }`. See [UI](#ui). |
+| `menu`     | no       | object    | Native `~Steward~` submenu: `{ title, items }`; `items` is an array or a function returning one. See [UI](#ui). |
 
 See [`SCHEDULER.md`](SCHEDULER.md) for the contract details.
 
@@ -235,7 +235,11 @@ S.kernel.register({
 });
 ```
 
-Menu items are always enabled. The native menu is built once, on init (later changes only update labels in place), so an enabled flag would go stale. An item that depends on game state reports that itself when selected, as the event calculator's estimate alert does.
+Menu items come in three shapes: an action `{ label, onSelect }`, a separator `{ separator: true }` and a display-only line `{ label, enabled: false }` (no `onSelect`). Actionable items are always enabled, because the menu is not rebuilt on a timer and an enabled flag would go stale; an item that depends on game state reports that itself when selected, as the event calculator's estimate alert does.
+
+`label` may be a function `label(pass)` returning the text. The kernel re-evaluates label functions on the 5 s status tick and writes only text that changed, in place. `pass` is one plain object shared by all label functions of the module within a single pass, so an expensive read can be cached on it (`pass.maps = ...`) instead of repeated per item.
+
+`items` may be a function. It is evaluated when the module's submenu is built (at init and on `S.kernel.ui.refreshModuleMenu(id)`), never at registration. When the set of items changes (for example a user saved a template), call `S.kernel.ui.refreshModuleMenu(id)` from the user action that caused it; it rebuilds only that module's submenu. Never call it on a timer: every rebuild leaks native objects in the AIR client. `S.kernel.ui.notify(text)` shows a game alert. The adventures module (`src/modules/adventures/menu.js`) is the example.
 
 Dashboard settings go through a buffer: `h.settings(id)` returns it, `h.update(id, patch)` merges changes into it, and the dashboard Save button writes them to the module's settings. Keep state that describes the current moment out of the buffer; a session-only value is cleared when the menu entry reopens the dashboard.
 

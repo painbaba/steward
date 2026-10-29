@@ -70,6 +70,8 @@
 
     // Per-template speed-buff choices besides a concrete buff name; used by the
     // adventures module. Kernel-level because they carry no TSO knowledge.
+    // Default marks a template that takes the first speed buff in stock at use
+    // (kept for older template files); None means no horseshoe.
     S.SpeedBuffChoice = {
         Default: 'SpeedBuffDefault',
         None:    'SpeedBuffNone'

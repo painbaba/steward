@@ -192,3 +192,129 @@ t.test('dispose stops the status interval and blocks init', function () {
     s.H.Steward.kernel.ui.init();
     t.assert.deepStrictEqual(snapshot(s.counts), before);
 });
+
+// A module with a dynamic menu: `items` is a counting function, and the label
+// functions read mutable state so a test can change their text and see which
+// pass object each one received.
+function setupBeta() {
+    var H = harness.boot({ sections: ['kernel'] });
+    var M = installMenuStubs(H);
+    var beta = { itemsCalls: 0, text: 'one', other: 'fixed', passes: [], otherPasses: [], selected: 0 };
+    H.Steward.kernel.register({
+        id:       'beta',
+        priority: 'PriorityNormal',
+        isReady:  function () { return true; },
+        plan:     function () {},
+        menu: {
+            title: 'Beta',
+            items: function () {
+                beta.itemsCalls++;
+                return [
+                    { label: 'Open', onSelect: function () { beta.selected++; } },
+                    { separator: true },
+                    { label: function (pass) { beta.passes.push(pass); return beta.text; }, enabled: false },
+                    { label: function (pass) { beta.otherPasses.push(pass); return beta.other; },
+                      onSelect: function () {} }
+                ];
+            }
+        }
+    });
+    H.settings.write('beta', { enabled: true });
+    H.Steward.kernel.ui.init();
+    return { H: H, counts: M.counts, rootMenu: M.rootMenu, beta: beta };
+}
+
+function betaEntry(rootMenu) {
+    var root = rootMenu.getItemByName('StewardRoot');
+    return root.submenu.getItemByName('StewardModuleMenu_beta');
+}
+
+t.test('dynamic module items are built once at init', function () {
+    var s = setupBeta();
+    t.assert.strictEqual(s.beta.itemsCalls, 1);
+    var inner = betaEntry(s.rootMenu).submenu;
+    t.assert.strictEqual(inner.items.length, 4);
+    t.assert.strictEqual(inner.items[0].label, 'Open');
+    t.assert.strictEqual(inner.items[1].isSeparator, true);
+    t.assert.strictEqual(inner.items[2].label, 'one');
+    t.assert.strictEqual(inner.items[2].enabled, false);
+    t.assert.strictEqual(inner.items[3].label, 'fixed');
+    t.assert.strictEqual(inner.items[3].enabled, true);
+    inner.items[0].onSelect();
+    t.assert.strictEqual(s.beta.selected, 1);
+});
+
+t.test('status refresh with unchanged label functions writes no label and builds nothing', function () {
+    var s = setupBeta();
+    settle(s);
+    var before = snapshot(s.counts);
+    for (var i = 0; i < 10; i++) s.H.Steward.kernel.ui.status.refresh();
+    t.assert.strictEqual(s.counts.labelWrites, 0);
+    t.assert.deepStrictEqual(snapshot(s.counts), before);
+    t.assert.strictEqual(s.beta.itemsCalls, 1);
+});
+
+t.test('a changed label function rewrites only that item', function () {
+    var s = setupBeta();
+    settle(s);
+    var inner = betaEntry(s.rootMenu).submenu;
+    var item = inner.items[2];
+    s.beta.text = 'two';
+    s.H.Steward.kernel.ui.status.refresh();
+    t.assert.strictEqual(s.counts.labelWrites, 1);
+    t.assert.strictEqual(inner.items[2], item);
+    t.assert.strictEqual(item.label, 'two');
+    t.assert.strictEqual(inner.items[3].label, 'fixed');
+});
+
+t.test('label functions share one pass object per refresh', function () {
+    var s = setupBeta();
+    s.beta.passes.length = 0;
+    s.beta.otherPasses.length = 0;
+    s.H.Steward.kernel.ui.status.refresh();
+    s.H.Steward.kernel.ui.status.refresh();
+    t.assert.strictEqual(s.beta.passes.length, 2);
+    t.assert.strictEqual(s.beta.passes[0], s.beta.otherPasses[0]);
+    t.assert.strictEqual(s.beta.passes[1], s.beta.otherPasses[1]);
+    t.assert.notStrictEqual(s.beta.passes[0], s.beta.passes[1]);
+});
+
+t.test('refreshModuleMenu rebuilds only that module submenu', function () {
+    var s = setupBeta();
+    settle(s);
+    var root = s.rootMenu.getItemByName('StewardRoot');
+    var toggle = root.submenu.getItemByName('StewardModuleToggle_beta');
+    var entry = betaEntry(s.rootMenu);
+    var oldInner = entry.submenu;
+    var before = snapshot(s.counts);
+    t.assert.strictEqual(s.H.Steward.kernel.ui.refreshModuleMenu('beta'), true);
+    t.assert.strictEqual(s.counts.menus, before.menus + 1);
+    t.assert.strictEqual(s.counts.items, before.items + 4);
+    t.assert.strictEqual(s.rootMenu.getItemByName('StewardRoot'), root);
+    t.assert.strictEqual(root.submenu.getItemByName('StewardModuleToggle_beta'), toggle);
+    t.assert.strictEqual(betaEntry(s.rootMenu), entry);
+    t.assert.notStrictEqual(entry.submenu, oldInner);
+    t.assert.strictEqual(s.beta.itemsCalls, 2);
+    s.counts.labelWrites = 0;
+    s.H.Steward.kernel.ui.status.refresh();
+    t.assert.strictEqual(s.counts.labelWrites, 0);
+});
+
+t.test('refreshModuleMenu returns false before init and for an unknown id', function () {
+    var H = harness.boot({ sections: ['kernel'] });
+    installMenuStubs(H);
+    t.assert.strictEqual(H.Steward.kernel.ui.refreshModuleMenu('beta'), false);
+    var s = setupBeta();
+    t.assert.strictEqual(s.H.Steward.kernel.ui.refreshModuleMenu('nope'), false);
+});
+
+t.test('a throwing label function does not break the status tick', function () {
+    var s = setupBeta();
+    s.beta.passes.push = function () { throw new Error('boom'); };
+    s.H.clearLogs();
+    s.H.Steward.kernel.ui.toggle();
+    var pause = s.rootMenu.getItemByName('StewardRoot').submenu.getItemByName('StewardPause');
+    t.assert.strictEqual(pause.label, 'Steward: ✕ Paused');
+    var errors = s.H.logs().filter(function (l) { return l.level === 'error'; });
+    t.assert.ok(errors.length >= 1);
+});

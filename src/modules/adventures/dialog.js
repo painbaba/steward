@@ -8,7 +8,8 @@
  *
  * Edits are buffered in `state.draft` until Save; templates themselves are
  * files, so Save writes one and Delete removes one. DOM only: all data comes
- * through templates, dryrun, S.core.* and S.kernel.*.
+ * through templates, dryrun, S.core.* and S.kernel.*. Open, save and delete
+ * resync the native menu's template list.
  *
  * Reload safety: the file starts no timers and caches no function from
  * another file. Every handler calls S.modules.adventures.*, S.core.* and
@@ -41,8 +42,13 @@
     }
 
     function notify(text) {
-        try { if (typeof showGameAlert === 'function') showGameAlert('Steward: ' + text); }
-        catch (e) { /* best effort */ }
+        if (S.kernel.ui && S.kernel.ui.notify) S.kernel.ui.notify(text);
+    }
+
+    // The native menu lists the templates; it rebuilds only when the set changed.
+    function syncMenu() {
+        var m = S.modules.adventures.menu;
+        if (m && m.sync) m.sync();
     }
 
     function fileName(path) {
@@ -155,6 +161,7 @@
             renderFooter();
             render();
             modal.show();
+            syncMenu();
         } catch (e) {
             S.kernel.error('adventures', 'open template dialog threw:', e);
         }
@@ -169,6 +176,7 @@
 
     function newTemplate() {
         state.draft = T().normalize({});
+        state.draft.speedBuff = T().initialSpeedBuff(state.draft, S.core.buffs.speedBuffs());
         state.view = 'edit';
         render();
     }
@@ -181,6 +189,7 @@
             return;
         }
         state.draft = rec;
+        state.draft.speedBuff = T().initialSpeedBuff(rec, S.core.buffs.speedBuffs());
         state.view = 'edit';
         render();
     }
@@ -200,6 +209,7 @@
             } else {
                 state.confirmDelete = null;
                 if (!T().remove(id)) state.error = 'Could not delete ' + name;
+                else syncMenu();
             }
             render();
         });
@@ -207,7 +217,7 @@
 
     function renderRecordRow($c, rec, buffs) {
         var h = H();
-        var buffName = T().resolveSpeedBuff(rec, T().defaultSpeedBuff());
+        var buffName = T().resolveSpeedBuff(rec, buffs);
         var buffText = buffName === null ? 'No horseshoe'
             : 'Horseshoe: ' + T().buffLabel(buffs, buffName);
         var adventure = S.core.adventures.label(rec.adventure) || rec.adventure;
@@ -246,18 +256,10 @@
         errorRow($c);
 
         var buffs = S.core.buffs.speedBuffs();
-        var $dd = h.dropdown(t.defaultOptions(buffs, t.defaultSpeedBuff()), {
-            selected: t.defaultSpeedBuff(),
-            onChange: function (v) {
-                state.error = null;
-                state.confirmDelete = null;
-                if (!S.modules.adventures.templates.setDefaultSpeedBuff(v)) {
-                    state.error = 'Could not save the default horseshoe';
-                }
-                render();
-            }
-        });
-        $c.append(h.formRow('Default horseshoe', $dd));
+        var run = S.modules.adventures.run;
+        if (run) {
+            $c.append(h.gridRow([[12, span('steward-muted', run.statusText(run.current()))]]));
+        }
 
         var recs = t.list();
         if (!recs.length) {
@@ -309,7 +311,19 @@
             $x.attr('selected', 'selected');
             $sel.append($x);
         }
-        $sel.on('change', function () { draft.adventure = $sel.val(); });
+        $sel.on('change', function () {
+            // Keep the user's own label; only an empty or auto-filled one follows the map.
+            var prevLabel = draft.adventure ? (S.core.adventures.label(draft.adventure) || draft.adventure) : '';
+            var name = $sel.val();
+            var nextLabel = name ? (S.core.adventures.label(name) || name) : '';
+            var current = state.labelInput ? state.labelInput.val() : draft.label;
+            var auto = T().autoLabel(current, prevLabel, nextLabel);
+            if (auto !== null) {
+                draft.label = auto;
+                if (state.labelInput) state.labelInput.val(auto);
+            }
+            draft.adventure = name;
+        });
         return $sel;
     }
 
@@ -434,6 +448,7 @@
         state.draft = null;
         state.view = 'list';
         render();
+        syncMenu();
     }
 
     function renderEdit($c) {
@@ -473,7 +488,7 @@
         $c.append(h.gridRow([[12, btn('Add waves…', act(pickWaves))]]));
 
         var buffs = S.core.buffs.speedBuffs();
-        var options = t.speedBuffOptions(buffs, t.defaultSpeedBuff(), draft.speedBuff);
+        var options = t.speedBuffOptions(buffs, draft.speedBuff);
         var $dd = h.dropdown(options, {
             selected: draft.speedBuff,
             onChange: function (v) {

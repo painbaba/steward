@@ -139,6 +139,48 @@ t.test('dumps do not throw on the bare host stubs', function () {
     t.assert.ok(count(s.H.logs(), 'diag:army') > 0);
 });
 
+// Stubs the host class lookup so the core manager helper finds `mgr`
+// (or nothing when `mgr` is null).
+function withManager(s, mgr) {
+    var prev = s.H.host.game.def;
+    s.H.host.game.def = function (name) {
+        if (name === 'com.bluebyte.tso.adventure.logic::AdventureManager') {
+            return mgr ? { getInstance: function () { return mgr; } } : null;
+        }
+        return prev(name);
+    };
+}
+
+t.test('dumpAdventures lists the manager\'s adventures through core', function () {
+    var s = setup();
+    var advs = [
+        { zoneID: 1, adventureName: 'AdvA', ownerPlayerID: 7, mine: true },
+        { zoneID: 2, adventureName: 'AdvB', ownerPlayerID: 8, mine: false }
+    ];
+    withManager(s, {
+        getAdventures: function () { return advs; },
+        isMyAdventure: function (adv) { return adv.mine; }
+    });
+    s.H.clearLogs();
+    s.army.dumpAdventures();
+    t.assert.strictEqual(count(s.H.logs(), 'diag:adv', /^adventures: 2$/), 1);
+    t.assert.strictEqual(count(s.H.logs(), 'diag:adv', /isMyAdventure=true/), 1);
+    t.assert.strictEqual(s.H.queued().length, 0);
+});
+
+t.test('dumpAdventures logs an error when the manager is missing', function () {
+    var s = setup();
+    withManager(s, null);
+    s.H.clearLogs();
+    s.army.dumpAdventures();
+    var errors = s.H.logs().filter(function (l) {
+        return l.level === 'error' && l.category === 'diag:adv' &&
+               /adventure manager unavailable/.test(String(l.args[0]));
+    });
+    t.assert.strictEqual(errors.length, 1);
+    t.assert.strictEqual(s.H.queued().length, 0);
+});
+
 t.test('inspect.TASK_GETTERS holds the seven task getters', function () {
     var H = harness.boot();
     // Copied into this realm: the list was built inside the vm context.

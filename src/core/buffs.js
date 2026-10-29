@@ -1,14 +1,19 @@
 /*
  * Buff inventory (read-only).
  *
- * Reads the star-menu buff stock and the buff definitions. Applying buffs
- * comes later; mining's buff phase waits on this file.
+ * Reads the star-menu buff stock (including adventure maps) and the buff
+ * definitions. Applying buffs comes later; mining's buff phase waits on this
+ * file.
  */
 
 (function (S) {
 
     // The only place the speed-buff name prefix exists.
     var SPEED_BUFF_PREFIX = 'GeneralSpeedBuff_';
+
+    // Star-menu type of adventure maps; the entry's resource is the adventure
+    // name. The only place this type name exists.
+    var ADVENTURE_MAP_TYPE = 'Adventure';
 
     function inventory() {
         var out = [];
@@ -38,6 +43,24 @@
             if (inv[i].type === type && !inv[i].resource) sum += (inv[i].amount || 0);
         }
         return sum;
+    }
+
+    // Adventure maps per adventure name. Runs on the menu's status tick, so
+    // it stays silent while the game is not loaded.
+    function mapCounts() {
+        try {
+            if (typeof game === 'undefined' || !game.gi || !game.gi.mCurrentPlayer) return {};
+        } catch (e) {
+            return {};
+        }
+        var out = {};
+        var inv = inventory();
+        for (var i = 0; i < inv.length; i++) {
+            if (inv[i].type !== ADVENTURE_MAP_TYPE || !inv[i].resource) continue;
+            var name = inv[i].resource;
+            out[name] = (out[name] || 0) + (inv[i].amount || 0);
+        }
+        return out;
     }
 
     function definedNames(prefix) {
@@ -88,6 +111,7 @@
         SPEED_BUFF_PREFIX: SPEED_BUFF_PREFIX,
         inventory:     inventory,
         amount:        amount,
+        mapCounts:     mapCounts,
         definedNames:  definedNames,
         isSpeedBuff:   isSpeedBuff,
         effectText:    effectText,

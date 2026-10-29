@@ -155,3 +155,51 @@ t.test('label: resolves through the ADN locale category', function () {
     var s = setup();
     assert.strictEqual(s.adv.label('AdvA'), 'Label AdvA');
 });
+
+// ---- ownOpen ---------------------------------------------------------------------
+
+function withManager(s, mgr) {
+    var prev = s.H.host.game.def;
+    s.H.host.game.def = function (name) {
+        if (name === 'com.bluebyte.tso.adventure.logic::AdventureManager') {
+            return mgr ? { getInstance: function () { return mgr; } } : null;
+        }
+        return prev(name);
+    };
+}
+
+t.test('ownOpen lists only own adventures', function () {
+    var s = setup();
+    var advs = [
+        { adventureName: 'AdvA', mine: true },
+        { adventureName: 'AdvB', mine: false },
+        { adventureName: 'AdvC', mine: true }
+    ];
+    withManager(s, {
+        getAdventures: function () { return advs; },
+        isMyAdventure: function (adv) { return adv.mine; }
+    });
+    assert.deepStrictEqual(plain(s.adv.ownOpen()), ['AdvA', 'AdvC']);
+});
+
+t.test('ownOpen is empty when the manager is missing', function () {
+    var s = setup();
+    withManager(s, null);
+    assert.deepStrictEqual(plain(s.adv.ownOpen()), []);
+});
+
+// ---- manager ---------------------------------------------------------------------
+
+t.test('manager returns the host instance', function () {
+    var s = setup();
+    var mgr = { getAdventures: function () { return []; } };
+    withManager(s, mgr);
+    assert.strictEqual(s.adv.manager(), mgr);
+});
+
+t.test('manager is null when the class is missing', function () {
+    var s = setup();
+    withManager(s, null);
+    assert.strictEqual(s.adv.manager(), null);
+    assert.strictEqual(s.H.logs().length, 0);
+});

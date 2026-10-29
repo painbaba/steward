@@ -99,3 +99,44 @@ t.test('ui.tab events is accepted', function () {
     t.assert.ok(H.Steward.kernel.registry.get('ev').ui);
     t.assert.strictEqual(H.Steward.kernel.registry.byTab('events').length, 1);
 });
+
+t.test('items as a function is kept', function () {
+    var H = harness.boot({ sections: ['kernel'] });
+    var fn = function () { return [{ label: 'A', onSelect: function () {} }]; };
+    H.Steward.kernel.register(menuSpec('m', fn));
+    t.assert.strictEqual(H.Steward.kernel.registry.get('m').menu.items, fn);
+    t.assert.strictEqual(H.Steward.kernel.registry.withMenu().length, 1);
+});
+
+t.test('separator and display-only items are accepted', function () {
+    var H = harness.boot({ sections: ['kernel'] });
+    H.Steward.kernel.register(menuSpec('m', [
+        { separator: true },
+        { label: 'Status', enabled: false },
+        { label: 'Go', onSelect: function () {} }
+    ]));
+    var items = H.Steward.kernel.registry.get('m').menu.items;
+    t.assert.strictEqual(items.length, 3);
+    t.assert.strictEqual(items[0].separator, true);
+    t.assert.strictEqual(items[1].enabled, false);
+    t.assert.strictEqual(items[1].onSelect, null);
+    t.assert.strictEqual(items[2].enabled, true);
+});
+
+t.test('a label function is accepted', function () {
+    var H = harness.boot({ sections: ['kernel'] });
+    var lf = function () { return 'dyn'; };
+    H.Steward.kernel.register(menuSpec('m', [{ label: lf, onSelect: function () {} }]));
+    t.assert.strictEqual(H.Steward.kernel.registry.get('m').menu.items[0].label, lf);
+});
+
+t.test('menuItems drops an item without label', function () {
+    var H = harness.boot({ sections: ['kernel'] });
+    var out = H.Steward.kernel.registry.menuItems('m', [
+        { onSelect: function () {} },
+        { label: '', onSelect: function () {} },
+        { label: 'Ok', onSelect: function () {} }
+    ]);
+    t.assert.strictEqual(out.length, 1);
+    t.assert.strictEqual(out[0].label, 'Ok');
+});

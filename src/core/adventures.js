@@ -1,9 +1,9 @@
 /*
  * Adventure definitions (read-only).
  *
- * Reads the adventure definition map. Starting and closing adventures comes
- * later. The list offers attack adventures only, matching autoTSO's template
- * maker.
+ * Reads the adventure definition map, the AdventureManager and the player's
+ * own open adventures. Starting and closing adventures comes later. The list
+ * offers attack adventures only, matching autoTSO's template maker.
  */
 
 (function (S) {
@@ -11,6 +11,9 @@
     // autoTSO skips these groups in its template maker. A group is the type
     // when the adventure has no campaign.
     var HIDDEN_TYPES = ['Scenario', 'Coop'];
+
+    // The host class whose singleton lists the open adventures.
+    var ADVENTURE_MANAGER = 'com.bluebyte.tso.adventure.logic::AdventureManager';
 
     function str(fn) {
         try { return fn(); } catch (e) { return ''; }
@@ -101,13 +104,53 @@
         return S.core.locale.adn(name);
     }
 
+    // Returns the host AdventureManager instance, or null. Silent because it
+    // runs on the menu tick; callers decide whether a missing manager is worth logging.
+    function manager() {
+        try {
+            var cls = game.def(ADVENTURE_MANAGER);
+            return (cls && cls.getInstance()) || null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // Names of the player's own open adventures. Runs on the menu's status
+    // tick, so it never logs; any failure means "none".
+    function ownOpen() {
+        var out = [];
+        try {
+            var mgr = manager();
+            if (!mgr) return [];
+            var advs = mgr.getAdventures();
+            try {
+                if (advs && typeof advs.toArray === 'function') {
+                    var arr = advs.toArray();
+                    if (arr && typeof arr.length === 'number') advs = arr;
+                }
+            } catch (e1) { /* fall back to the index walk */ }
+            var n = (advs && typeof advs.length === 'number') ? advs.length : 0;
+            for (var i = 0; i < n; i++) {
+                try {
+                    var adv = advs[i];
+                    if (mgr.isMyAdventure(adv)) out.push(String(adv.adventureName));
+                } catch (e2) { /* skip this entry */ }
+            }
+        } catch (e) {
+            return [];
+        }
+        return out;
+    }
+
     S.core.adventures = {
         HIDDEN_TYPES: HIDDEN_TYPES,
         definitions:  definitions,
         groupOf:      groupOf,
         isSelectable: isSelectable,
         groups:       groups,
-        label:        label
+        label:        label,
+        manager:      manager,
+        ownOpen:      ownOpen
     };
 
 }(Steward));

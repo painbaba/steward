@@ -1,6 +1,6 @@
 {
   "name": "steward",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Modular automation framework for The Settlers Online — kernel, core library, and pluggable task modules. Adobe AIR userscript.",
   "private": true,
   "license": "GPL-3.0-or-later",

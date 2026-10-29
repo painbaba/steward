@@ -24,14 +24,34 @@
  *   }
  *
  * Menu spec (optional): a module can add a submenu to the native ~Steward~
- * menu via a `menu` field. Items are always enabled (the menu is built
- * once, on init, so a live enabled flag would go stale); an item
- * that depends on game state reports that itself when selected.
+ * menu via a `menu` field. `items` is an array, or a function returning
+ * one; a function is called when the submenu is built (at init, and when
+ * the module asks for a rebuild), not at register time, so it can list
+ * data the module loads in its boot.
  *
  *   menu: {
  *     title: 'Events',                       // submenu label
  *     items: [ { label: 'Event calculator…', onSelect: function () {} } ]
  *   }
+ *
+ * Item shapes:
+ *
+ *   { separator: true }                      // divider line
+ *   { label: 'Do it', onSelect: fn }         // action; always enabled
+ *   { label: 'Info', enabled: false }        // display-only line, no onSelect
+ *
+ * Actionable items are always enabled (a live enabled flag would go stale
+ * between rebuilds); an item that depends on game state reports that
+ * itself when selected. `label` is a string or a function `label(pass)`
+ * returning the text. Label functions are re-evaluated on the status tick
+ * and the text is written in place only when it changed, because every
+ * native label write (and every rebuild) leaks objects in AIR. `pass` is
+ * one fresh object per module per build or refresh, shared by that
+ * module's label functions, so an expensive read can be done once per pass.
+ *
+ * When the item set itself changes (not just a label), the module calls
+ * Steward.kernel.ui.refreshModuleMenu(id), which rebuilds only its own
+ * submenu. Do that on a user action only, never on a timer.
  *
  * The `events` tab hosts read-only event tools.
  *
@@ -87,24 +107,58 @@
         };
     }
 
-    // Validate and normalise the optional menu spec. Invalid items are
-    // dropped; when none survive the whole menu is dropped. Either way the
-    // module still registers.
-    function validateMenu(moduleId, raw) {
-        if (!raw || typeof raw !== 'object') return null;
-        if (!raw.title || !Array.isArray(raw.items)) {
-            S.kernel.warn('registry', moduleId, 'menu requires title and items array');
-            return null;
+    // Normalise a menu item list. Used for a static array at register time
+    // and by the UI shell for the result of an `items` function at build
+    // time, so both paths accept exactly the same shapes. Invalid items are
+    // dropped with a warning.
+    function normalizeMenuItems(moduleId, raw) {
+        if (!Array.isArray(raw)) {
+            S.kernel.warn('registry', moduleId, 'menu items is not an array');
+            return [];
         }
         var items = [];
-        for (var i = 0; i < raw.items.length; i++) {
-            var it = raw.items[i];
-            if (!it || typeof it !== 'object' || !it.label || !isFunction(it.onSelect)) {
+        for (var i = 0; i < raw.length; i++) {
+            var it = raw[i];
+            if (!it || typeof it !== 'object') {
                 S.kernel.warn('registry', moduleId, 'menu item', i, 'requires label and onSelect');
                 continue;
             }
-            items.push({ label: String(it.label), onSelect: it.onSelect });
+            if (it.separator === true) {
+                items.push({ separator: true });
+                continue;
+            }
+            var hasLabel = isFunction(it.label) || (typeof it.label === 'string' && it.label !== '');
+            if (!hasLabel) {
+                S.kernel.warn('registry', moduleId, 'menu item', i, 'requires label');
+                continue;
+            }
+            var enabled = it.enabled !== false;
+            if (enabled && !isFunction(it.onSelect)) {
+                S.kernel.warn('registry', moduleId, 'menu item', i, 'requires label and onSelect');
+                continue;
+            }
+            items.push({
+                label:    isFunction(it.label) ? it.label : String(it.label),
+                onSelect: isFunction(it.onSelect) ? it.onSelect : null,
+                enabled:  enabled
+            });
         }
+        return items;
+    }
+
+    // Validate and normalise the optional menu spec. A static array is
+    // normalised now: invalid items are dropped, and when none survive the
+    // whole menu is dropped. An `items` function is kept as is and its
+    // result is normalised when the submenu is built. Either way the module
+    // still registers.
+    function validateMenu(moduleId, raw) {
+        if (!raw || typeof raw !== 'object') return null;
+        if (!raw.title || !(Array.isArray(raw.items) || isFunction(raw.items))) {
+            S.kernel.warn('registry', moduleId, 'menu requires title and items (array or function)');
+            return null;
+        }
+        if (isFunction(raw.items)) return { title: String(raw.title), items: raw.items };
+        var items = normalizeMenuItems(moduleId, raw.items);
         if (!items.length) {
             S.kernel.warn('registry', moduleId, 'menu has no valid items');
             return null;
@@ -213,6 +267,7 @@
         byTab:   byTab,
         withUi:  withUi,
         withMenu: withMenu,
+        menuItems: normalizeMenuItems,
         get:     get,
         count:   count,
         TABS:    TABS

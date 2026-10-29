@@ -13,10 +13,10 @@
 | `Steward.core.packets`     | `SendServerAction` and `SendMessagetoServer` wrappers. |
 | `Steward.core.locale`      | `loca.GetText` shorthand + safe formatter.            |
 | `Steward.core.events`      | Active events and their per-task modifiers.           |
-| `Steward.core.adventures`  | Adventure definitions, grouped for the template maker. |
+| `Steward.core.adventures`  | Adventure definitions, grouped for the template maker, and the player's own open adventures. |
 | `Steward.core.army`        | Free troop pool, squads, composition checks, supply plan. |
 | `Steward.core.battles`     | Battle-file loader and validator against the army.    |
-| `Steward.core.buffs`       | Star-menu buff stock and buff definitions.            |
+| `Steward.core.buffs`       | Star-menu buff stock (including adventure maps) and buff definitions. |
 
 The adventures, army, battles and buffs rows are read-only in this phase: nothing they offer sends a packet or changes an army.
 

@@ -194,12 +194,29 @@ new Modal(id, title, removeOnHide);
 modal.create(); modal.show(); modal.hide();
 modal.Body(); modal.Title(); modal.Footer(); modal.Data();
 
+prompt(text, default);   // string, or null on cancel; blocks the JS thread while open
+confirm(text);           // boolean; blocks the JS thread while open
+
 createTableRow([[4, 'Col1'], [4, 'Col2'], [4, 'Col3']], false);
 createSwitch('id', true, function () { /* on change */ });
 
 getImageTag('Coin', '24px');
 assets.GetResourceIcon('Coin');
 ```
+
+## Star menu and adventures
+
+The star menu stock is `game.gi.mCurrentPlayer.getAvailableBuffs_vector()`. Each entry has `GetType()`, `GetResourceName_string()` and `amount`. Adventure maps have type `Adventure` and the adventure name as resource.
+
+The player's open adventures come from the AdventureManager:
+
+```js
+var mgr = game.def('com.bluebyte.tso.adventure.logic::AdventureManager').getInstance();
+var advs = mgr.getAdventures();   // AS3 vector; adv.adventureName
+mgr.isMyAdventure(adv);           // true for the player's own
+```
+
+Steward code reads it through `Steward.core.adventures.manager()`, which returns the instance or null and stays silent.
 
 ## Time
 
