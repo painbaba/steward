@@ -80,6 +80,8 @@ The build script (`scripts/build.js`) concatenates files in this order:
 
 The numeric prefixes inside `src/kernel/` matter: `00_namespace.js` runs before `40_registry.js` runs before `70_lifecycle.js`. Once the kernel is fully attached, core files can rely on `Steward.kernel.*` being there. By the time module files are concatenated, both kernel and core are available.
 
+`05_reload.js` runs right after the namespace. When the host reloads userscripts into the same page and global, the new bundle finds the previous instance there and shuts it down before any later kernel file replaces its `Steward.kernel.*` slots. Every later kernel file must therefore come after it.
+
 ## Lifecycle
 
 ```
@@ -101,10 +103,14 @@ tick (every <tickInterval> ms)
   ├─ drain queue (FIFO with per-task delay)
   └─ schedule next tick
 
-shutdown (rare — settings change, manual stop)
+shutdown (script reload: the next bundle calls it on the previous instance)
   ├─ scheduler.stop()
-  └─ flush logger
+  ├─ queue.reset()
+  ├─ ui.dispose()            ← stops the 5 s status interval
+  └─ flush settings and log
 ```
+
+The native menu writes a label only when its text changes. Label writes on native items are observed to grow the AIR client's object count, so an unchanged label is skipped on each tick.
 
 The tick interval defaults to **10 seconds** (configurable via `Steward.kernel.settings.read('scheduler').tickInterval`).
 

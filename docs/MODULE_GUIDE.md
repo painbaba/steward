@@ -258,7 +258,7 @@ tick N:  isReady(ctx) → plan(ctx) → kernel drains queue
 …
 ```
 
-There is no explicit unload — modules live for the lifetime of the client. If you need to disable a module at runtime, gate everything behind `settings.enabled` in `isReady`.
+There is no module unload. When the host reloads scripts, the new bundle shuts down the previous instance's scheduler, queue and status interval, and the old module closures are orphaned. Do not start timers of your own (`setInterval`, `setTimeout` loops): they are not stopped on reload and would keep running beside the new instance. Plan work through `plan(ctx)` so the kernel owns the timing. If you need to disable a module at runtime, gate everything behind `settings.enabled` in `isReady`.
 
 ## Naming and discoverability
 

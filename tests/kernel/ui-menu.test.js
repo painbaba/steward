@@ -4,10 +4,11 @@ var t = require('../runner');
 var harness = require('../harness');
 
 // Native menu stubs with construction counters, so a test can tell an
-// in-place label update from a rebuild (which constructs new menus/items).
+// in-place label update from a rebuild (which constructs new menus/items),
+// and a label-write counter (AIR leaks native objects on label writes).
 function installMenuStubs(H) {
     var air = H.ctx.air;
-    var counts = { menus: 0, items: 0 };
+    var counts = { menus: 0, items: 0, labelWrites: 0 };
 
     function NativeMenu() {
         counts.menus++;
@@ -28,13 +29,17 @@ function installMenuStubs(H) {
 
     function NativeMenuItem(label, isSep) {
         counts.items++;
-        this.label = label;
+        this._label = label; // direct: construction is not a label write
         this.isSeparator = !!isSep;
         this.name = '';
         this.enabled = true;
         this.submenu = null;
         this.onSelect = null;
     }
+    Object.defineProperty(NativeMenuItem.prototype, 'label', {
+        get: function () { return this._label; },
+        set: function (v) { this._label = v; counts.labelWrites++; }
+    });
     NativeMenuItem.prototype.addEventListener = function (type, fn) {
         if (type === 'select') this.onSelect = fn;
     };
@@ -50,8 +55,9 @@ function installMenuStubs(H) {
     return { counts: counts, rootMenu: rootMenu };
 }
 
-function setup() {
-    var H = harness.boot({ sections: ['kernel'] });
+function setup(opts) {
+    opts = opts || {};
+    var H = harness.boot({ sections: ['kernel'], timers: opts.timers });
     var M = installMenuStubs(H);
     H.Steward.kernel.register({
         id:       'alpha',
@@ -120,5 +126,69 @@ t.test('pause toggle updates its label in place', function () {
     var before = snapshot(s.counts);
     s.H.Steward.kernel.ui.toggle();
     t.assert.strictEqual(root.submenu.getItemByName('StewardPause').label, 'Steward: ✕ Paused');
+    t.assert.deepStrictEqual(snapshot(s.counts), before);
+});
+
+// Brings the label cache to the steady state of an idle tick.
+function settle(s) {
+    s.H.Steward.kernel.ui.status.refresh();
+    s.counts.labelWrites = 0;
+}
+
+t.test('idle refresh writes no labels after the first tick', function () {
+    var s = setup();
+    s.H.Steward.kernel.ui.status.refresh();
+    s.counts.labelWrites = 0;
+    for (var i = 0; i < 10; i++) s.H.Steward.kernel.ui.status.refresh();
+    t.assert.strictEqual(s.counts.labelWrites, 0);
+});
+
+t.test('pause toggle writes only changed labels', function () {
+    var s = setup();
+    settle(s);
+    s.H.Steward.kernel.ui.toggle();
+    t.assert.strictEqual(s.counts.labelWrites, 2);
+    s.counts.labelWrites = 0;
+    s.H.Steward.kernel.ui.status.refresh();
+    t.assert.strictEqual(s.counts.labelWrites, 0);
+});
+
+t.test('external enabled flip writes only that toggle', function () {
+    var s = setup();
+    settle(s);
+    s.H.settings.write('alpha', { enabled: false });
+    s.H.Steward.kernel.ui.status.refresh();
+    t.assert.strictEqual(s.counts.labelWrites, 1);
+    t.assert.strictEqual(toggleItem(s.rootMenu).label, '✕ Alpha');
+});
+
+t.test('quick-toggle click writes one label', function () {
+    var s = setup();
+    settle(s);
+    toggleItem(s.rootMenu).onSelect();
+    t.assert.strictEqual(s.counts.labelWrites, 1);
+});
+
+t.test('rebuild reseeds the cache', function () {
+    var s = setup();
+    settle(s);
+    s.H.Steward.kernel.ui.init();
+    s.counts.labelWrites = 0;
+    s.H.Steward.kernel.ui.status.refresh();
+    t.assert.strictEqual(s.counts.labelWrites, 0);
+});
+
+t.test('dispose stops the status interval and blocks init', function () {
+    var live = {};
+    var next = 1;
+    var s = setup({ timers: {
+        setInterval:   function (fn) { var id = next++; live[id] = fn; return id; },
+        clearInterval: function (id) { delete live[id]; }
+    } });
+    t.assert.strictEqual(Object.keys(live).length, 1);
+    s.H.Steward.kernel.ui.dispose();
+    t.assert.strictEqual(Object.keys(live).length, 0);
+    var before = snapshot(s.counts);
+    s.H.Steward.kernel.ui.init();
     t.assert.deepStrictEqual(snapshot(s.counts), before);
 });

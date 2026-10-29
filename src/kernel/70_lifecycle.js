@@ -12,11 +12,19 @@
  * Boot is auto-scheduled at the end of this file via a deferred setTimeout —
  * by the time the timer fires, every other source file in the bundle (kernel,
  * core, modules) has finished its IIFE and registered itself.
+ *
+ * Steward.kernel.lifecycle.shutdown() stops the scheduler, resets the queue,
+ * disposes the UI shell (status interval) and flushes settings. It is used
+ * when the host reloads userscripts into the same page: the next bundle calls
+ * it before replacing the kernel, so the old instance stops acting.
  */
 
 (function (S) {
 
     var booted = false;
+    // Set by shutdown(). A reload can land inside the boot defer below; the
+    // stale timer must then not boot an instance that was already torn down.
+    var disposed = false;
 
     function applyLoggerSettings() {
         var s = S.kernel.settings.read('logger');
@@ -52,7 +60,7 @@
     }
 
     function boot() {
-        if (booted) return;
+        if (booted || disposed) return;
         booted = true;
 
         S.kernel.log('lifecycle', 'boot starting');
@@ -93,10 +101,37 @@
                      '— state:', startPaused ? 'paused' : 'active');
     }
 
+    // Calls obj[name]() if it exists. Returns true only when the call ran
+    // without throwing, so shutdown can fall back to an older entry point and
+    // a failing step never stops the remaining ones.
+    function callIf(obj, name) {
+        if (!obj || typeof obj[name] !== 'function') return false;
+        try {
+            obj[name]();
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // The single teardown sequence: scheduler, queue, status interval, then a
+    // settings flush. Shutdown reaches the kernel through the shared Steward
+    // global at call time, so on a script reload it must run before the next
+    // bundle replaces those slots; the next bundle's 05_reload.js calls it
+    // first thing for that reason. It changes no setting (the flush only
+    // persists pending writes), so the persisted pause survives the reload.
+    // A second call is a no-op.
     function shutdown() {
-        try { S.kernel.scheduler.stop(); } catch (e) { /* ignore */ }
-        try { S.kernel.settings.flush(); } catch (e) { /* ignore */ }
-        S.kernel.log('lifecycle', 'shutdown complete');
+        if (disposed) return;
+        disposed = true;
+        var k = S.kernel;
+        callIf(k.scheduler, 'stop');
+        // Same stop + reset pairing as pausing: queued work of this instance
+        // must not be picked up by anything after it.
+        callIf(k.queue, 'reset');
+        if (!callIf(k.ui, 'dispose')) callIf(k.ui, 'stopStatusUpdater');
+        callIf(k.settings, 'flush');
+        try { k.log('lifecycle', 'shutdown complete'); } catch (e) { /* logger gone */ }
     }
 
     S.kernel.lifecycle = {

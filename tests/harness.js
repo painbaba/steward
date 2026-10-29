@@ -8,6 +8,10 @@
  *
  * Per-test isolation: each boot() call creates a brand-new vm context. State
  * does not leak between tests (no shared Steward, no shared host globals).
+ * Source is version-substituted the same way as the build (scripts/version.js).
+ * reload(H) is the one deliberate exception: it re-runs the same files into
+ * H.ctx, which simulates the host's reloadScripts injecting a second bundle
+ * into the same page and global.
  *
  * Usage:
  *   var H = harness.boot();                 // kernel + core + modules
@@ -15,6 +19,10 @@
  *   H.settings.write('mining', { enabled: true });
  *   H.module('mining').plan({ zone: { isHome: true } });
  *   assert(H.queued().length === 1);
+ *   var H2 = harness.reload(H);             // second injection, same context
+ *
+ * opts.timers may override setTimeout / clearTimeout / setInterval /
+ * clearInterval in the context (default: inert stubs).
  */
 
 'use strict';
@@ -28,11 +36,15 @@ var zoneStubs   = require('./stubs/zone');
 var specStubs   = require('./stubs/specialists');
 var kernelStubs = require('./stubs/kernel');
 var loadOrder   = require('./load-order');
+var version     = require('../scripts/version');
 
 var REPO_ROOT = path.resolve(__dirname, '..');
 
 function readSource(rel) {
-    return fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
+    return version.inject(
+        fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8'),
+        version.read(REPO_ROOT)
+    );
 }
 
 function boot(opts) {
@@ -41,12 +53,14 @@ function boot(opts) {
 
     var host = hostStubs.make(opts.host || {});
 
+    var timers = opts.timers || {};
+
     var ctx = {
         // Node stdlib that source files might touch (defensive).
-        setTimeout:   function () { return 0; },
-        clearTimeout: function () {},
-        setInterval:  function () { return 0; },
-        clearInterval: function () {},
+        setTimeout:   timers.setTimeout   || function () { return 0; },
+        clearTimeout: timers.clearTimeout || function () {},
+        setInterval:  timers.setInterval  || function () { return 0; },
+        clearInterval: timers.clearInterval || function () {},
         Date:    Date,
         Math:    Math,
         JSON:    JSON,
@@ -79,6 +93,11 @@ function boot(opts) {
     };
     vm.createContext(ctx);
 
+    return load(ctx, host, sections);
+}
+
+// Runs the section files into ctx and wraps the resulting Steward.
+function load(ctx, host, sections) {
     var files = loadOrder.collect(sections, REPO_ROOT);
     for (var i = 0; i < files.length; i++) {
         var rel = files[i];
@@ -101,6 +120,7 @@ function boot(opts) {
         Steward:    Steward,
         ctx:        ctx,
         host:       host,
+        sections:   sections,
         zone:       zoneStubs,
         specs:      specStubs,
         logs:       caps.logs,
@@ -127,6 +147,13 @@ function boot(opts) {
     };
 }
 
+// Simulates the host's reloadScripts: re-runs the same files (or
+// opts.sections) into the existing context and returns a new harness object.
+function reload(H, opts) {
+    opts = opts || {};
+    return load(H.ctx, H.host, opts.sections || H.sections);
+}
+
 function noop() {}
 
-module.exports = { boot: boot };
+module.exports = { boot: boot, reload: reload };

@@ -23,6 +23,7 @@ const path = require("path");
 const { execSync } = require("child_process");
 const { minify } = require("terser");
 const loadOrder = require("../tests/load-order");
+const version = require("./version");
 
 const REPO_ROOT = path.resolve(__dirname, "..");
 const BUILD_DIR = path.join(REPO_ROOT, "build");
@@ -51,18 +52,6 @@ function gitShortSha() {
 
 function isoDate() {
 	return new Date().toISOString().slice(0, 10);
-}
-
-function readVersion() {
-	if (process.env.STEWARD_VERSION) return process.env.STEWARD_VERSION;
-	try {
-		const pkg = JSON.parse(
-			fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"),
-		);
-		return pkg.version || "0.0.0";
-	} catch (e) {
-		return "0.0.0";
-	}
 }
 
 function banner(version, sha, date, fileCount, byteCount) {
@@ -104,7 +93,8 @@ async function build() {
 		}
 	}
 
-	const body = parts.join("\n");
+	const v = version.read(REPO_ROOT);
+	const body = version.inject(parts.join("\n"), v);
 
 	let finalCode = body;
 
@@ -131,11 +121,10 @@ async function build() {
 		console.error("Minification failed, using raw body:", err);
 	}
 
-	const version = readVersion();
 	const sha = gitShortSha();
 	const date = isoDate();
 	const head = banner(
-		version,
+		v,
 		sha,
 		date,
 		totalFiles,
@@ -151,7 +140,7 @@ async function build() {
 			" files, " +
 			Buffer.byteLength(head + finalCode, "utf8") +
 			" bytes, v" +
-			version +
+			v +
 			" / " +
 			sha +
 			")\n",

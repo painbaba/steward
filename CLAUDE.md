@@ -53,6 +53,12 @@ and git housekeeping directly, without the pipeline.
 Agents never `git add`, commit or push; the user commits. Commit messages are
 short, topic-prefixed (`mining: ...`) and end with `Assisted-by: Claude`.
 
+Versioning: `package.json` `version` is the only hand-kept version (the build
+injects it into the bundle banner and the dashboard Build row). Every shipped
+task bumps it exactly once, as part of that task's change: a new module or a
+massive redesign bumps minor, a bugfix or smaller feature bumps patch. Use
+`npm version <x.y.z> --no-git-tag-version` so `package-lock.json` follows.
+
 Line limits on agent-facing markdown (this file at most 200 lines, agents 100,
 SKILL.md 160, handoff/todo notes 70) are enforced by a local hook; see
 `.claude/pipeline/RULES.md` when present.

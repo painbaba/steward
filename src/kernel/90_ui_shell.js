@@ -44,6 +44,15 @@
     var initAttempts = 0;
     var initialized = false;
     var paused = false;
+    // Set once a script reload has replaced this bundle; blocks a pending
+    // init retry from building a second menu for the dead instance.
+    var disposed = false;
+
+    // Last label string written per native item ('status', 'pause',
+    // 'toggle:<id>'). AIR leaks native objects on every label write, so an
+    // unchanged text is never rewritten. Kept in JS because NativeMenuItem is
+    // sealed (no expando) and reading item.label back crosses the AIR bridge.
+    var lastLabels = {};
 
     var dashboard = {
         modal:     null,
@@ -94,6 +103,15 @@
 
     function pauseLabel() { return paused ? 'Steward: ✕ Paused' : 'Steward: ✓ Active'; }
 
+    // Writes `text` to the item's label only when it differs from the last
+    // string written to that slot. The cache is updated before the write so
+    // an invalidated item that throws is not retried on every status tick.
+    function writeLabel(slot, item, text) {
+        if (!item || lastLabels[slot] === text) return;
+        lastLabels[slot] = text;
+        try { item.label = text; } catch (e) { /* invalidated */ }
+    }
+
     // Quick-toggle label, or null when the module has no `enabled` flag (no
     // toggle entry exists for it). Shared by the build and the in-place refresh.
     function toggleLabel(mod) {
@@ -127,6 +145,9 @@
     function rebuildNativeMenu() {
         if (!nativeMenuAvailable()) return false;
         try {
+            // Fresh items carry their constructor labels; the cache restarts
+            // from those so the next tick does not rewrite identical text.
+            lastLabels = {};
             var attach = attachContainer();
             var container = attach.container;
             removeIfPresent(container, 'StewardRoot');
@@ -140,7 +161,9 @@
             root.name = 'StewardRoot';
             var sub = new air.NativeMenu();
 
-            pauseItem = new air.NativeMenuItem(pauseLabel());
+            var pLabel = pauseLabel();
+            pauseItem = new air.NativeMenuItem(pLabel);
+            lastLabels.pause = pLabel;
             pauseItem.name = 'StewardPause';
             pauseItem.enabled = true;
             try { pauseItem.addEventListener(air.Event.SELECT, togglePause); }
@@ -149,7 +172,9 @@
 
             try { sub.addItem(new air.NativeMenuItem('', true)); } catch (e) { /* sep */ }
 
-            statusItem = new air.NativeMenuItem(statusText || statusLabel());
+            var sLabel = statusText || statusLabel();
+            statusItem = new air.NativeMenuItem(sLabel);
+            lastLabels.status = sLabel;
             statusItem.name = 'StewardStatus';
             statusItem.enabled = false;
             sub.addItem(statusItem);
@@ -184,8 +209,9 @@
     }
 
     // Rebuilding the native menu leaks native menus in AIR, so after init
-    // only the labels of the existing items change. Also re-syncs labels after
-    // an `enabled` flip made outside the menu (dashboard Save, console write).
+    // only the labels of the existing items change, and only when the text
+    // differs (unchanged labels are skipped). Also re-syncs labels after an
+    // `enabled` flip made outside the menu (dashboard Save, console write).
     function refreshToggleLabels() {
         if (!initialized) return;
         try {
@@ -195,7 +221,7 @@
                 if (!item) continue;
                 var label = toggleLabel(mods[i]);
                 if (label === null) continue;
-                try { item.label = label; } catch (e) { /* invalidated */ }
+                writeLabel('toggle:' + mods[i].id, item, label);
             }
         } catch (e) {
             S.kernel.error('ui', 'refreshToggleLabels threw:', e);
@@ -269,6 +295,7 @@
             });
         } catch (e) { /* ignore */ }
         toggleItems[mod.id] = item;
+        lastLabels['toggle:' + mod.id] = label;
         sub.addItem(item);
     }
 
@@ -290,6 +317,7 @@
     }
 
     function init() {
+        if (disposed) return;
         if (initialized) { rebuildNativeMenu(); return; }
         if (!nativeMenuAvailable()) {
             initAttempts++;
@@ -343,17 +371,13 @@
 
     function setStatus(text) {
         statusText = text || '';
-        if (statusItem) {
-            try { statusItem.label = statusText; } catch (e) { /* invalidated */ }
-        }
+        writeLabel('status', statusItem, statusText);
     }
 
     function refreshStatus() {
         try {
             setStatus(statusLabel());
-            if (pauseItem) {
-                try { pauseItem.label = pauseLabel(); } catch (e) { /* invalidated */ }
-            }
+            writeLabel('pause', pauseItem, pauseLabel());
             refreshToggleLabels();
         } catch (e) { /* ignore */ }
     }
@@ -725,7 +749,9 @@
         $panel.append(h.formRow('Queue depth', String(S.kernel.queue.depth())));
         $panel.append(h.formRow('Tick interval',
             S.kernel.scheduler.state.tickIntervalMs + ' ms'));
-        $panel.append(h.formRow('Build', $('<code>').text('v0.4.0')));
+        var ver = S.kernel.VERSION;
+        var verLabel = (typeof ver === 'string' && /^\d/.test(ver)) ? 'v' + ver : 'dev';
+        $panel.append(h.formRow('Build', $('<code>').text(verLabel)));
 
         $panel.append($('<div>').css({ height: '10px' }));
 
@@ -843,8 +869,20 @@
     S.kernel.ui.markDirty        = markDirty;
 
     var statusUpdater = setInterval(refreshStatus, S.kernel.TIMEOUTS.STATUS_UPDATE_MS);
-    S.kernel.ui.stopStatusUpdater = function () {
+
+    function stopStatusUpdater() {
         if (statusUpdater) { clearInterval(statusUpdater); statusUpdater = null; }
-    };
+    }
+
+    // Called by lifecycle shutdown when a script reload replaces this bundle:
+    // stops the status interval and keeps a pending init retry from building
+    // a menu for this dead instance.
+    function dispose() {
+        disposed = true;
+        stopStatusUpdater();
+    }
+
+    S.kernel.ui.stopStatusUpdater = stopStatusUpdater;
+    S.kernel.ui.dispose           = dispose;
 
 }(Steward));

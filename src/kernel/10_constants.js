@@ -1,11 +1,16 @@
 /*
  * Kernel-wide constants.
  *
- * Scheduler/queue timings and limits live here so call sites never carry
- * magic numbers and a single edit changes them everywhere.
+ * Scheduler/queue timings, limits and the release version live here so call
+ * sites never carry magic numbers and a single edit changes them everywhere.
  */
 
 (function (S) {
+
+    // Release version. The build (and the test harness) replace this literal
+    // with package.json's version; assigned unconditionally so a script reload
+    // shows the new bundle's version.
+    S.kernel.VERSION = '__STEWARD_VERSION__';
 
     S.kernel.TIMEOUTS = {
         TICK_INTERVAL_MS:        10000,    // Steward.scheduler default tick interval

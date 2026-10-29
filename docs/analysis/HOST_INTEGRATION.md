@@ -112,6 +112,8 @@ There's no native concept of a top-level "this userscript's menu". Userscripts t
 
 So **the host already provides per-userscript enable/disable**. Steward doesn't need to build its own; it just needs to be aware that the host can disable it without warning.
 
+`reloadScripts` re-injects the bundle into the same page and global, so a second copy of Steward starts while the first is still running. The new bundle therefore tears down the previous instance itself (`src/kernel/05_reload.js`): it stops the scheduler, the queue and the status interval before replacing the kernel. Known limitation: if Steward is disabled in the manager and scripts are reloaded, no new bundle is injected, so the running instance stays alive until the client restarts.
+
 ## Implications for Steward
 
 1. **Settings backend.** Steward should delegate to `settings.store/read` instead of writing its own JSON file. Per-module namespace `'steward.<id>'` (e.g. `'steward.collect'`, `'steward.kernel'`). Gains: per-profile separation, dropbox sync, single place to inspect.
