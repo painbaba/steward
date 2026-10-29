@@ -1,10 +1,11 @@
 /*
- * Army library (read-only).
+ * Army library.
  *
  * Reads the free troop pool and every own general's and carrier's squads,
  * classifies troops as base or elite, compares compositions exactly and plans
- * where the troops for a wave come from. Nothing here sends a packet or
- * changes an army; raising and unloading come later.
+ * where the troops for a wave come from. The readers send nothing. raise()
+ * and unload() only build action defs (see actions.js); the caller runs them
+ * with S.core.actions.attempt, which sends and verifies.
  *
  * Bundle slot: core, after adventures.js and before buildings.js. Every
  * reference to another core (specialists, zone) happens at call time, so the
@@ -33,6 +34,9 @@
     // Unit category of the squads that form the free pool in the zone army.
     // Confirm with the category column of the diagnostics army dump.
     var FREE_POOL_CATEGORY = 0;
+
+    // Verify window per send for a raise or an unload.
+    var ACTION_TIMEOUT_MS = 15000;
 
     function has(obj, key) {
         return Object.prototype.hasOwnProperty.call(obj, key);
@@ -184,14 +188,21 @@
         return out;
     }
 
-    function generalArmy(spec) {
-        if (!spec) return {};
+    // A general's squads as a map, or null when they cannot be read (no
+    // specialist, no getter, or a throw). Verification needs the difference
+    // between "empty" ({}) and "unreadable" (null); generalArmy flattens it.
+    function readGeneralArmy(spec) {
+        if (!spec) return null;
         try {
             if (typeof spec.GetArmy === 'function') return squads(spec.GetArmy());
         } catch (e) {
             S.kernel.warn('army', 'generalArmy() threw:', e);
         }
-        return {};
+        return null;
+    }
+
+    function generalArmy(spec) {
+        return readGeneralArmy(spec) || {};
     }
 
     function freeArmy() {
@@ -251,6 +262,27 @@
         return false;
     }
 
+    // The client's own unload conditions: an own general that is idle, home
+    // (a real garrison grid, not the star menu), not travelling and holding
+    // troops. This is the one place the condition lives; inventory's donorOk
+    // uses it too. known optionally carries values the caller already read
+    // ({ own, army, grid, idle, travelling }) so a getter that fails is not
+    // read, and warned about, a second time.
+    function canUnload(spec, known) {
+        known = known || {};
+        if (!spec) return false;
+        if (known.own !== true && !isOwn(spec)) return false;
+        var idle = typeof known.idle === 'boolean' ? known.idle
+            : S.core.specialists.status(spec) === S.SpecialistStatus.Idle;
+        if (!idle) return false;
+        var travelling = typeof known.travelling === 'boolean' ? known.travelling : isTravelling(spec);
+        if (travelling) return false;
+        var grid = has(known, 'grid') ? known.grid : garrisonGrid(spec);
+        if (typeof grid !== 'number' || !(grid > 0)) return false;
+        var army = has(known, 'army') ? known.army : readGeneralArmy(spec);
+        return total(army) > 0;
+    }
+
     // Free pool, per-general armies and the facts the planner needs, keyed
     // by the specialist's unique id key.
     function inventory() {
@@ -275,7 +307,7 @@
                 idle:       idle,
                 grid:       grid,
                 travelling: travelling,
-                donorOk:    idle && !travelling && typeof grid === 'number' && grid > 0 && total(army) > 0
+                donorOk:    canUnload(spec, { own: true, army: army, grid: grid, idle: idle, travelling: travelling })
             };
             assigned = add(assigned, army);
         }
@@ -359,13 +391,149 @@
         };
     }
 
+    // --- Raising and unloading (action defs for S.core.actions.attempt).
+
+    function sameKeys(map) {
+        return add(map, {});
+    }
+
+    // The raise message carries the full target composition, not a delta.
+    // null when the host cannot build the value objects.
+    function buildRaiseVO(spec, target) {
+        try {
+            if (!spec || typeof game === 'undefined' || !game || typeof game.def !== 'function') return null;
+            var vo = game.def('Communication.VO::dRaiseArmyVO', true);
+            if (!vo || !vo.unitSquads) return null;
+            vo.armyHolderSpecialistVO = spec.CreateSpecialistVOFromSpecialist();
+            var want = sameKeys(target);
+            for (var unit in want) {
+                if (!has(want, unit)) continue;
+                var r = game.def('Communication.VO::dResourceVO', true);
+                if (!r) return null;
+                r.name_string = unit;
+                r.amount = want[unit];
+                vo.unitSquads.addItem(r);
+            }
+            return vo;
+        } catch (e) {
+            S.kernel.warn('army', 'buildRaiseVO() threw:', e);
+            return null;
+        }
+    }
+
+    function hasGarrison(spec) {
+        try {
+            return typeof spec.GetGarrison === 'function' && !!spec.GetGarrison();
+        } catch (e) {
+            S.kernel.warn('army', 'GetGarrison() threw:', e);
+            return false;
+        }
+    }
+
+    // true only when the general is found and its army reads as the target.
+    function armyIs(key, wantEmpty, target) {
+        var f = S.core.specialists.refind(key);
+        if (!f.spec) return false;
+        var have = readGeneralArmy(f.spec);
+        if (have === null) return false;
+        return wantEmpty ? total(have) === 0 : matches(have, target);
+    }
+
+    // Def that sets a general's army to exactly target. An empty target is
+    // refused: unload is the empty form.
+    function raise(key, target) {
+        var want = sameKeys(target);
+        return {
+            label:     'raise ' + key,
+            category:  'army',
+            timeoutMs: ACTION_TIMEOUT_MS,
+            satisfied: function () {
+                return total(want) > 0 && armyIs(key, false, want);
+            },
+            precheck: function () {
+                if (total(want) === 0) return 'empty target: use unload';
+                var f = S.core.specialists.refind(key);
+                if (!f.spec) return f.reason;
+                var spec = f.spec;
+                if (!isOwn(spec)) return 'not own';
+                if (S.core.specialists.status(spec) !== S.SpecialistStatus.Idle) return 'not idle';
+                if (!hasGarrison(spec)) return 'no garrison';
+                if (isTravelling(spec)) return 'travelling';
+                var cls = classOf(want);
+                if (cls === S.TroopClass.Mixed || cls === S.TroopClass.Unknown) return 'troop class ' + cls;
+                var cap = S.core.specialists.troopCapacity(spec);
+                if (cap > 0 && total(want) > cap) return 'over capacity (' + total(want) + ' > ' + cap + ')';
+                var have = readGeneralArmy(spec);
+                if (have === null) return 'army unreadable';
+                var draw = RAISE_REUSES_OWN_TROOPS ? minus(want, have) : want;
+                if (!isEmpty(minus(draw, freeArmy()))) return 'free pool does not cover the raise';
+                return null;
+            },
+            send: function () {
+                var f = S.core.specialists.refind(key);
+                if (!f.spec) return false;
+                var vo = buildRaiseVO(f.spec, want);
+                if (!vo) return false;
+                return S.core.packets.sendMessage(1031, vo) === true;
+            },
+            check: function () {
+                return armyIs(key, false, want);
+            }
+        };
+    }
+
+    // Def that empties a general's army back into the free pool, with the
+    // client's own shortcut. The free pool growth is only logged: another
+    // raise or production in the same window can shrink the pool and make a
+    // real unload look like it failed.
+    function unload(key) {
+        return {
+            label:     'unload ' + key,
+            category:  'army',
+            timeoutMs: ACTION_TIMEOUT_MS,
+            satisfied: function () {
+                return armyIs(key, true);
+            },
+            precheck: function () {
+                var f = S.core.specialists.refind(key);
+                if (!f.spec) return f.reason;
+                if (!canUnload(f.spec)) return 'cannot unload';
+                return null;
+            },
+            baseline: function () {
+                return total(freeArmy());
+            },
+            send: function () {
+                var f = S.core.specialists.refind(key);
+                if (!f.spec) return false;
+                try {
+                    var util = game.def('MilitarySystem::cMilitaryUtil');
+                    if (!util || typeof util.SendRaiseArmyToServer !== 'function') return false;
+                    util.SendRaiseArmyToServer(game.gi, f.spec, null);
+                    return true;
+                } catch (e) {
+                    S.kernel.warn('army', 'unload send threw:', e);
+                    return false;
+                }
+            },
+            check: function () {
+                return armyIs(key, true);
+            },
+            describe: function (base) {
+                return 'free pool ' + base + ' -> ' + total(freeArmy());
+            }
+        };
+    }
+
     S.core.army = {
         RAISE_REUSES_OWN_TROOPS: RAISE_REUSES_OWN_TROOPS,
         FREE_POOL_CATEGORY:      FREE_POOL_CATEGORY,
+        ACTION_TIMEOUT_MS:       ACTION_TIMEOUT_MS,
         unitBase:      unitBase,
         isElite:       isElite,
         squads:        squads,
         generalArmy:   generalArmy,
+        readGeneralArmy: readGeneralArmy,
         freeArmy:      freeArmy,
         isOwn:         isOwn,
         fighters:      fighters,
@@ -378,7 +546,11 @@
         isEmpty:       isEmpty,
         matches:       matches,
         classOf:       classOf,
-        planSupply:    planSupply
+        planSupply:    planSupply,
+        canUnload:     canUnload,
+        buildRaiseVO:  buildRaiseVO,
+        raise:         raise,
+        unload:        unload
     };
 
 }(Steward));

@@ -3,13 +3,14 @@
 var t = require('../runner');
 var harness = require('../harness');
 var A = require('../stubs/army');
+var AC = require('../stubs/actions');
 
 var assert = t.assert;
 
 function plain(v) { return JSON.parse(JSON.stringify(v)); }
 
-// ADN labels differ from the name, so isSelectable sees a real label; the
-// names listed in `unlabelled` come back unchanged like an unknown key.
+// ADN labels differ from the name by default; names listed in `unlabelled`
+// come back unchanged like an unknown key (a label may equal its name).
 function loca(unlabelled) {
     return function (cat, key) {
         if (unlabelled && unlabelled.indexOf(key) !== -1) return key;
@@ -97,8 +98,34 @@ t.test('isSelectable: expedition adventures are hidden', function () {
 t.test('isSelectable: an adventure without a real label is hidden', function () {
     var s = setup();
     assert.strictEqual(s.adv.isSelectable(def({ label: '' })), false);
-    assert.strictEqual(s.adv.isSelectable(def({ label: 'Adv' })), false);
     assert.strictEqual(s.adv.isSelectable(def({ label: 'x undefined y' })), false);
+});
+
+t.test('isSelectable: a label equal to the name is offered', function () {
+    var s = setup();
+    assert.strictEqual(s.adv.isSelectable(def({ name: 'Traitors', label: 'Traitors' })), true);
+});
+
+t.test('isSelectable: a def without a string name is hidden and does not throw', function () {
+    var s = setup();
+    assert.strictEqual(s.adv.isSelectable(def({ name: undefined })), false);
+    assert.strictEqual(s.adv.isSelectable(def({ name: null })), false);
+    assert.strictEqual(s.adv.isSelectable(def({ name: 5 })), false);
+});
+
+t.test('definitions: an entry without a name is skipped with one warning', function () {
+    var s = setup({ adventureDefs: [A.adventureDef({ name: 'AdvA' })] });
+    var good = s.H.host.game.def('AdventureSystem::cAdventureDefinition').map_AdventureName_AdventureDefinition.valueSet()[0];
+    var prev = s.H.host.game.def;
+    s.H.host.game.def = function (n) {
+        if (n === 'AdventureSystem::cAdventureDefinition') {
+            return { map_AdventureName_AdventureDefinition: { valueSet: function () { return [{ mName_string: undefined }, good]; } } };
+        }
+        return prev(n);
+    };
+    assert.deepStrictEqual(plain(s.adv.definitions().map(function (d) { return d.name; })), ['AdvA']);
+    var warns = s.H.logs().filter(function (l) { return l.level === 'warn'; });
+    assert.strictEqual(warns.length, 1);
 });
 
 t.test('isSelectable: Scenario and Coop without a campaign are hidden', function () {
@@ -113,42 +140,28 @@ t.test('isSelectable: a Scenario-type definition inside a campaign is kept', fun
     assert.strictEqual(s.adv.isSelectable(def({ type: 'Scenario', campaign: 'Foo' })), true);
 });
 
-// ---- groups ----------------------------------------------------------------------
+// ---- selectable ------------------------------------------------------------------
 
-t.test('groups: sorted by difficulty then name, grouped in order of first appearance', function () {
+t.test('selectable: one list sorted by label, ties by name', function () {
     var s = setup();
     var list = [
-        def({ name: 'Z1', label: 'L Z1', type: 'Attack', difficulty: 3 }),
-        def({ name: 'B1', label: 'L B1', type: 'Attack', difficulty: 1 }),
-        def({ name: 'C1', label: 'L C1', type: 'Other', difficulty: 2 }),
-        def({ name: 'A1', label: 'L A1', type: 'Attack', difficulty: 3 })
+        def({ name: 'N3', label: 'B' }),
+        def({ name: 'N2', label: 'a x' }),
+        def({ name: 'N1', label: 'a x' }),
+        def({ name: 'N4', label: 'C' })
     ];
-    var g = plain(s.adv.groups(list));
-    assert.deepStrictEqual(g.map(function (x) { return x.group; }), ['Attack', 'Other']);
-    assert.deepStrictEqual(g[0].items.map(function (d) { return d.name; }), ['B1', 'A1', 'Z1']);
-    assert.deepStrictEqual(g[1].items.map(function (d) { return d.name; }), ['C1']);
+    var out = plain(s.adv.selectable(list));
+    assert.deepStrictEqual(out.map(function (d) { return d.name; }), ['N1', 'N2', 'N3', 'N4']);
 });
 
-t.test('groups: an adventure with a campaign is grouped under the campaign label', function () {
-    var s = setup();
-    var list = [
-        def({ name: 'K1', label: 'L K1', campaign: 'Foo', type: 'Scenario', difficulty: 1 }),
-        def({ name: 'K2', label: 'L K2', campaign: 'Foo', type: 'Attack', difficulty: 2 }),
-        def({ name: 'N1', label: 'L N1', difficulty: 3 })
-    ];
-    var g = plain(s.adv.groups(list));
-    assert.deepStrictEqual(g.map(function (x) { return x.group; }), ['Camp Foo', 'Attack']);
-    assert.deepStrictEqual(g[0].items.map(function (d) { return d.name; }), ['K1', 'K2']);
-});
-
-t.test('groups: unselectable definitions are left out and Scenario/Coop do not form groups', function () {
+t.test('selectable: unselectable definitions are left out', function () {
     var s = setup();
     var list = [
         def({ name: 'S1', label: 'L S1', type: 'Scenario' }),
         def({ name: 'C1', label: 'L C1', type: 'Coop' }),
         def({ name: 'E1', label: 'L E1', requiresEvent: true })
     ];
-    assert.deepStrictEqual(plain(s.adv.groups(list)), []);
+    assert.deepStrictEqual(plain(s.adv.selectable(list)), []);
 });
 
 t.test('label: resolves through the ADN locale category', function () {
@@ -186,6 +199,104 @@ t.test('ownOpen is empty when the manager is missing', function () {
     var s = setup();
     withManager(s, null);
     assert.deepStrictEqual(plain(s.adv.ownOpen()), []);
+});
+
+t.test('own lists names with zone ids', function () {
+    var s = setup();
+    var advs = [
+        { adventureName: 'AdvA', zoneID: 11, mine: true },
+        { adventureName: 'AdvB', zoneID: 12, mine: false },
+        { adventureName: 'AdvC', zoneID: 13, mine: true }
+    ];
+    withManager(s, {
+        getAdventures: function () { return advs; },
+        isMyAdventure: function (adv) { return adv.mine; }
+    });
+    assert.deepStrictEqual(plain(s.adv.own()), [{ name: 'AdvA', zoneId: 11 }, { name: 'AdvC', zoneId: 13 }]);
+    assert.strictEqual(s.adv.zoneIdOf('AdvC'), 13);
+    assert.strictEqual(s.adv.zoneIdOf('AdvB'), null);
+});
+
+t.test('own returns null when the manager cannot be read', function () {
+    var s = setup();
+    withManager(s, null);
+    assert.strictEqual(s.adv.own(), null);
+    withManager(s, { getAdventures: function () { throw new Error('boom'); } });
+    assert.strictEqual(s.adv.own(), null);
+    assert.strictEqual(s.adv.zoneIdOf('AdvA'), null);
+    withManager(s, { getAdventures: function () { return []; }, isMyAdventure: function () { return true; } });
+    assert.deepStrictEqual(plain(s.adv.own()), []);
+});
+
+t.test('ownOpen unchanged (empty on a failed read)', function () {
+    var s = setup();
+    withManager(s, { getAdventures: function () { throw new Error('boom'); } });
+    assert.deepStrictEqual(plain(s.adv.ownOpen()), []);
+});
+
+// ---- close -----------------------------------------------------------------------
+
+function closable(s) {
+    var st = { advs: [{ adventureName: 'AdvA', zoneID: 11 }, { adventureName: 'AdvB', zoneID: 12 }], removed: [], broken: false };
+    withManager(s, {
+        getAdventures: function () { if (st.broken) throw new Error('boom'); return st.advs; },
+        isMyAdventure: function () { return true; },
+        removeAdventure: function (id) {
+            st.removed.push(id);
+            st.advs = st.advs.filter(function (a) { return a.zoneID !== id; });
+        }
+    });
+    return st;
+}
+
+function run(s, def, onStep) {
+    var res = null;
+    s.S.core.actions.attempt(def, function (r) { res = r; });
+    AC.drive(s.H, { onStep: onStep });
+    return res;
+}
+
+t.test('close sends removeAdventure with the zone id and verifies when gone', function () {
+    var s = setup();
+    var st = closable(s);
+    var res = run(s, s.adv.close('AdvA'));
+    assert.strictEqual(res.status, s.S.ActionResult.Verified);
+    assert.strictEqual(res.sends, 1);
+    assert.deepStrictEqual(st.removed, [11]);
+});
+
+t.test('close refuses an adventure that is not open', function () {
+    var s = setup();
+    var st = closable(s);
+    var res = run(s, s.adv.close('Nope'));
+    assert.strictEqual(res.status, s.S.ActionResult.Refused);
+    assert.strictEqual(res.reason, 'adventure not open');
+    assert.strictEqual(st.removed.length, 0);
+});
+
+t.test('close does not verify while the manager cannot be read', function () {
+    var s = setup();
+    var st = closable(s);
+    var res = run(s, s.adv.close('AdvA'), function (n) { if (n === 1) st.broken = true; });
+    assert.strictEqual(res.status, s.S.ActionResult.Failed);
+});
+
+t.test('close refuses when the zone id is unreadable and never verifies', function () {
+    var s = setup();
+    var st = closable(s);
+    st.advs = [{ adventureName: 'AdvA' }];
+    var res = run(s, s.adv.close('AdvA'));
+    assert.strictEqual(res.status, s.S.ActionResult.Refused);
+    assert.strictEqual(res.reason, 'adventure zone id unreadable');
+    assert.strictEqual(st.removed.length, 0);
+});
+
+t.test('close check is false without a numeric baseline zone id', function () {
+    var s = setup();
+    closable(s);
+    var def = s.adv.close('AdvA');
+    assert.strictEqual(def.check({ zoneId: null }), false);
+    assert.strictEqual(def.check(null), false);
 });
 
 // ---- manager ---------------------------------------------------------------------

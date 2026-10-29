@@ -39,8 +39,11 @@
         }
         // moduleId is the id of the module currently inside its plan() / boot()
         // call. Tracked by the scheduler / lifecycle via S.kernel._currentModule.
-        // Standalone calls (e.g. from event handlers) get null.
-        var moduleId = S.kernel._currentModule || null;
+        // Entries added while a tagged action runs inherit that action's tag, so
+        // an action that re-enqueues itself (a send-then-verify loop) keeps its
+        // module busy and stays cancellable with it. Standalone calls (e.g. from
+        // event handlers) get null.
+        var moduleId = S.kernel._currentModule || currentlyRunningModule || null;
         queue.push({
             name:     name,
             params:   params || [],

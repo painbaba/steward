@@ -17,8 +17,12 @@
 | `Steward.core.army`        | Free troop pool, squads, composition checks, supply plan. |
 | `Steward.core.battles`     | Battle-file loader and validator against the army.    |
 | `Steward.core.buffs`       | Star-menu buff stock (including adventure maps) and buff definitions. |
+| `Steward.core.actions`     | Runs write actions: send, verify by observation, retry once. |
+| `Steward.core.quests`      | Quest pool reads and the claim action.                |
+| `Steward.core.production`  | Troop queue reads, order pricing and the order action. |
+| `Steward.core.resources`   | Resource amount and free population reads.            |
 
-The adventures, army, battles and buffs rows are read-only in this phase: nothing they offer sends a packet or changes an army.
+Write actions are defs (plain objects with `precheck`, `send`, `check` and so on) built by the core that owns the action, for example `S.core.army.raise`, `S.core.quests.claim` and `S.core.production.order`. They run through `S.core.actions.attempt(def, onDone)`, which verifies by positive observation: a failed read or a missing object never counts as success. Which action to run and when stays with the module; the cores stay policy-free. Readers that defs rely on report a failed read as `null`, never as zero or an empty list.
 
 Detailed API per file lives in `docs/analysis/PLAN.md` (P2 file scopes). Once P2 lands, each `core/*.js` source file's IIFE will be the canonical reference.
 

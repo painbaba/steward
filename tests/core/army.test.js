@@ -4,6 +4,7 @@ var t = require('../runner');
 var harness = require('../harness');
 var A = require('../stubs/army');
 var specStubs = require('../stubs/specialists');
+var AC = require('../stubs/actions');
 
 var assert = t.assert;
 
@@ -272,4 +273,197 @@ t.test('troopCapacity falls back to the description when GetMaxMilitaryUnits is 
     assert.strictEqual(s.S.core.specialists.troopCapacity(A.fighter({ uid: 'g1', descMax: 300 })), 300);
     assert.strictEqual(s.S.core.specialists.troopCapacity(A.fighter({ uid: 'g2', maxUnits: 0, descMax: 300 })), 300);
     assert.strictEqual(s.S.core.specialists.troopCapacity(A.fighter({ uid: 'g3' })), 0);
+});
+
+// ---- canUnload / readGeneralArmy -----------------------------------------------
+
+t.test('readGeneralArmy returns null on a throw and generalArmy {}', function () {
+    var s = setup({ fighters: [] });
+    var g = AC.general({ uid: 'g1', army: { Rifle: 5 }, throwOn: 'GetArmy' });
+    assert.strictEqual(s.army.readGeneralArmy(g), null);
+    assert.strictEqual(s.army.readGeneralArmy(null), null);
+    assert.deepStrictEqual(plain(s.army.generalArmy(g)), {});
+    g.state.throwOn = null;
+    assert.deepStrictEqual(plain(s.army.readGeneralArmy(g)), { Rifle: 5 });
+});
+
+t.test('canUnload: own, idle, home, not travelling and holding troops', function () {
+    var s = setup({ fighters: [] });
+    assert.strictEqual(s.army.canUnload(A.fighter({ uid: 'ok', army: { Rifle: 5 } })), true);
+    assert.strictEqual(s.army.canUnload(A.fighter({ uid: 'other', playerId: 2, army: { Rifle: 5 } })), false);
+    assert.strictEqual(s.army.canUnload(A.fighter({ uid: 'away', travelling: true, army: { Rifle: 5 } })), false);
+    assert.strictEqual(s.army.canUnload(A.fighter({ uid: 'star', grid: -1, army: { Rifle: 5 } })), false);
+    assert.strictEqual(s.army.canUnload(A.fighter({ uid: 'bare', army: {} })), false);
+    assert.strictEqual(s.army.canUnload(null), false);
+});
+
+t.test('donorOk unchanged after the extraction: a failing getter is warned about once', function () {
+    var g = AC.general({ uid: 'g1', army: { Rifle: 5 }, throwOn: 'GetGarrisonGridIdx' });
+    var s = setup({ fighters: [g] });
+    var before = s.H.logs().length;
+    var by = s.army.inventory().byKey;
+    assert.strictEqual(by.g1.donorOk, false);
+    var warns = s.H.logs().slice(before).filter(function (l) {
+        return l.level === 'warn' && /garrisonGrid/.test(JSON.stringify(l));
+    });
+    assert.strictEqual(warns.length, 1);
+});
+
+// ---- raise and unload defs -------------------------------------------------------
+
+// Booted harness with the action wiring. o.free / o.generals as for install.
+function actionSetup(o) {
+    var generals = o.generals || [];
+    var H = harness.boot();
+    A.install(H, { units: UNITS, free: o.free || {}, fighters: generals });
+    var sent = AC.wire(H);
+    var util = sent.registerDef('MilitarySystem::cMilitaryUtil', {
+        SendRaiseArmyToServer: function () { if (o.onUnload) o.onUnload(); }
+    });
+    return { H: H, S: H.Steward, army: H.Steward.core.army, sent: sent, util: util };
+}
+
+function runDef(s, def, onStep) {
+    var result = null;
+    assert.strictEqual(s.S.core.actions.attempt(def, function (r) { result = r; }), true);
+    AC.drive(s.H, { onStep: onStep });
+    return result;
+}
+
+t.test('raise sends 1031 with the full target composition', function () {
+    var g = AC.general({ uid: 'g1', army: { Rifle: 5 } });
+    var s = actionSetup({ free: { Rifle: 100, Sabre: 10 }, generals: [g] });
+    var r = runDef(s, s.army.raise('g1', { Rifle: 60, Sabre: 2 }), function (n) {
+        if (n === 1) g.state.army = { Rifle: 60, Sabre: 2 };
+    });
+    assert.strictEqual(r.status, s.S.ActionResult.Verified);
+    assert.strictEqual(r.sends, 1);
+    assert.strictEqual(s.sent.messages.length, 1);
+    var m = s.sent.messages[0];
+    assert.strictEqual(m.id, 1031);
+    assert.strictEqual(m.data.armyHolderSpecialistVO.uid, 'g1');
+    assert.deepStrictEqual(plain(m.data.unitSquads.items.map(function (i) { return [i.name_string, i.amount]; })),
+        [['Rifle', 60], ['Sabre', 2]]);
+});
+
+t.test('raise refuses mixed, over capacity, uncovered', function () {
+    var g = AC.general({ uid: 'g1', army: {}, maxUnits: 10 });
+    var s = actionSetup({ free: { Rifle: 3, EliteRifle: 3 }, generals: [g] });
+    var mixed = runDef(s, s.army.raise('g1', { Rifle: 1, EliteRifle: 1 }));
+    assert.strictEqual(mixed.status, s.S.ActionResult.Refused);
+    assert.ok(/Mixed/.test(mixed.reason));
+    var over = runDef(s, s.army.raise('g1', { Rifle: 20 }));
+    assert.strictEqual(over.status, s.S.ActionResult.Refused);
+    assert.ok(/capacity/.test(over.reason));
+    var short = runDef(s, s.army.raise('g1', { Rifle: 5 }));
+    assert.strictEqual(short.status, s.S.ActionResult.Refused);
+    assert.ok(/free pool/.test(short.reason));
+    assert.strictEqual(s.sent.messages.length, 0);
+});
+
+t.test('raise refuses an empty target', function () {
+    var g = AC.general({ uid: 'g1', army: {} });
+    var s = actionSetup({ free: { Rifle: 5 }, generals: [g] });
+    var r = runDef(s, s.army.raise('g1', {}));
+    assert.strictEqual(r.status, s.S.ActionResult.Refused);
+    assert.strictEqual(r.reason, 'empty target: use unload');
+    assert.strictEqual(r.sends, 0);
+    assert.strictEqual(s.sent.messages.length, 0);
+});
+
+t.test('raise verified when the army matches', function () {
+    var done = AC.general({ uid: 'g1', army: { Rifle: 5 } });
+    var s = actionSetup({ free: {}, generals: [done] });
+    var already = runDef(s, s.army.raise('g1', { Rifle: 5 }));
+    assert.strictEqual(already.status, s.S.ActionResult.Verified);
+    assert.strictEqual(already.sends, 0);
+
+    var late = AC.general({ uid: 'g2', army: { Rifle: 1 } });
+    var s2 = actionSetup({ free: { Rifle: 10 }, generals: [late] });
+    var r = runDef(s2, s2.army.raise('g2', { Rifle: 5 }), function (n) {
+        if (n === 3) late.state.army = { Rifle: 5 };
+    });
+    assert.strictEqual(r.status, s2.S.ActionResult.Verified);
+    assert.strictEqual(r.sends, 1);
+});
+
+t.test('raise fails after exactly two sends when the army never matches or cannot be read', function () {
+    var g = AC.general({ uid: 'g1', army: {} });
+    var s = actionSetup({ free: { Rifle: 10 }, generals: [g] });
+    var never = runDef(s, s.army.raise('g1', { Rifle: 5 }));
+    assert.strictEqual(never.status, s.S.ActionResult.Failed);
+    assert.strictEqual(never.sends, 2);
+    assert.strictEqual(s.sent.messages.length, 2);
+
+    var g2 = AC.general({ uid: 'g2', army: {} });
+    var s2 = actionSetup({ free: { Rifle: 10 }, generals: [g2] });
+    var r = runDef(s2, s2.army.raise('g2', { Rifle: 5 }), function (n) {
+        if (n === 1) g2.state.throwOn = 'GetArmy';
+    });
+    assert.notStrictEqual(r.status, s2.S.ActionResult.Verified);
+});
+
+t.test('raise and unload refuse a missing specialist', function () {
+    var s = actionSetup({ free: { Rifle: 10 }, generals: [AC.general({ uid: 'g1' })] });
+    var a = runDef(s, s.army.raise('nope', { Rifle: 5 }));
+    var b = runDef(s, s.army.unload('nope'));
+    assert.strictEqual(a.status, s.S.ActionResult.Refused);
+    assert.strictEqual(a.reason, 'specialist not found');
+    assert.strictEqual(b.status, s.S.ActionResult.Refused);
+    assert.strictEqual(b.reason, 'specialist not found');
+    assert.strictEqual(a.sends + b.sends, 0);
+
+    s.H.host.game.gi.mCurrentPlayerZone.GetSpecialists_vector = function () { throw new Error('list'); };
+    var c = runDef(s, s.army.raise('g1', { Rifle: 5 }));
+    assert.strictEqual(c.status, s.S.ActionResult.Refused);
+    assert.strictEqual(c.reason, 'specialist unreadable');
+});
+
+t.test('unload is not satisfied when the army read throws', function () {
+    var g = AC.general({ uid: 'g1', army: { Rifle: 5 }, throwOn: 'GetArmy' });
+    var s = actionSetup({ free: {}, generals: [g] });
+    var r = runDef(s, s.army.unload('g1'));
+    assert.notStrictEqual(r.status, s.S.ActionResult.Verified);
+    assert.strictEqual(r.sends, 0);
+});
+
+t.test('unload does not verify while the army cannot be read', function () {
+    var g = AC.general({ uid: 'g1', army: { Rifle: 5 } });
+    var s = actionSetup({ free: {}, generals: [g], onUnload: function () { g.state.army = {}; g.state.throwOn = 'GetArmy'; } });
+    var r = runDef(s, s.army.unload('g1'));
+    assert.notStrictEqual(r.status, s.S.ActionResult.Verified);
+    assert.strictEqual(r.status, s.S.ActionResult.Failed);
+
+    var stuck = AC.general({ uid: 'g2', army: { Rifle: 5 } });
+    var s2 = actionSetup({ free: {}, generals: [stuck] });
+    var r2 = runDef(s2, s2.army.unload('g2'));
+    assert.strictEqual(r2.status, s2.S.ActionResult.Failed);
+    assert.strictEqual(r2.sends, 2);
+});
+
+t.test('unload uses SendRaiseArmyToServer with null', function () {
+    var g = AC.general({ uid: 'g1', army: { Rifle: 5 } });
+    var s = actionSetup({ free: {}, generals: [g], onUnload: function () { g.state.army = {}; } });
+    runDef(s, s.army.unload('g1'));
+    var calls = s.sent.calls.filter(function (c) { return c.method === 'SendRaiseArmyToServer'; });
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls[0].target, 'MilitarySystem::cMilitaryUtil');
+    assert.strictEqual(calls[0].args[0], s.H.host.game.gi);
+    assert.strictEqual(calls[0].args[1], g);
+    assert.strictEqual(calls[0].args[2], null);
+    assert.strictEqual(s.sent.messages.length, 0);
+});
+
+t.test('unload verified when the army is empty', function () {
+    var g = AC.general({ uid: 'g1', army: { Rifle: 5 } });
+    var s = actionSetup({ free: {}, generals: [g], onUnload: function () { g.state.army = {}; } });
+    var r = runDef(s, s.army.unload('g1'));
+    assert.strictEqual(r.status, s.S.ActionResult.Verified);
+    assert.strictEqual(r.sends, 1);
+
+    var empty = AC.general({ uid: 'g2', army: {} });
+    var s2 = actionSetup({ free: {}, generals: [empty] });
+    var already = runDef(s2, s2.army.unload('g2'));
+    assert.strictEqual(already.status, s2.S.ActionResult.Verified);
+    assert.strictEqual(already.sends, 0);
 });

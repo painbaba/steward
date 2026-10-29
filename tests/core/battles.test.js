@@ -377,3 +377,38 @@ t.test('BROWSE_FILTERS: battle .txt filter first, all files last', function () {
     assert.strictEqual(f[f.length - 1].label, 'All files');
     assert.strictEqual(f[f.length - 1].pattern, '*.*');
 });
+
+t.test('supplyWave keeps attack and move lines and skips star and buff lines', function () {
+    var b = boot();
+    var r = parse(b, corpus());
+    var wave = plain(b.battles.supplyWave(r.lines));
+    // Line order after parse: star (order 1), attack (2), move (3), buff (4).
+    assert.deepStrictEqual(wave, [
+        { key: '8908.0', army: { Rifle: 100, Sabre: 20 } },
+        { key: '8910.0', army: { Rifle: 5 } }
+    ]);
+});
+
+t.test('loadoutKeys lists general lines only', function () {
+    var b = boot();
+    var r = parse(b, corpus());
+    var keys = plain(b.battles.loadoutKeys(r.lines));
+    assert.deepStrictEqual(keys, { '8908.0': true, '8909.0': true, '8910.0': true });
+});
+
+t.test('notInLoadout reports a wave general missing from the loadout as fatal', function () {
+    var b = boot();
+    var L = b.S.BattleLine;
+    var lines = [
+        line('1.0', L.Attack, {}, { name: 'Hans' }),
+        line('2.0', L.Move, {}),
+        line('buff_1', L.Buff, {})
+    ];
+    var p = plain(b.battles.notInLoadout(lines, { '2.0': true }));
+    assert.strictEqual(p.length, 1);
+    assert.strictEqual(p[0].code, b.S.BattleProblem.NotInLoadout);
+    assert.strictEqual(p[0].fatal, true);
+    assert.strictEqual(p[0].key, '1.0');
+    assert.strictEqual(p[0].message, 'Hans (1.0) is not in the loadout');
+    assert.strictEqual(b.battles.notInLoadout(lines, { '1.0': true, '2.0': true }).length, 0);
+});

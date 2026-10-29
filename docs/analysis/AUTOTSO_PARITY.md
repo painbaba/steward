@@ -120,12 +120,12 @@ These are the master on/off switches autoTSO surfaces in the menu (`aUI.menu.fea
 | autoTSO | Steward | Status |
 |---|---|---|
 | `getResourcesInfo` (list player resources, filter event-only) | — | ✗ |
-| `runProduction(resource, total)` (start production runs) | — | ✗ |
+| `runProduction(resource, total)` (start production runs) | `core.production.order` covers troop orders only | ~ |
 | `productionBuildings(resource)` | partial via `core/buildings` predicates | ~ |
 | `getResourceFormStar` (transfer from star menu) | — | ✗ |
 | `transferFromStarToStore` | — | ✗ |
 | `gather.byTrade(friendId)` (inter-player trade gathering) | — | ✗ |
-| `Has(name, amount)` | — | ✗ |
+| `Has(name, amount)` | `core.resources.amount` | ✓ |
 | `remainingCapacity(name)` | — | ✗ |
 
 ### aSpecialists — Specialists
@@ -183,7 +183,7 @@ These are the master on/off switches autoTSO surfaces in the menu (`aUI.menu.fea
 | Other (Daily, DailyGuild, Weekly, Ghost, PathFinder, Starfall) | — | ✗ |
 | Order-execution engine (buffapplied, resourceproduced, soldgoods, …) | — | ✗ |
 | `payQuest` (skip with rubies) | — | ✗ |
-| `completeQuest` action | — | ✗ |
+| `completeQuest` action | `core.quests.claim` (action def only, no module yet) | ~ |
 | `finishAdventureQuests` (auto-claim mid-adventure) | — | ✗ |
 
 **Note**: aQuests is the largest subsystem (~2000 lines) and depends on aBuffs, aResources, aTrade, and aMail. Realistically a v0.7-v1.0 endeavour.
@@ -191,13 +191,13 @@ These are the master on/off switches autoTSO surfaces in the menu (`aUI.menu.fea
 ### aAdventure — Adventures
 | autoTSO | Steward | Status |
 |---|---|---|
-| Adventure templates (per-step plan) | `modules/adventures` run templates (one JSON file per template, dialog, dry run) | ~ |
+| Adventure templates (per-step plan) | `modules/adventures` run templates (one JSON file per template, dialog) | ~ |
 | Speed buff selection | per template, starts at the first in stock by name; read-only (`core/buffs`) | ~ |
 | Import autoTSO run templates (`auto/templates/*.json` + `auto/settings.json` labels) | — | ✗ (planned follow-up) |
 | Black Vortex toggle | — | ✗ |
 | Step-by-step execution | — | ✗ |
 | Camp elimination tracking | — | ✗ |
-| Unit training / retraining | — | ✗ |
+| Unit training / retraining | `core.production.order`, `core.army.raise` and `unload` (action defs only, no module yet) | ~ |
 | Lost-army recovery | — | ✗ |
 | Adventure monitor UI | — | ✗ |
 | `completeQuest` mid-adventure | — | ✗ |

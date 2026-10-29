@@ -20,8 +20,7 @@ function setup(armyOpts) {
         fs: fs,
         H: H,
         S: S,
-        tpl: S.modules.adventures.templates,
-        dry: S.modules.adventures.dryrun
+        tpl: S.modules.adventures.templates
     };
 }
 
@@ -37,28 +36,9 @@ function record(over) {
     return r;
 }
 
-function codes(problems) {
-    return plain(problems.map(function (p) { return p.code; }));
-}
-
 function tmpFiles(fs) {
     return Object.keys(fs.disk).filter(function (k) { return /\.tmp$/.test(k); });
 }
-
-// A battle file with one attack line per entry of `armies` (key -> army).
-function battleText(armies) {
-    var obj = {};
-    var order = 1;
-    for (var key in armies) {
-        obj[key] = {
-            name: 'General ' + key, grid: 5, target: 77, targetName: 'Camp',
-            army: armies[key], time: 5000, order: order++
-        };
-    }
-    return JSON.stringify(obj);
-}
-
-var UNITS = A.unitCatalogue(['EliteRifle'], ['Rifle', 'Sabre']);
 
 // ---- module ---------------------------------------------------------------
 
@@ -295,218 +275,32 @@ t.test('speedBuffOptions: None first, no Default, zero stock warns, stored unkno
     assert.strictEqual(s.tpl.speedBuffOptions(STOCK, 'GeneralSpeedBuff_B').length, 4);
 });
 
-// ---- dry run, assemble with fake deps ------------------------------------------
+// ---- wave order ---------------------------------------------------------------------
 
-function fakeDeps(files, over) {
-    var deps = {
-        load: function (path) {
-            if (!Object.prototype.hasOwnProperty.call(files, path)) {
-                return { ok: false, path: path, lines: [], problems: [{
-                    code: 'FileNotFound', fatal: true, key: null, message: 'file not found: ' + path
-                }] };
-            }
-            return files[path];
-        },
-        ctx: {
-            fighters: {
-                'g1.0': { name: 'Hans', cls: 0, capacity: 0, army: { Rifle: 5 } },
-                'g2.0': { name: 'Franz', cls: 0, capacity: 0, army: {} }
-            },
-            isElite: function () { return false; },
-            classOf: function () { return 'Base'; },
-            total: function (a) {
-                var n = 0;
-                for (var k in a) n += a[k];
-                return n;
-            },
-            camp: function () { return { enemy: true }; }
-        },
-        inv: {
-            free: { Rifle: 10 },
-            byKey: {
-                'g1.0': { key: 'g1.0', name: 'Hans', army: { Rifle: 5 }, donorOk: false },
-                'g2.0': { key: 'g2.0', name: 'Franz', army: {}, donorOk: false }
-            }
-        },
-        buffAmount: function () { return 0; },
-        speedBuffs: [{ name: 'GeneralSpeedBuff_A', amount: 0 }],
-        zoneAdventure: 'BlackKnights',
-        onTemplateMap: true
-    };
-    for (var k in over) deps[k] = over[k];
-    return deps;
-}
-
-function line(key, kind, army, name) {
-    return { key: key, kind: kind, name: name || key, grid: 5, target: 77, targetName: 'Camp',
-        army: army, timeMs: 5000 };
-}
-
-function parsed(lines) {
-    return { ok: true, lines: lines, problems: [] };
-}
-
-t.test('assemble: loadout then waves in order, duplicates evaluated twice, NotInLoadout, totals', function () {
+t.test('reorderWaves moves a wave and keeps duplicates', function () {
     var s = setup();
-    var L = s.S.BattleLine;
-    var files = {
-        'lo.json': parsed([line('g1.0', L.Star, {})]),
-        'w1.json': parsed([line('g1.0', L.Attack, { Rifle: 5 })]),
-        'w2.json': parsed([line('g2.0', L.Attack, { Rifle: 3 })])
-    };
-    var tpl = { label: 'T', adventure: 'BlackKnights', loadout: 'lo.json',
-        waves: ['w1.json', 'w2.json', 'w1.json'], speedBuff: 'SpeedBuffDefault' };
-    var d = s.dry.assemble(tpl, fakeDeps(files));
-    assert.deepStrictEqual(plain(d.files.map(function (f) { return f.role + ':' + f.index; })),
-        ['loadout:null', 'wave:1', 'wave:2', 'wave:3']);
-    assert.strictEqual(d.files[1].path, 'w1.json');
-    assert.strictEqual(d.files[3].path, 'w1.json');
-    assert.deepStrictEqual(codes(d.files[1].problems), []);
-    assert.deepStrictEqual(codes(d.files[2].problems), ['ProblemNotInLoadout']);
-    assert.strictEqual(d.fatal, 1);
-    assert.strictEqual(d.warn, 0);
-    assert.strictEqual(d.files[1].lines[0].matches, true);
-    assert.strictEqual(d.files[2].lines[0].matches, false);
-    // Supply is planned per wave file against the same island.
-    assert.ok(d.files[1].supply, 'supply attached');
-    assert.ok(d.files[2].supply, 'supply attached');
+    var waves = ['a', 'b', 'a'];
+    var next = s.tpl.reorderWaves(waves, [2, 0, 1]);
+    assert.deepStrictEqual(plain(next), ['a', 'a', 'b']);
+    assert.deepStrictEqual(plain(waves), ['a', 'b', 'a']);
+    assert.notStrictEqual(next, waves);
+    assert.deepStrictEqual(plain(s.tpl.reorderWaves(['x', 'y'], [1, 0])), ['y', 'x']);
+    assert.deepStrictEqual(plain(s.tpl.reorderWaves([], [])), []);
 });
 
-t.test('assemble: a fatal and a warning from validation are counted separately', function () {
+t.test('reorderWaves rejects a wrong length, a repeat, an out-of-range or non-integer index', function () {
     var s = setup();
-    var L = s.S.BattleLine;
-    var files = {
-        'lo.json': parsed([line('g1.0', L.Star, {}), line('g2.0', L.Star, {})]),
-        'w1.json': parsed([line('g9.0', L.Attack, { Rifle: 1 }), line('sb', L.SpeedBuff, {})])
-    };
-    var tpl = { label: 'T', adventure: 'BlackKnights', loadout: 'lo.json', waves: ['w1.json'],
-        speedBuff: 'SpeedBuffDefault' };
-    var d = s.dry.assemble(tpl, fakeDeps(files));
-    // g9.0: NotInLoadout (fatal) and MissingGeneral (fatal); speed buff line: a warning.
-    assert.strictEqual(d.fatal, 2);
-    assert.strictEqual(d.warn, 1);
-});
-
-t.test('assemble: speed buff note at zero stock, in stock, for Default and for none', function () {
-    var s = setup();
-    var L = s.S.BattleLine;
-    var files = { 'lo.json': parsed([line('g1.0', L.Star, {})]) };
-    var tpl = { label: 'T', adventure: 'X', loadout: 'lo.json', waves: [], speedBuff: 'GeneralSpeedBuff_A' };
-    var zero = s.dry.assemble(tpl, fakeDeps(files));
-    assert.strictEqual(zero.speedBuff.name, 'GeneralSpeedBuff_A');
-    assert.ok(zero.speedBuff.note.indexOf('none in stock') === 0);
-    var stocked = s.dry.assemble(tpl, fakeDeps(files, { buffAmount: function () { return 4; } }));
-    assert.strictEqual(stocked.speedBuff.amount, 4);
-    assert.strictEqual(stocked.speedBuff.note, '');
-    var def = s.dry.assemble({ label: 'T', adventure: 'X', loadout: 'lo.json', waves: [],
-        speedBuff: 'SpeedBuffDefault' }, fakeDeps(files, {
-        speedBuffs: [{ name: 'GeneralSpeedBuff_A', amount: 0 }, { name: 'GeneralSpeedBuff_B', amount: 2 }],
-        buffAmount: function () { return 2; }
-    }));
-    assert.strictEqual(def.speedBuff.name, 'GeneralSpeedBuff_B');
-    assert.strictEqual(def.speedBuff.note, 'first in stock');
-    var none = s.dry.assemble({ label: 'T', adventure: 'X', loadout: 'lo.json', waves: [],
-        speedBuff: 'SpeedBuffNone' }, fakeDeps(files));
-    assert.strictEqual(none.speedBuff.name, null);
-    assert.strictEqual(none.speedBuff.note, 'no horseshoe');
-});
-
-t.test('assemble: camp checks are skipped when ctx.camp is null', function () {
-    var s = setup();
-    var L = s.S.BattleLine;
-    var files = {
-        'lo.json': parsed([line('g1.0', L.Star, {})]),
-        'w1.json': parsed([line('g1.0', L.Attack, { Rifle: 5 })])
-    };
-    var tpl = { label: 'T', adventure: 'X', loadout: 'lo.json', waves: ['w1.json'], speedBuff: 'SpeedBuffNone' };
-    var gone = fakeDeps(files);
-    gone.ctx.camp = function () { return null; };
-    assert.deepStrictEqual(codes(s.dry.assemble(tpl, gone).files[1].problems), ['ProblemTargetMissing']);
-    var skipped = fakeDeps(files, { onTemplateMap: false });
-    skipped.ctx.camp = null;
-    var d = s.dry.assemble(tpl, skipped);
-    assert.deepStrictEqual(codes(d.files[1].problems), []);
-    assert.strictEqual(d.onTemplateMap, false);
-});
-
-t.test('assemble: a missing file is reported as NotFound and has no supply', function () {
-    var s = setup();
-    var tpl = { label: 'T', adventure: 'X', loadout: 'gone.json', waves: ['gone2.json'], speedBuff: 'SpeedBuffNone' };
-    var d = s.dry.assemble(tpl, fakeDeps({}));
-    assert.strictEqual(d.files[0].ok, false);
-    assert.strictEqual(d.files[0].supply, null);
-    assert.strictEqual(d.files[1].ok, false);
-    assert.strictEqual(d.fatal, 2);
-});
-
-t.test('assemble: supply donors carry the inventory name', function () {
-    var s = setup();
-    var L = s.S.BattleLine;
-    var files = {
-        'lo.json': parsed([line('g1.0', L.Star, {})]),
-        'w1.json': parsed([line('g1.0', L.Attack, { Rifle: 5 })])
-    };
-    var tpl = { label: 'T', adventure: 'X', loadout: 'lo.json', waves: ['w1.json'], speedBuff: 'SpeedBuffNone' };
-    var deps = fakeDeps(files, {
-        inv: {
-            free: { Rifle: 2 },
-            byKey: {
-                'g1.0': { key: 'g1.0', name: 'Hans', army: {}, donorOk: false },
-                'g9.0': { key: 'g9.0', name: 'Idle Ida', army: { Rifle: 4 }, donorOk: true }
-            }
-        }
-    });
-    var d = s.dry.assemble(tpl, deps);
-    var donors = d.files[1].supply.donors;
-    assert.strictEqual(donors.length, 1);
-    assert.strictEqual(donors[0].key, 'g9.0');
-    assert.strictEqual(donors[0].name, 'Idle Ida');
-});
-
-// ---- report -----------------------------------------------------------------------
-
-t.test('report on a broken entry returns { broken } without assembling', function () {
-    var s = setup();
-    var entry = { id: 'x', path: 'p', error: 'not valid JSON' };
-    var r = s.dry.report(entry);
-    assert.strictEqual(r.broken, entry);
-    assert.strictEqual(r.files, undefined);
-});
-
-t.test('report on a saved template reads the wave files from disk and enqueues nothing', function () {
-    var s = setup({
-        units: UNITS,
-        free: { Rifle: 10 },
-        fighters: [
-            A.fighter({ uid: '1.0', name: 'Hans', army: { Rifle: 5 } }),
-            A.fighter({ uid: '2.0', name: 'Franz', army: {} })
-        ],
-        buffs: [{ type: 'GeneralSpeedBuff_A', amount: 2 }],
-        buffDefs: { GeneralSpeedBuff_A: {} }
-    });
-    s.fs.disk['C:/battles/loadout.json'] = battleText({ '1.0': {}, '2.0': {} });
-    s.fs.disk['C:/battles/w1.json'] = battleText({ '1.0': { Rifle: 5 } });
-    s.fs.disk['C:/battles/w2.json'] = battleText({ '2.0': { Rifle: 4 } });
-    var saved = s.tpl.save(record({ speedBuff: 'GeneralSpeedBuff_A' }), 1000);
-    assert.strictEqual(saved.ok, true);
-    s.H.clearQueued();
-
-    var data = s.dry.report(s.tpl.get(saved.id));
-    assert.strictEqual(data.files.length, 3);
-    assert.strictEqual(data.files[1].ok, true);
-    assert.strictEqual(data.files[1].lines[0].matches, true);
-    assert.strictEqual(data.files[2].lines[0].matches, false);
-    assert.strictEqual(data.speedBuff.name, 'GeneralSpeedBuff_A');
-    assert.strictEqual(data.speedBuff.amount, 2);
-    assert.strictEqual(data.onTemplateMap, false);
-    assert.strictEqual(s.H.queued().length, 0);
-});
-
-t.test('liveDeps without a template has no camp check and is not on the template map', function () {
-    var s = setup({ units: UNITS, fighters: [] });
-    var d = s.dry.liveDeps();
-    assert.strictEqual(d.onTemplateMap, false);
-    assert.strictEqual(d.ctx.camp, null);
+    var waves = ['a', 'b', 'c'];
+    assert.strictEqual(s.tpl.reorderWaves(waves, [0, 1]), null);
+    assert.strictEqual(s.tpl.reorderWaves(waves, [0, 1, 2, 0]), null);
+    assert.strictEqual(s.tpl.reorderWaves(waves, [0, 0, 1]), null);
+    assert.strictEqual(s.tpl.reorderWaves(waves, [0, 1, 3]), null);
+    assert.strictEqual(s.tpl.reorderWaves(waves, [0, 1, -1]), null);
+    assert.strictEqual(s.tpl.reorderWaves(waves, [0, 1.5, 2]), null);
+    assert.strictEqual(s.tpl.reorderWaves(waves, [0, NaN, 2]), null);
+    assert.strictEqual(s.tpl.reorderWaves(waves, [0, '1', 2]), null);
+    assert.strictEqual(s.tpl.reorderWaves(waves, null), null);
+    assert.deepStrictEqual(plain(waves), ['a', 'b', 'c']);
 });
 
 // ---- run request ------------------------------------------------------------------

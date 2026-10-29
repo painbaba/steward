@@ -93,6 +93,22 @@ game.gi.SendServerAction(actionId, p1, p2, p3, data);
 game.gi.mClientMessages.SendMessagetoServer(messageId, zoneId, payload, responder);
 ```
 
+Host calls behind the core write actions (each is wrapped by `Steward.core.packets` or the owning core, so modules do not call them):
+
+| Call | Used by |
+|------|---------|
+| `SendMessagetoServer(1031, dRaiseArmyVO)` with `armyHolderSpecialistVO` and one `dResourceVO` per unit | `army.raise` |
+| `cMilitaryUtil.SendRaiseArmyToServer(game.gi, spec, null)` | `army.unload` |
+| `SendMessagetoServer(91, dTimedProductionVO)`, one per stack shape; queue 0 is the barracks, 8 the elite barracks | `production.order` |
+| `quest.SetQuestMode(1)`, then `SendMessagetoServer(100, dServerAction)` with `type = 1` and `data = quest.GetUniqueId()` | `quests.claim` |
+| `AdventureManager.removeAdventure(zoneId)` | `adventures.close` |
+| `game.getResources().GetResourceAmount(name)` and `.GetFree()` | `resources.amount`, `resources.freePopulation` |
+| `unitBase.GetCosts_vector()` | `production.costs` |
+| `SendServerAction(95, code, grid, 0, dStartSpecialistTaskVO)` after `mCurrentCursor.mCurrentSpecialist = general`; codes 4 move, 5 attack, 7 travel to zone, 12 to star menu (not yet confirmed in steward logs) | `specialists.orders.move`, `.attack`, `.star` (via `sendTask`) |
+| `ServiceManager.getInstance().specialist.sendToZone(general, zoneId)` | `specialists.orders.sendToZone` |
+| `mMouseCursor.CheckIfGarrisonIsPlacableInGame(grid, true)` in cursor edit mode 86; `mPathFinder.CalculatePath` | `orders.isPlaceable`, `orders.hasPath` (prechecks) |
+| `general.GetTask().GetOriginalType()`, `.GetNewGarrisonGridIdx()` | `orders.rawTaskType`, `.taskKind`, `.newGrid` (verification) |
+
 ### Class lookup
 
 ```js

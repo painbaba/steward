@@ -40,6 +40,8 @@
     if (!S.TroopClass)          S.TroopClass          = {};    // filled by core/army.js
     if (!S.BattleLine)          S.BattleLine          = {};    // filled by core/battles.js
     if (!S.BattleProblem)       S.BattleProblem       = {};    // filled by core/battles.js
+    if (!S.ActionResult)        S.ActionResult        = {};    // filled by core/actions.js
+    if (!S.GeneralTask)         S.GeneralTask         = {};    // filled by core/specialists/orders.js
 
     // Failure kinds of the kernel file API (kernel/17_files.js).
     S.FileError = {

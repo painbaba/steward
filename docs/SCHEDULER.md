@@ -111,6 +111,8 @@ Steward.kernel.queue.depthByModule('collect');    // diagnostic
 
 The `collect` module uses this when the user toggles its master switch off — pending actions disappear in milliseconds instead of draining for ~45 s. Modules should mirror the pattern when they have an "off" switch with pending side effects.
 
+An entry added while a tagged action is running inherits that action's module tag. A self re-enqueuing action, such as the verify loop of `S.core.actions.attempt`, therefore keeps its module busy and cancellable until it finishes.
+
 ### Modal-aware execution
 
 Each action is gated by a host-modal check before it fires (`60_queue.js:isHostModalVisible`). If any `div[role="dialog"]:visible` is on the page when the queue tries to run the next entry, the entry is **deferred** (not dropped) — the queue re-polls every `QUEUE_MODAL_RECHECK_MS` (2 s) and resumes the moment the user closes their window. This prevents Steward from yanking a window the user just opened.

@@ -23,7 +23,7 @@
  * Write safety comes from S.kernel.files.writeText (temp file, then move):
  * a failed save leaves the previous file intact.
  *
- * Wave files are referenced by path and read fresh at every dry run; their
+ * Wave files are referenced by path and read fresh when used; their
  * content is never copied into a template.
  *
  * The one module setting (last picker folder) is read and written only
@@ -382,6 +382,26 @@
         return out.concat(buffOptions(buffs || [], stored));
     }
 
+    // Pure. The waves in drag order: `order` lists the old indices in their new
+    // positions. Anything but a permutation of 0..n-1 returns null, so a stale
+    // or half-read DOM order can never drop or duplicate a wave. Duplicate
+    // paths are fine: a wave file may be run more than once.
+    function reorderWaves(waves, order) {
+        if (!waves || typeof waves.length !== 'number') return null;
+        if (!order || typeof order.length !== 'number' || order.length !== waves.length) return null;
+        var n = waves.length;
+        var seen = {};
+        var out = [];
+        for (var i = 0; i < n; i++) {
+            var at = order[i];
+            if (typeof at !== 'number' || at !== Math.floor(at) || at < 0 || at >= n) return null;
+            if (seen[at]) return null;
+            seen[at] = true;
+            out.push(waves[at]);
+        }
+        return out;
+    }
+
     S.modules.adventures.templates = {
         SUBDIR:              SUBDIR,
         EXT:                 EXT,
@@ -409,7 +429,8 @@
         initialSpeedBuff:    initialSpeedBuff,
         autoLabel:           autoLabel,
         buffLabel:           buffLabel,
-        speedBuffOptions:    speedBuffOptions
+        speedBuffOptions:    speedBuffOptions,
+        reorderWaves:        reorderWaves
     };
 
 }(Steward));

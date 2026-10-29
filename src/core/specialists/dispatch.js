@@ -27,7 +27,9 @@
  *   by tso_client/client/files/content/scripts/8-shortcuts.js:290.
  *
  * Lives under core/ and is kept thin — composed dispatch ("send geologist
- * to find iron" etc.) is a module concern.
+ * to find iron" etc.) is a module concern. sendTask is exported for
+ * core/specialists/orders.js, which sends the same packet with a target grid
+ * in p2 (send() always passes 0 there).
  */
 
 (function (S) {
@@ -60,30 +62,45 @@
         }
     }
 
-    function send(spec, taskId, subTaskId, responder) {
+    // Builds and sends the task packet. p2 is the target grid for orders and 0
+    // for searches; the VO carries the specialist's uniqueID in both cases.
+    function sendPacket(spec, taskId, subTaskId, p2) {
         var uid = uniqueId(spec);
         if (uid === null) {
-            S.kernel.warn('specialists', 'send: cannot resolve specialist GetUniqueID');
+            S.kernel.warn('specialists', 'cannot resolve specialist GetUniqueID');
             return false;
         }
         var taskVO = buildTaskVO(subTaskId);
         if (taskVO === null) {
-            S.kernel.warn('specialists', 'send: cannot construct dStartSpecialistTaskVO');
+            S.kernel.warn('specialists', 'cannot construct dStartSpecialistTaskVO');
             return false;
         }
         try {
             taskVO.uniqueID = uid;
         } catch (e) {
-            S.kernel.warn('specialists', 'send: failed to attach uniqueID:', e);
+            S.kernel.warn('specialists', 'failed to attach uniqueID:', e);
             return false;
         }
+        return S.core.packets.sendAction(ACTION_DISPATCH_SPECIALIST, taskId, p2, 0, taskVO);
+    }
+
+    function send(spec, taskId, subTaskId, responder) {
         // The send is a SendServerAction; responses surface via the host's
         // mClientMessages router, not directly. The responder argument is
         // accepted for API symmetry; modules attach observers separately.
         if (responder && typeof responder.onResponse !== 'function') {
-            S.kernel.warn('specialists', 'send: responder lacks onResponse — wrap with core.packets.responder()');
+            S.kernel.warn('specialists', 'send: responder lacks onResponse - wrap with core.packets.responder()');
         }
-        return S.core.packets.sendAction(ACTION_DISPATCH_SPECIALIST, taskId || 0, 0, 0, taskVO);
+        return sendPacket(spec, taskId || 0, subTaskId, 0);
+    }
+
+    // An order: the task code and the target grid (p2) are both required.
+    function sendTask(spec, taskId, p2) {
+        if (typeof taskId !== 'number' || typeof p2 !== 'number') {
+            S.kernel.warn('specialists', 'sendTask: task code and grid must be numbers');
+            return false;
+        }
+        return sendPacket(spec, taskId, 0, p2);
     }
 
     function recall(spec, responder) {
@@ -112,9 +129,10 @@
     }
 
     S.core.specialists.dispatch = {
-        send:     send,
-        recall:   recall,
-        uniqueId: uniqueId
+        send:        send,
+        recall:      recall,
+        uniqueId:    uniqueId,
+        sendTask:    sendTask
     };
 
 }(Steward));

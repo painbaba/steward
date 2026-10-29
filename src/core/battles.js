@@ -57,6 +57,41 @@
         return line.kind === L.Attack || line.kind === L.Move || line.kind === L.Star;
     }
 
+    // Of the general lines, Attack and Move carry troops into the field. A
+    // Star line holds none, so it is left out of the supply request.
+    function supplyWave(lines) {
+        var wave = [];
+        for (var i = 0; i < lines.length; i++) {
+            if (lines[i].kind === L.Attack || lines[i].kind === L.Move) {
+                wave.push({ key: lines[i].key, army: lines[i].army });
+            }
+        }
+        return wave;
+    }
+
+    // The set of general keys a parsed loadout names, as a lookup map.
+    function loadoutKeys(lines) {
+        var keys = {};
+        for (var i = 0; i < lines.length; i++) {
+            if (isGeneralLine(lines[i])) keys[lines[i].key] = true;
+        }
+        return keys;
+    }
+
+    // A wave may only use generals the loadout brings; one problem per
+    // general line whose key the loadout does not list.
+    function notInLoadout(lines, keys) {
+        var out = [];
+        for (var i = 0; i < lines.length; i++) {
+            if (isGeneralLine(lines[i]) && !Object.prototype.hasOwnProperty.call(keys, lines[i].key)) {
+                out.push(problem(P.NotInLoadout, lines[i].key,
+                    (lines[i].name ? lines[i].name + ' ' : '') + '(' + lines[i].key +
+                    ') is not in the loadout'));
+            }
+        }
+        return out;
+    }
+
     // Open-dialog filter list for battle files, in the shape that
     // Steward.kernel.files.browse takes as opts.filters.
     var BROWSE_FILTERS = [
@@ -321,7 +356,10 @@
         problem:        problem,
         stripName:      stripName,
         isGeneralLine:  isGeneralLine,
-        FATAL:          FATAL,
+        supplyWave:     supplyWave,
+        loadoutKeys:    loadoutKeys,
+        notInLoadout:   notInLoadout,
+        FATAL:         FATAL,
         KEY_RE:         KEY_RE,
         BROWSE_FILTERS: BROWSE_FILTERS
     };

@@ -155,16 +155,7 @@
     function eventResourceAmount(code) {
         var resName = eventResource(code);
         if (!resName) return null;
-        try {
-            if (typeof game !== 'undefined' && game && typeof game.getResources === 'function') {
-                var resources = game.getResources();
-                if (resources && typeof resources.GetResourceAmount === 'function') {
-                    var n = resources.GetResourceAmount(resName);
-                    return (typeof n === 'number') ? n : null;
-                }
-            }
-        } catch (e) { /* fall through */ }
-        return null;
+        return S.core.resources.amount(resName);
     }
 
     // True when the event is live but only its `_Shop` variant is in

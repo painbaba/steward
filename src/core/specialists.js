@@ -501,27 +501,58 @@
     function isExploring(spec)   { return isExplorer(spec)  && status(spec) === S.SpecialistStatus.Working; }
     function isProspecting(spec) { return isGeologist(spec) && status(spec) === S.SpecialistStatus.Working; }
 
-    function readVector(zone) {
-        var out = [];
-        if (!zone) return out;
+    // Returns the specialist array, or null when the list could not be read
+    // (no zone, no getter, falsy vector, or a throw). Callers that must tell
+    // "empty" from "unreadable" use this; readVector flattens null to [].
+    function readSpecialists(zone) {
+        if (!zone) return null;
         try {
-            if (typeof zone.GetSpecialists_vector === 'function') {
-                var v = zone.GetSpecialists_vector();
-                if (v) {
-                    var len = (typeof v.length === 'number') ? v.length : 0;
-                    for (var i = 0; i < len; i++) if (v[i]) out.push(v[i]);
-                }
-            }
+            if (typeof zone.GetSpecialists_vector !== 'function') return null;
+            var v = zone.GetSpecialists_vector();
+            if (!v) return null;
+            var out = [];
+            var len = (typeof v.length === 'number') ? v.length : 0;
+            for (var i = 0; i < len; i++) if (v[i]) out.push(v[i]);
+            return out;
         } catch (e) {
             S.kernel.warn('specialists', 'readVector threw:', e);
+            return null;
         }
-        return out;
+    }
+
+    function readVector(zone) {
+        return readSpecialists(zone) || [];
     }
 
     function all(opts) {
         opts = opts || {};
         var zone = opts.zone || S.core.zone.current();
         return readVector(zone);
+    }
+
+    // Re-finds one specialist by its uid key. Action defs treat ok:false as
+    // "not observed" (the list could not be read) and spec:null with ok:true
+    // as "not listed" (the read succeeded and the specialist is absent).
+    function lookup(key, opts) {
+        opts = opts || {};
+        var zone = opts.zone || S.core.zone.current();
+        var list = readSpecialists(zone);
+        if (list === null) return { ok: false, spec: null };
+        if (typeof key !== 'string' || !key) return { ok: true, spec: null };
+        for (var i = 0; i < list.length; i++) {
+            if (uniqueIdKey(list[i]) === key) return { ok: true, spec: list[i] };
+        }
+        return { ok: true, spec: null };
+    }
+
+    // The one place that turns a lookup into the refusal reason every action
+    // def reports. An unreadable list and an absent specialist are different
+    // refusals, so the caller can tell a host problem from a stale key.
+    function refind(key, opts) {
+        var r = lookup(key, opts);
+        if (!r.ok) return { spec: null, reason: 'specialist unreadable' };
+        if (!r.spec) return { spec: null, reason: 'specialist not found' };
+        return { spec: r.spec, reason: null };
     }
 
     function byType(type, opts) {
@@ -775,6 +806,8 @@
     // --- Public surface ---
 
     S.core.specialists.all              = all;
+    S.core.specialists.lookup           = lookup;
+    S.core.specialists.refind           = refind;
     S.core.specialists.byType           = byType;
     S.core.specialists.byName           = byName;
     S.core.specialists.generals         = generals;

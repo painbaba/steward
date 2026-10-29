@@ -35,17 +35,21 @@ Steward
 ├── core
 │   ├── zone
 │   ├── buildings
-│   ├── specialists
+│   ├── specialists     ← lookup, dispatch, picks, general orders (move, attack, star, send to zone)
 │   ├── deposits
 │   ├── packets
 │   ├── locale
 │   ├── events
-│   ├── adventures      ← adventure definitions (read-only)
-│   ├── army            ← troop pool, squads, supply plan (read-only)
+│   ├── actions         ← send / verify / retry runner for write actions
+│   ├── adventures      ← adventure definitions, own adventures, close action
+│   ├── army            ← troop pool, squads, supply plan, raise and unload actions
 │   ├── battles         ← battle-file loader and validator
-│   └── buffs           ← buff stock and definitions (read-only)
+│   ├── buffs           ← buff stock and definitions; actions speed, camp, population, map
+│   ├── production      ← troop queues, order pricing and order action
+│   ├── quests          ← quest pool and claim action
+│   └── resources       ← resource amount and free population reads
 ├── modules
-│   ├── adventures      ← run templates and dry run (sends nothing)
+│   ├── adventures      ← run templates and run request (sends nothing)
 │   └── <id>            ← exposed only if the module chooses to publish state
 └── (shared enums)
     ├── Priority
@@ -58,6 +62,8 @@ Steward
     ├── TroopClass
     ├── BattleLine
     ├── BattleProblem
+    ├── ActionResult
+    ├── GeneralTask     ← declared in the kernel, filled by core/specialists/orders.js
     ├── SpeedBuffChoice
     ├── FileError
     ├── FileLocation

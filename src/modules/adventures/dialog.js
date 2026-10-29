@@ -2,14 +2,18 @@
  * Run-template dialog for the adventures module.
  *
  * A separate host Modal rather than a dashboard tab: building a template
- * needs a file picker, a reorderable wave list and a report. Opening it hides
- * the dashboard (Modal.show semantics), and a zone load closes host modals,
- * so an unsaved draft can never outlive the island it was edited on.
+ * needs a file picker and a reorderable wave list. Opening it hides the
+ * dashboard (Modal.show semantics), and a zone load closes host modals, so
+ * an unsaved draft can never outlive the island it was edited on.
  *
  * Edits are buffered in `state.draft` until Save; templates themselves are
  * files, so Save writes one and Delete removes one. DOM only: all data comes
- * through templates, dryrun, S.core.* and S.kernel.*. Open, save and delete
- * resync the native menu's template list.
+ * through templates, S.core.* and S.kernel.*. Open, save and delete resync
+ * the native menu's template list.
+ *
+ * A view is built detached and swapped in only once complete: a view that
+ * throws while building leaves a failure view with a way back to the list,
+ * never a half-emptied body.
  *
  * Reload safety: the file starts no timers and caches no function from
  * another file. Every handler calls S.modules.adventures.*, S.core.* and
@@ -59,11 +63,6 @@
 
     function span(cls, text) {
         return '<span class="' + cls + '">' + esc(text) + '</span>';
-    }
-
-    // formRow takes text or a jQuery element, so escaped HTML is wrapped.
-    function htm(html) {
-        return $('<span>').html(html);
     }
 
     function sortedKeys(map) {
@@ -121,15 +120,41 @@
             state.draft.label = state.labelInput.val();
         }
         state.labelInput = null;
-        $body.empty();
+        // Build detached: the old view stays until the new one is complete, so
+        // a throw part-way never leaves an emptied, half-built body.
         var $panel = $('<div>', { 'class': 'steward-panel' });
         var $c = $('<div>', { 'class': 'container-fluid' });
         $panel.append($c);
+        try {
+            if (state.view === 'edit') renderEdit($c);
+            else renderList($c);
+        } catch (e) {
+            S.kernel.error('adventures', 'render ' + state.view + ' view threw:', e);
+            state.labelInput = null;
+            $c.empty();
+            renderFailure($c, e);
+        }
+        $body.empty();
         $body.append($panel);
+    }
 
-        if (state.view === 'edit') renderEdit($c);
-        else if (state.view === 'report') renderReport($c);
-        else renderList($c);
+    // Leaves the broken view behind; it renders only on click, so a list that
+    // throws again simply shows this view again instead of looping.
+    function backToListFromFailure() {
+        state.draft = null;
+        state.problems = null;
+        state.view = 'list';
+        render();
+    }
+
+    function renderFailure($c, e) {
+        var message = e && e.message ? e.message : String(e);
+        $c.append(H().headerRow('Adventure templates', {
+            icon: '⚔',
+            action: { label: 'Back to list', onClick: act(backToListFromFailure) }
+        }));
+        $c.append(H().gridRow([[12, span('steward-bad',
+            'This view could not be shown: ' + message + ' (details in the console log)')]]));
     }
 
     function renderFooter() {
@@ -154,7 +179,7 @@
             return;
         }
         S.kernel.ui.ensureStyle(MODAL_ID);
-        state = { view: 'list', draft: null, report: null, confirmDelete: null, error: null, labelInput: null };
+        state = { view: 'list', draft: null, confirmDelete: null, error: null, labelInput: null };
         try {
             modal = new Modal(MODAL_ID, TITLE, true);
             modal.create();
@@ -194,12 +219,6 @@
         render();
     }
 
-    function dryRun(rec) {
-        state.report = S.modules.adventures.dryrun.report(rec);
-        state.view = 'report';
-        render();
-    }
-
     function deleteButton(id, name) {
         var confirming = state.confirmDelete === id;
         return btn(confirming ? 'Confirm delete' : 'Delete', function () {
@@ -223,8 +242,6 @@
         var adventure = S.core.adventures.label(rec.adventure) || rec.adventure;
         var $btns = $('<span>');
         $btns.append(btn('Edit', act(function () { editTemplate(rec.id); })));
-        $btns.append(document.createTextNode(' '));
-        $btns.append(btn('Dry run', act(function () { dryRun(rec); })));
         $btns.append(document.createTextNode(' '));
         $btns.append(deleteButton(rec.id, rec.id + T().EXT));
         $c.append(h.gridRow([
@@ -289,20 +306,16 @@
                 onChange: function (v) { draft.adventure = v; }
             });
         }
-        var groups = S.core.adventures.groups(defs);
+        // One flat list in label order, so a map is found by the name shown.
+        var list = S.core.adventures.selectable(defs);
         var $sel = $('<select>', { 'class': 'steward-dropdown' });
         var found = false;
-        var i, j;
         $sel.append($('<option>', { value: '' }).text('— choose —'));
-        for (i = 0; i < groups.length; i++) {
-            var $g = $('<optgroup>', { label: groups[i].group });
-            for (j = 0; j < groups[i].items.length; j++) {
-                var def = groups[i].items[j];
-                var $o = $('<option>', { value: def.name }).text(def.label);
-                if (def.name === draft.adventure) { $o.attr('selected', 'selected'); found = true; }
-                $g.append($o);
-            }
-            $sel.append($g);
+        for (var i = 0; i < list.length; i++) {
+            var def = list[i];
+            var $o = $('<option>', { value: def.name }).text(def.label);
+            if (def.name === draft.adventure) { $o.attr('selected', 'selected'); found = true; }
+            $sel.append($o);
         }
         // An old template keeps its map even when it is no longer listed.
         if (draft.adventure && !found) {
@@ -401,7 +414,7 @@
             (function (idx) {
                 var path = draft.waves[idx];
                 var $li = $('<li>', { 'data-idx': String(idx) });
-                $li.append($('<span>').text('Wave ' + (idx + 1) + '  '));
+                $li.append($('<span>', { 'class': 'steward-wave-no' }).text('Wave ' + (idx + 1) + '  '));
                 $li.append($('<span>', { title: path }).text(fileName(path)));
                 $li.append($('<span>').html('  ' + waveCounts(path)));
                 if (!sortable) {
@@ -410,13 +423,20 @@
                     $li.append(btn('↓', function () { moveWave(idx, 1); }));
                 }
                 $li.append(document.createTextNode(' '));
+                // A drag renumbers rows in place, so the row's own index is read
+                // at click time rather than the one it was built with.
                 $li.append(btn('×', function () {
-                    draft.waves.splice(idx, 1);
+                    var at = parseInt($li.attr('data-idx'), 10);
+                    if (!(at >= 0 && at < draft.waves.length)) return;
+                    draft.waves.splice(at, 1);
                     render();
                 }));
                 $ul.append($li);
             }(i));
         }
+        // The update handler runs inside the sortable's own mouse-stop, so it
+        // must not re-render (that would destroy the sortable under it): it
+        // reorders the draft and renumbers the rows in place.
         if (sortable && draft.waves.length > 1) {
             $ul.sortable({
                 update: function () {
@@ -424,10 +444,17 @@
                     $ul.children('li').each(function () {
                         order.push(parseInt($(this).attr('data-idx'), 10));
                     });
-                    var next = [];
-                    for (var i = 0; i < order.length; i++) next.push(draft.waves[order[i]]);
+                    var next = T().reorderWaves(draft.waves, order);
+                    if (next === null) {
+                        // The next render shows the draft's real order again.
+                        S.kernel.warn('adventures', 'wave reorder ignored: bad order');
+                        return;
+                    }
                     draft.waves = next;
-                    render();
+                    $ul.children('li').each(function (i) {
+                        $(this).attr('data-idx', String(i));
+                        $(this).children('.steward-wave-no').text('Wave ' + (i + 1) + '  ');
+                    });
                 }
             });
         }
@@ -514,101 +541,6 @@
             render();
         }));
         $c.append(h.gridRow([[12, $btns]]));
-    }
-
-    // ---- Report view ----------------------------------------------------------
-
-    function problemRows($c, problems) {
-        for (var i = 0; i < problems.length; i++) {
-            var p = problems[i];
-            var cls = p.fatal ? 'steward-bad' : 'steward-warn';
-            var key = p.key ? p.key + ': ' : '';
-            $c.append(H().gridRow([[12, span(cls, key + p.message)]]));
-        }
-    }
-
-    function lineTable($c, lines) {
-        var h = H();
-        if (!lines.length) return;
-        $c.append(h.gridRow([
-            [2, 'General'], [1, 'Kind'], [1, 'Grid'], [2, 'Target'],
-            [3, 'Army'], [1, 'Delay'], [1, 'Now'], [1, 'Match']
-        ], { headerCells: true }));
-        for (var i = 0; i < lines.length; i++) {
-            var l = lines[i];
-            var general = S.core.battles.isGeneralLine(l);
-            var grid = l.kind === S.BattleLine.Star ? 'star' : (l.grid === null ? '' : String(l.grid));
-            var mark = '';
-            if (general) mark = l.matches ? span('steward-ok', '✓') : span('steward-bad', '✗');
-            $c.append(h.gridRow([
-                [2, esc(l.name || l.key)],
-                [1, esc(String(l.kind).replace(/^Line/, ''))],
-                [1, esc(grid)],
-                [2, esc(l.targetName || (l.target === null ? '' : l.target))],
-                [3, esc(armyText(l.army))],
-                [1, l.timeMs === null ? '' : esc(Math.round(l.timeMs / 1000) + ' s')],
-                [1, general ? esc(armyText(l.have)) : ''],
-                [1, mark]
-            ]));
-        }
-    }
-
-    function supplyRows($c, supply) {
-        var h = H();
-        if (!supply) return;
-        var donors = [];
-        for (var i = 0; i < supply.donors.length; i++) {
-            var d = supply.donors[i];
-            donors.push((d.name || d.key) + ' (' + armyText(d.army) + ')');
-        }
-        $c.append(h.formRow('Needed from the free pool', htm(esc(armyText(supply.need)))));
-        $c.append(h.formRow('Free pool short by', htm(esc(armyText(supply.shortBefore)))));
-        $c.append(h.formRow('Donors', htm(esc(donors.length ? donors.join('; ') : 'none'))));
-        $c.append(h.formRow('Covered', htm(supply.covered ? span('steward-ok', 'yes') : span('steward-bad', 'no'))));
-        if (supply.missing.length) {
-            $c.append(h.formRow('Missing generals', htm(span('steward-bad', supply.missing.join(', ')))));
-        }
-    }
-
-    function backToList() {
-        state.report = null;
-        state.error = null;
-        state.view = 'list';
-        render();
-    }
-
-    function renderReport($c) {
-        var h = H();
-        var data = state.report;
-        var back = { label: 'Back', onClick: backToList };
-        if (!data || data.broken) {
-            $c.append(h.headerRow('Dry run', { icon: '⚔', action: back }));
-            $c.append(h.gridRow([[12, span('steward-bad', 'This template cannot be read')]]));
-            return;
-        }
-        var tpl = data.template;
-        $c.append(h.headerRow('Dry run: ' + tpl.label, { icon: '⚔', action: back }));
-
-        var viewing = data.zoneAdventure
-            ? (S.core.adventures.label(data.zoneAdventure) || data.zoneAdventure) : 'not an adventure';
-        var mapLabel = S.core.adventures.label(tpl.adventure) || tpl.adventure;
-        $c.append(h.gridRow([[12, esc('Map: ' + mapLabel + ' — viewing ' + viewing)]]));
-        if (!data.onTemplateMap) {
-            $c.append(h.gridRow([[12, span('steward-warn', 'Not on the template\'s map: camp checks skipped')]]));
-        }
-        var sb = data.speedBuff;
-        var sbText = sb.name === null ? 'no horseshoe' : sb.name + ' (' + (sb.amount || 0) + ' in stock)';
-        $c.append(h.gridRow([[12, esc('Horseshoe: ' + sbText + (sb.note ? ' — ' + sb.note : ''))]]));
-
-        for (var i = 0; i < data.files.length; i++) {
-            var f = data.files[i];
-            var title = f.role === 'loadout' ? 'Loadout' : 'Wave ' + f.index;
-            $c.append(h.headerRow(title + ' — ' + fileName(f.path)));
-            problemRows($c, f.problems);
-            lineTable($c, f.lines);
-            supplyRows($c, f.supply);
-        }
-        $c.append(h.gridRow([[12, esc(data.fatal + ' fatal, ' + data.warn + ' warnings')]]));
     }
 
     S.modules.adventures.dialog = {
