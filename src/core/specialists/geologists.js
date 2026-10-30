@@ -172,7 +172,9 @@
             if (!geo) continue;
             if (idleOnly && c.status && c.status(geo) !== S.SpecialistStatus.Idle) continue;
             var uid = c.uniqueIdKey(geo);
-            if (uid && exclude && exclude[uid]) continue;
+            // Without a uid the dispatch could not re-find this entry.
+            if (!uid) continue;
+            if (exclude && exclude[uid]) continue;
 
             var s = geologistScoreFor(geo, depositName);
             rows.push({

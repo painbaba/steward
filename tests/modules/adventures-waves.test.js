@@ -235,8 +235,7 @@ t.test('Gate: a missing field general waits, then pauses GeneralMissing', functi
     tick(w);
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
     assert.strictEqual(stepName(w), 'Gate');
-    w.t += w.ex.GATE_MISSING_MS - 1;
-    tick(w);
+    W.ticksFor(w, w.ex.GATE_MISSING_MS - 1);
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
     w.t += 2;
     tick(w);

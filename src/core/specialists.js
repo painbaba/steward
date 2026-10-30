@@ -501,6 +501,54 @@
     function isExploring(spec)   { return isExplorer(spec)  && status(spec) === S.SpecialistStatus.Working; }
     function isProspecting(spec) { return isGeologist(spec) && status(spec) === S.SpecialistStatus.Working; }
 
+    var UNREADABLE = 'specialist unreadable';
+
+    // Every one of these is declared on cSpecialist itself, so a live object
+    // has them. An entry that reads one as undefined is a passing fault of the
+    // AS3 bridge, not a different kind of object.
+    var REQUIRED_MEMBERS = ['GetType', 'GetUniqueID', 'getPlayerID', 'GetTask'];
+    var DROP_LOG_MS = 60000;
+    var droppedTotal = 0;
+    var dropLoggedAt = null;
+
+    // Returns null when the entry is usable, else the name of the member that
+    // failed ('uid' when the members exist but the key reads null or empty). A throw
+    // counts as unusable.
+    function unusableMember(spec) {
+        try {
+            for (var i = 0; i < REQUIRED_MEMBERS.length; i++) {
+                if (typeof spec[REQUIRED_MEMBERS[i]] !== 'function') return REQUIRED_MEMBERS[i];
+            }
+            if (!uniqueIdKey(spec)) return 'uid';
+        } catch (e) {
+            return 'threw';
+        }
+        return null;
+    }
+
+    function noteDropped(n, total, counts, sample) {
+        var now = Date.now();
+        if (dropLoggedAt !== null && now - dropLoggedAt < DROP_LOG_MS) return;
+        dropLoggedAt = now;
+        var parts = [];
+        for (var name in counts) {
+            if (Object.prototype.hasOwnProperty.call(counts, name)) parts.push(name + ' x' + counts[name]);
+        }
+        var rawType = '?';
+        var cls = '?';
+        try { rawType = String(sample.GetType()); } catch (e1) { /* keep ? */ }
+        try { cls = window.runtime.flash.utils.getQualifiedClassName(sample); } catch (e2) { /* keep ? */ }
+        S.kernel.log('specialists', 'dropped ' + n + ' of ' + total + '; missing ' + parts.join(', ') +
+            '; sample GetType ' + rawType + ' class ' + cls);
+    }
+
+    // Ghosts: the vector sometimes holds a real cSpecialist whose members read
+    // undefined on the JS side of the AIR bridge for a moment (GetType still
+    // works). Such an entry cannot be classified, owned or re-found, and its
+    // status would read Idle. The reader leaves it out and counts it in
+    // dropped(), so a caller can tell a read that lost entries from a clean one.
+    // There is no retry here: the next tick is the retry.
+    //
     // Returns the specialist array, or null when the list could not be read
     // (no zone, no getter, falsy vector, or a throw). Callers that must tell
     // "empty" from "unreadable" use this; readVector flattens null to [].
@@ -512,7 +560,25 @@
             if (!v) return null;
             var out = [];
             var len = (typeof v.length === 'number') ? v.length : 0;
-            for (var i = 0; i < len; i++) if (v[i]) out.push(v[i]);
+            var lost = 0;
+            var counts = {};
+            var sample = null;
+            for (var i = 0; i < len; i++) {
+                var spec = v[i];
+                if (!spec) continue;
+                var bad = unusableMember(spec);
+                if (bad === null) {
+                    out.push(spec);
+                } else {
+                    lost++;
+                    counts[bad] = (counts[bad] || 0) + 1;
+                    if (sample === null) sample = spec;
+                }
+            }
+            if (lost > 0) {
+                droppedTotal += lost;
+                noteDropped(lost, len, counts, sample);
+            }
             return out;
         } catch (e) {
             S.kernel.warn('specialists', 'readVector threw:', e);
@@ -520,14 +586,28 @@
         }
     }
 
+    // Monotonic count of entries the reader has left out. A caller compares it
+    // before and after a read to learn whether that read was complete.
+    function dropped() { return droppedTotal; }
+
     function readVector(zone) {
         return readSpecialists(zone) || [];
     }
 
     // true when the list of opts.zone (default: the viewed zone) is readable,
-    // so an empty list can be told from an unreadable one.
+    // so an empty list can be told from an unreadable one. A read that dropped
+    // ghost entries still counts as readable: the away recall reads false as
+    // "left the island", which a passing fault must not suggest.
     function listReadable(opts) {
         return readSpecialists((opts && opts.zone) || S.core.zone.current()) !== null;
+    }
+
+    // true only when the list of opts.zone (default: the viewed zone) reads and
+    // that read dropped nothing.
+    function listComplete(opts) {
+        var before = droppedTotal;
+        var list = readSpecialists((opts && opts.zone) || S.core.zone.current());
+        return list !== null && droppedTotal === before;
     }
 
     function all(opts) {
@@ -537,18 +617,25 @@
     }
 
     // Re-finds one specialist by its uid key. Action defs treat ok:false as
-    // "not observed" (the list could not be read) and spec:null with ok:true
-    // as "not listed" (the read succeeded and the specialist is absent).
+    // "not observed" (the list could not be read, or the read lost entries and
+    // the key may have been one of them) and spec:null with ok:true as "not
+    // listed" (a complete read in which the specialist is absent).
     function lookup(key, opts) {
         opts = opts || {};
         var zone = opts.zone || S.core.zone.current();
+        var before = droppedTotal;
         var list = readSpecialists(zone);
         if (list === null) return { ok: false, spec: null };
         if (typeof key !== 'string' || !key) return { ok: true, spec: null };
+        var sawNullKey = false;
         for (var i = 0; i < list.length; i++) {
-            if (uniqueIdKey(list[i]) === key) return { ok: true, spec: list[i] };
+            var k = uniqueIdKey(list[i]);
+            if (k === key) return { ok: true, spec: list[i] };
+            // An entry that passed the reader but reads null or empty here flipped
+            // between the two reads; it may be the one searched for.
+            if (!k) sawNullKey = true;
         }
-        return { ok: true, spec: null };
+        return { ok: droppedTotal === before && !sawNullKey, spec: null };
     }
 
     // The one place that turns a lookup into the refusal reason every action
@@ -556,7 +643,7 @@
     // refusals, so the caller can tell a host problem from a stale key.
     function refind(key, opts) {
         var r = lookup(key, opts);
-        if (!r.ok) return { spec: null, reason: 'specialist unreadable' };
+        if (!r.ok) return { spec: null, reason: UNREADABLE };
         if (!r.spec) return { spec: null, reason: 'specialist not found' };
         return { spec: r.spec, reason: null };
     }
@@ -813,6 +900,9 @@
 
     S.core.specialists.all              = all;
     S.core.specialists.listReadable     = listReadable;
+    S.core.specialists.listComplete     = listComplete;
+    S.core.specialists.dropped          = dropped;
+    S.core.specialists.UNREADABLE       = UNREADABLE;
     S.core.specialists.lookup           = lookup;
     S.core.specialists.refind           = refind;
     S.core.specialists.byType           = byType;

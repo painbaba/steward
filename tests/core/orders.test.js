@@ -4,6 +4,7 @@ var t = require('../runner');
 var harness = require('../harness');
 var A = require('../stubs/army');
 var AC = require('../stubs/actions');
+var specStubs = require('../stubs/specialists');
 
 var assert = t.assert;
 
@@ -514,4 +515,57 @@ t.test('orders send fails without a packet when the uid cannot be read', functio
     g.GetUniqueID = function () { throw new Error('uid'); };
     assert.strictEqual(s.orders.sendTask(g, s.S.GeneralTask.Move, 42), false);
     assert.strictEqual(s.sent.actions.length, 0);
+});
+
+// ---- ghosts: a dropped read is never absence or success ---------------------------
+
+t.test('orders report unreadable for an owner that reads undefined, and send nothing', function () {
+    var g = AC.general({ uid: 'g1', grid: 5, army: { Rifle: 3 } });
+    var s = setup({ generals: [g] });
+    g.getPlayerID = function () { return undefined; };
+    var unreadable = s.S.core.specialists.UNREADABLE;
+    var rs = [
+        run(s, s.orders.star('g1')),
+        run(s, s.orders.sendToZone('g1', 5)),
+        run(s, s.orders.move('g1', 7))
+    ];
+    for (var i = 0; i < rs.length; i++) {
+        assert.strictEqual(rs[i].status, s.S.ActionResult.Refused, 'order ' + i);
+        assert.strictEqual(rs[i].reason, unreadable, 'order ' + i);
+    }
+    assert.strictEqual(s.sent.actions.length, 0);
+    assert.strictEqual(s.zoneCalls.length, 0);
+});
+
+t.test('orders keep the not own reason for a real foreign general', function () {
+    var g = AC.general({ uid: 'g1', grid: 5, army: { Rifle: 3 }, playerId: 2 });
+    var s = setup({ generals: [g] });
+    assert.strictEqual(run(s, s.orders.star('g1')).reason, 'not own');
+});
+
+t.test('star does not verify when the general turns into a ghost after the send', function () {
+    var g = AC.general({ uid: 'g1', grid: 5, army: { Rifle: 3 } });
+    var s = setup({ generals: [g] });
+    var r = run(s, s.orders.star('g1'), function (n) { if (n === 1) specStubs.ghost(g); });
+    assert.notStrictEqual(r.status, s.S.ActionResult.Verified);
+    assert.strictEqual(r.status, s.S.ActionResult.Failed);
+    assert.strictEqual(r.sends, 1);
+    assert.ok(/retry refused: specialist unreadable/.test(r.reason), r.reason);
+});
+
+t.test('sendToZone does not verify when the general turns into a ghost after the send', function () {
+    var g = AC.general({ uid: 'g1' });
+    var s = setup({ generals: [g] });
+    var r = run(s, s.orders.sendToZone('g1', 5), function (n) { if (n === 1) specStubs.ghost(g); });
+    assert.notStrictEqual(r.status, s.S.ActionResult.Verified);
+    assert.strictEqual(r.status, s.S.ActionResult.Failed);
+    assert.strictEqual(r.sends, 1);
+    assert.ok(/retry refused: specialist unreadable/.test(r.reason), r.reason);
+});
+
+t.test('star still verifies when the general really left a clean list', function () {
+    var g = AC.general({ uid: 'g1', grid: 5, army: { Rifle: 3 } });
+    var s = setup({ generals: [g] });
+    var r = run(s, s.orders.star('g1'), function (n) { if (n === 1) hideGeneral(s); });
+    assert.strictEqual(r.status, s.S.ActionResult.Verified);
 });

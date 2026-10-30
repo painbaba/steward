@@ -183,7 +183,8 @@
     function ready(key) {
         var f = S.core.specialists.refind(key);
         if (!f.spec) return f;
-        if (!S.core.army.isOwn(f.spec)) return { spec: null, reason: 'not own' };
+        var why = S.core.army.ownReason(f.spec);
+        if (why) return { spec: null, reason: why };
         if (S.core.specialists.status(f.spec) !== S.SpecialistStatus.Idle) return { spec: null, reason: 'not idle' };
         return f;
     }

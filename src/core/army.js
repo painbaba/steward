@@ -246,26 +246,59 @@
 
     // --- Ownership and specialist facts.
 
-    // Own when the specialist's player id is the zone's own player. Without
-    // a player id, -1 (no owner) is the only id known not to be ours.
-    function isOwn(spec) {
-        if (!spec) return false;
-        var owner;
-        try { owner = spec.getPlayerID(); }
-        catch (e) {
-            S.kernel.warn('army', 'isOwn(): getPlayerID threw:', e);
-            return false;
+    // The specialist's player id, or null when it cannot be read. A member
+    // that is missing, throws or answers with anything but a number is the
+    // same passing bridge fault, so null means unknown, never foreign.
+    function ownerOf(spec) {
+        if (!spec || typeof spec.getPlayerID !== 'function') return null;
+        try {
+            var owner = spec.getPlayerID();
+            return typeof owner === 'number' ? owner : null;
+        } catch (e) {
+            return null;
         }
+    }
+
+    // Own when the player id is the zone's own player. Without a zone player
+    // id, -1 (no owner) is the only id known not to be ours.
+    function ownerIsSelf(owner) {
         var pid = S.core.zone.playerId();
         if (pid === null || pid === undefined) return owner !== -1;
         return owner === pid;
     }
 
-    function fighters() {
+    function isOwn(spec) {
+        var owner = ownerOf(spec);
+        return owner !== null && ownerIsSelf(owner);
+    }
+
+    // Why spec cannot be ordered as an own specialist, or null when it can.
+    // Unreadable comes first: a passing fault must never read as a foreign
+    // general, which a run treats as a real refusal.
+    function ownReason(spec) {
+        var owner = ownerOf(spec);
+        if (owner === null) return S.core.specialists.UNREADABLE;
+        return ownerIsSelf(owner) ? null : 'not own';
+    }
+
+    // Own generals and carriers. complete is false when the read lost an entry,
+    // to the reader or to an unreadable owner, so the caller can tell a short
+    // list from a smaller army.
+    function readFighters() {
+        var before = S.core.specialists.dropped();
         var src = S.core.specialists.generals().concat(S.core.specialists.carriers());
         var out = [];
-        for (var i = 0; i < src.length; i++) if (isOwn(src[i])) out.push(src[i]);
-        return out;
+        var complete = true;
+        for (var i = 0; i < src.length; i++) {
+            var owner = ownerOf(src[i]);
+            if (owner === null) { complete = false; continue; }
+            if (ownerIsSelf(owner)) out.push(src[i]);
+        }
+        return { list: out, complete: complete && S.core.specialists.dropped() === before };
+    }
+
+    function fighters() {
+        return readFighters().list;
     }
 
     function garrisonGrid(spec) {
@@ -310,8 +343,13 @@
     // Free pool, per-general armies and the facts the planner needs, keyed
     // by the specialist's unique id key.
     // ok is true only for a positive read: the specialist list, the free pool
-    // and every general's army were all readable. Accounting and packing
-    // must not act on an unreadable (and so seemingly empty) source.
+    // and every general's army were all readable and no fighter was lost.
+    // Accounting and packing must not act on an unreadable (and so seemingly
+    // empty) source.
+    // listOk is false when a read in this pass lost an entry, so a general
+    // absent from byKey is unknown rather than gone. It stays true on a list
+    // that cannot be read at all: only ok reports that, and the callers have
+    // their own handling for it.
     function inventory() {
         var read = readFreeArmy();
         var free = read || {};
@@ -319,11 +357,14 @@
         var allArmies = true;
         var byKey = {};
         var assigned = {};
-        var list = fighters();
+        var before = S.core.specialists.dropped();
+        var rf = readFighters();
+        var list = rf.list;
+        var listOk = rf.complete;
         for (var i = 0; i < list.length; i++) {
             var spec = list[i];
             var key = S.core.specialists.uniqueIdKey(spec);
-            if (!key) continue;
+            if (!key) { listOk = false; continue; }
             var readArmy = readGeneralArmy(spec);
             var army = readArmy || {};
             var armyOk = readArmy !== null;
@@ -345,13 +386,18 @@
             };
             assigned = add(assigned, army);
         }
+        // Also the last sweep: an entry can turn bad during the pass, after the
+        // fighter read, and a later step must not trust what this pass saw.
+        var readable = S.core.specialists.listReadable();
+        if (S.core.specialists.dropped() !== before) listOk = false;
         return {
             free:     free,
             assigned: assigned,
             total:    add(free, assigned),
             byKey:    byKey,
             freeOk:   freeOk,
-            ok:       S.core.specialists.listReadable() && freeOk && allArmies
+            listOk:   listOk,
+            ok:       readable && freeOk && allArmies && listOk
         };
     }
 
@@ -561,7 +607,8 @@
                 var f = S.core.specialists.refind(key);
                 if (!f.spec) return f.reason;
                 var spec = f.spec;
-                if (!isOwn(spec)) return 'not own';
+                var why = ownReason(spec);
+                if (why) return why;
                 if (S.core.specialists.status(spec) !== S.SpecialistStatus.Idle) return 'not idle';
                 if (!hasGarrison(spec)) return 'no garrison';
                 if (isTravelling(spec)) return 'travelling';
@@ -603,6 +650,8 @@
             precheck: function () {
                 var f = S.core.specialists.refind(key);
                 if (!f.spec) return f.reason;
+                var why = ownReason(f.spec);
+                if (why) return why;
                 if (!canUnload(f.spec)) return 'cannot unload';
                 return null;
             },
@@ -642,7 +691,10 @@
         readGeneralArmy: readGeneralArmy,
         freeArmy:      freeArmy,
         readFreeArmy:  readFreeArmy,
+        ownerOf:       ownerOf,
         isOwn:        isOwn,
+        ownReason:     ownReason,
+        readFighters:  readFighters,
         fighters:      fighters,
         garrisonGrid:  garrisonGrid,
         isTravelling:  isTravelling,

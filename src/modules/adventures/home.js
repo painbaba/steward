@@ -164,10 +164,12 @@
 
     // The template's files are checked again now that the generals are home,
     // since they may have been edited while the run waited. Camps are not
-    // checked: they belong to an island that is not open yet.
+    // checked: they belong to an island that is not open yet. A check over a
+    // list that lost entries proves nothing, so the step runs again.
     function validate(r) {
         var c = S.modules.adventures.executor.check({ label: r.label, loadout: r.loadoutPath, waves: r.paths },
             { camps: false });
+        if (c.listOk === false) return;
         for (var i = 0; i < c.warnings.length; i++) log('warning: ' + c.warnings[i].message);
         if (!c.ok) {
             var msg = c.problems.length ? c.problems[0].message : 'loadout cannot be read';
@@ -339,6 +341,7 @@
                     if (!m.seen) ld().markSeen(r, name);
                     continue;
                 }
+                if (!ld().missingLong(r, k)) return;
                 st().pause(S.RunPause.GeneralMissing, k + ' left home without being sent', { general: k });
                 return;
             }
@@ -664,8 +667,9 @@
     }
 
     // One home step of the running run. Holds (no send, no pause) while
-    // another zone is viewed. A throw leaves the step as it is for the next
-    // call.
+    // another zone is viewed or the specialist list lost entries, because
+    // the steps read a general absent from the list as a fact. A throw
+    // leaves the step as it is for the next call.
     function plan() {
         var r = st().run();
         if (!r || r.status !== S.RunStatus.Running) return;
@@ -675,7 +679,9 @@
         try {
             var fn = stepFn(step);
             if (!fn) return;
-            fn(r, S.core.army.inventory());
+            var inv = S.core.army.inventory();
+            if (ld().listHold(r, inv)) return;
+            fn(r, inv);
         } catch (e) {
             S.kernel.error(CATEGORY, st().label() + ': step ' + st().stepName(step) + ' threw:', e);
         }

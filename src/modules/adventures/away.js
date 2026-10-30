@@ -465,6 +465,9 @@
     // needs a garrison, which a general has only on the map. A holder already
     // walking is waited on first, because it may show its new grid while not
     // yet idle, and so a restart or a kernel Pause never orders it twice.
+    // A missing holder is settled before the last round is: settleRound
+    // counts a finished round every time it runs, so a hold after it would
+    // count the same round on each pass and end in a false rounds pause.
     function packStar(r, inv) {
         if (!inv.ok) {
             ld().waitRead(r, 'free troops and armies');
@@ -483,16 +486,17 @@
             st().go(S.RunStep.Pack, 'holders on the map');
             return;
         }
-        var next = ld().settleRound(r, S.RunStep.PackStar, function (f) {
-            st().pause(S.RunPause.PackFailed, 'place ' + f.key + ' failed: ' + f.reason, { general: f.key });
-        }, 'place');
-        if (next !== 'new') return;
         var c = chooseGrids(r, inv, need);
         if (c.missing !== null) {
+            if (!ld().missingLong(r, c.missing)) return;
             st().pause(S.RunPause.GeneralMissing, ld().who(inv, c.missing) + ' is not on the island',
                 { general: c.missing });
             return;
         }
+        var next = ld().settleRound(r, S.RunStep.PackStar, function (f) {
+            st().pause(S.RunPause.PackFailed, 'place ' + f.key + ' failed: ' + f.reason, { general: f.key });
+        }, 'place');
+        if (next !== 'new') return;
         if (c.blocked !== null) {
             st().pause(S.RunPause.NotPlaceable, ld().who(inv, c.blocked) + ' has no placeable grid (' +
                 c.tried + ' tried)', { general: c.blocked });
@@ -739,8 +743,10 @@
         return null;
     }
 
-    // One away step of the running run. A throw leaves the step as it is for
-    // the next call.
+    // One away step of the running run. Holds (no send, no pause) while the
+    // specialist list lost entries, because the steps read a general absent
+    // from the list as a fact. A throw leaves the step as it is for the next
+    // call.
     function plan() {
         var r = st().run();
         if (!r || r.status !== S.RunStatus.Running) return;
@@ -749,7 +755,9 @@
         try {
             var row = stepRow(step);
             if (!row) return;
-            row[1](r, row[2] ? S.core.army.inventory() : null);
+            var inv = row[2] ? S.core.army.inventory() : null;
+            if (inv && ld().listHold(r, inv)) return;
+            row[1](r, inv);
         } catch (e) {
             S.kernel.error(CATEGORY, st().label() + ': step ' + st().stepName(step) + ' threw:', e);
         }

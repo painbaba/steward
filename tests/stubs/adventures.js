@@ -13,6 +13,8 @@
  *   var w = W.world({ home: true, generals: [g1] });     // viewing home
  *   W.startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Attack });
  *   W.tick(w); W.play(w); W.runOut(w);
+ *   w.ghost(g1, 3);                                      // a ghost for 3 ticks
+ *   W.ticksFor(w, 60000);                                // the clock, tick by tick
  *
  * Nothing here edits the shared stubs; host fakes are installed on the booted
  * harness only.
@@ -24,6 +26,7 @@ var harness = require('../harness');
 var airfs = require('./airfs');
 var A = require('./army');
 var AC = require('./actions');
+var SP = require('./specialists');
 
 var HOME = 1;
 var ZONE = 7;
@@ -41,9 +44,17 @@ var MESSAGE_ORDER = 91;
 var MAP_TYPE = 'Adventure';
 var POPULATION_TYPE = 'AddResource';
 
+// The scheduler's plan gap; the grace of a missing general restarts when
+// reports are further apart than a few of these.
+var TICK_MS = 10000;
+
 function plain(v) { return JSON.parse(JSON.stringify(v)); }
 
-function keyOf(spec) { return spec.GetUniqueID().toKeyString(); }
+// Null for a ghost, which the world's own lookups walk past like the client's
+// list does: its id is unreadable, not gone.
+function keyOf(spec) {
+    return typeof spec.GetUniqueID === 'function' ? spec.GetUniqueID().toKeyString() : null;
+}
 
 function writeJson(fs, path, data) { fs.disk[path] = JSON.stringify(data); }
 
@@ -152,7 +163,11 @@ function homeStock(o, popName) {
 //   - w.blocked[grid] = true makes the client refuse that grid for a placement;
 //   - w.auto.walk makes a move a walk: a Move task that holds until
 //     w.endWalks() puts each walker on its grid (default: instant move);
-//   - a general at the star (grid <= 0) has no garrison, so a raise is refused.
+//   - a general at the star (grid <= 0) has no garrison, so a raise is refused;
+//   - w.ghost(g, passes) makes g a bridge ghost for the next passes ticks
+//     (default 1), play() in between included;
+//   - w.ghostAfterRead(g) does the same from the moment the next inventory
+//     read ends, for a flip inside a pass.
 function world(o) {
     o = o || {};
     var fs = o.fs || airfs.make();
@@ -179,7 +194,7 @@ function world(o) {
         blocked: {},
         orders: [], raises: [], unloads: [], buffs: [], claims: [],
         zoneSends: [], buffActions: [], productionOrders: [], closes: [],
-        pending: [], entries: [],
+        pending: [], entries: [], ghosts: [],
         adventures: home && !o.mapOpen ? [] : [{ adventureName: 'BlackKnights', zoneID: ZONE }],
         stock: [],
         lists: {},
@@ -220,6 +235,21 @@ function world(o) {
                 g.state.task = null;
             });
         });
+    };
+
+    w.ghost = function (g, passes) {
+        w.ghosts.push({ restore: SP.ghost(g), left: passes || 1 });
+    };
+
+    w.ghostAfterRead = function (g) {
+        var army = S.core.army;
+        var inventory = army.inventory;
+        army.inventory = function () {
+            army.inventory = inventory;
+            var inv = inventory.apply(army, arguments);
+            w.ghost(g);
+            return inv;
+        };
     };
 
     // The general with this key on any zone.
@@ -485,12 +515,35 @@ function drain(w) {
 // reads it.
 function tick(w) {
     var z = w.S.core.zone;
-    if (!w.mod.isReady({ zone: { id: z.id(), isHome: z.isHome() } })) return false;
-    w.S.kernel._currentModule = 'adventures';
-    try { w.mod.plan({}); }
-    finally { w.S.kernel._currentModule = null; }
-    drain(w);
-    return true;
+    var ready = w.mod.isReady({ zone: { id: z.id(), isHome: z.isHome() } });
+    if (ready) {
+        w.S.kernel._currentModule = 'adventures';
+        try { w.mod.plan({}); }
+        finally { w.S.kernel._currentModule = null; }
+        drain(w);
+    }
+    endGhosts(w);
+    return ready;
+}
+
+// Ghosts whose last tick this was read normally again.
+function endGhosts(w) {
+    w.ghosts = w.ghosts.filter(function (e) {
+        e.left--;
+        if (e.left > 0) return true;
+        e.restore();
+        return false;
+    });
+}
+
+// Moves the clock forward by ms with a tick every TICK_MS. A jump over the
+// same time would look like nobody having looked, which restarts a grace.
+function ticksFor(w, ms) {
+    var end = w.t + ms;
+    while (w.t < end) {
+        w.t = Math.min(w.t + TICK_MS, end);
+        tick(w);
+    }
 }
 
 // Runs queued entries one by one (core.attempt through actions.step, the
@@ -560,6 +613,7 @@ module.exports = {
     world:             world,
     drain:             drain,
     tick:              tick,
+    ticksFor:          ticksFor,
     play:              play,
     runOut:            runOut,
     startRun:          startRun,

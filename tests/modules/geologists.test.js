@@ -69,73 +69,191 @@ t.test('plan enqueues nothing when wanted slots are already filled (deposits on 
     t.assert.strictEqual(H.queued().length, 0);
 });
 
-// "Ghost" specialist: classifies as a Geologist (GetType returns geo
-// type) and reports Idle (no task, not in use), but lacks GetUniqueID.
-// Live host returns these in GetSpecialists_vector under conditions we
-// haven't pinned down — likely transient state or unloaded data. We
-// must filter them at the idle-pool stage to avoid the dispatch loop
-// re-picking the same null-uid spec wanted-many times.
-function ghostGeologist() {
-    return {
-        GetType:    function () { return 2; },                        // GEOLOGIST type
-        GetTask:    function () { return null; },
-        IsInUse:    function () { return false; },
-        getName:    function () { return ''; },
-        GetName:    function () { return ''; },
-        GetName_string: function () { return ''; },
-        GetSkills_vector: function () { return []; },
-        skills:     { getItems_vector: function () { return []; } },
-        GetSpecialistDescription: function () {
-            return { getBaseType: function () { return 2; },
-                     isTransportGeneral: function () { return false; } };
-        }
-        // GetUniqueID intentionally absent.
-    };
+// "Ghost" specialist: a real geologist whose members read undefined for a
+// moment on the JS side of the AIR bridge (GetType still answers). The reader
+// leaves such an entry out and counts it, and the plan treats a read that
+// dropped anything as unreadable: a dropped busy geologist would shorten the
+// busy count and over-dispatch the healthy idle ones.
+function ghostGeologist(H, uid) {
+    var g = H.specs.geologist({ name: 'ghost', uid: uid || 'ghost1' });
+    H.specs.ghost(g);
+    return g;
 }
 
-t.test('plan ignores ghost specialists that lack a uniqueID', function () {
-    var H = harness.boot();
-    var realGeo = H.specs.geologist({ name: 'irongut', uid: 'g1' });
+function planWith(H, list, max) {
     var z = H.zone.zone()
         .deposits('IronOre', [])
-        .specialists([ghostGeologist(), realGeo])
+        .specialists(list)
         .mountOnPlayer((H.host.game.gi.mCurrentPlayer = {}));
     H.host.game.gi.mCurrentPlayerZone = z.zone;
-
-    H.settings.write('geologists', onlyEnable('IronOre', 1));
+    H.settings.write('geologists', onlyEnable('IronOre', max));
     H.module('geologists').plan({ zone: { isHome: true } });
+}
 
-    var q = H.queued();
-    t.assert.strictEqual(q.length, 1);
-    t.assert.strictEqual(q[0].params[0], 'g1');         // dispatch went to the real geo
+// The registered dispatch queue action, captured while the module boots.
+function dispatchAction(H) {
+    var q = H.Steward.kernel.queue;
+    var orig = q.action;
+    var fn = null;
+    q.action = function (name, f) {
+        if (name === 'geologists.dispatch') fn = f;
+        return orig.apply(q, arguments);
+    };
+    H.module('geologists').boot();
+    q.action = orig;
+    return fn;
+}
 
-    var warns = H.logs().filter(function (l) {
+function geoWarns(H) {
+    return H.logs().filter(function (l) {
         return l.level === 'warn' && l.category === 'geologists';
     });
-    var ghostWarns = warns.filter(function (l) {
-        return l.args && l.args.length && /no uniqueID|ghost/i.test(String(l.args[0]));
-    });
-    // No "best candidate has no uniqueID" noise when ghosts are filtered.
-    t.assert.strictEqual(ghostWarns.length, 0);
-});
+}
 
-t.test('plan with only ghost geologists enqueues nothing and stays quiet', function () {
+t.test('plan queues nothing when a ghost is in the list next to a healthy idle geologist', function () {
     var H = harness.boot();
-    var z = H.zone.zone()
-        .deposits('IronOre', [])
-        .specialists([ghostGeologist(), ghostGeologist(), ghostGeologist()])
-        .mountOnPlayer((H.host.game.gi.mCurrentPlayer = {}));
-    H.host.game.gi.mCurrentPlayerZone = z.zone;
-
-    H.settings.write('geologists', onlyEnable('IronOre', 5));
-    H.module('geologists').plan({ zone: { isHome: true } });
+    planWith(H, [ghostGeologist(H), H.specs.geologist({ name: 'irongut', uid: 'g1' })], 1);
 
     t.assert.strictEqual(H.queued().length, 0);
-    var ghostWarns = H.logs().filter(function (l) {
-        return l.level === 'warn' && l.category === 'geologists' &&
-               l.args && /no uniqueID/.test(String(l.args[0]));
+    t.assert.strictEqual(H.Steward.core.specialists.dropped(), 1);
+    t.assert.strictEqual(geoWarns(H).length, 0);
+});
+
+t.test('plan queues the healthy geologist again once the ghost is gone', function () {
+    var H = harness.boot();
+    var ghost = ghostGeologist(H);
+    var real = H.specs.geologist({ name: 'irongut', uid: 'g1' });
+    var z = H.zone.zone()
+        .deposits('IronOre', [])
+        .specialists([ghost, real])
+        .mountOnPlayer((H.host.game.gi.mCurrentPlayer = {}));
+    H.host.game.gi.mCurrentPlayerZone = z.zone;
+    H.settings.write('geologists', onlyEnable('IronOre', 1));
+    var mod = H.module('geologists');
+    mod.plan({ zone: { isHome: true } });
+    t.assert.strictEqual(H.queued().length, 0);
+
+    z.specialists([real]);
+    mod.plan({ zone: { isHome: true } });
+    var q = H.queued();
+    t.assert.strictEqual(q.length, 1);
+    t.assert.strictEqual(q[0].params[0], 'g1');
+});
+
+t.test('plan with only ghost geologists queues nothing and warns about nothing', function () {
+    var H = harness.boot();
+    planWith(H, [ghostGeologist(H, 'a'), ghostGeologist(H, 'b'), ghostGeologist(H, 'c')], 5);
+
+    t.assert.strictEqual(H.queued().length, 0);
+    t.assert.strictEqual(geoWarns(H).length, 0);
+    var perEntry = H.logs().filter(function (l) {
+        return /no uniqueID|ghost/i.test(String(l.args && l.args[0]));
     });
-    t.assert.strictEqual(ghostWarns.length, 0);
+    t.assert.strictEqual(perEntry.length, 0);
+});
+
+t.test('plan queues nothing when a busy geologist turns into a ghost inside the pass', function () {
+    var H = harness.boot();
+    var idle = H.specs.geologist({ name: 'irongut', uid: 'g1' });
+    // The busy geologist is counted before the idle one's name is read, so the
+    // flip lands after the counts and the pick, and only the last list check
+    // can still stop the dispatch. Its sub type is not the deposit's, so the
+    // wanted slot stays open.
+    var busy = H.specs.geologist({ name: 'busy', uid: 'g2', task: H.specs.task(1, 999, 1000) });
+    var flipped = false;
+    ['GetName_string', 'GetName', 'getName'].forEach(function (member) {
+        var orig = idle[member];
+        idle[member] = function () {
+            var v = orig.apply(this, arguments);
+            if (!flipped) { flipped = true; H.specs.ghost(busy); }
+            return v;
+        };
+    });
+    planWith(H, [idle, busy], 1);
+
+    t.assert.strictEqual(flipped, true, 'the flip should have happened during the pass');
+    t.assert.strictEqual(H.queued().length, 0);
+});
+
+t.test('plan still queues when nobody flips during the pass (control for the flip test)', function () {
+    var H = harness.boot();
+    var idle = H.specs.geologist({ name: 'irongut', uid: 'g1' });
+    var busy = H.specs.geologist({ name: 'busy', uid: 'g2', task: H.specs.task(1, 999, 1000) });
+    planWith(H, [idle, busy], 1);
+
+    t.assert.strictEqual(H.queued().length, 1);
+    t.assert.strictEqual(H.queued()[0].params[0], 'g1');
+});
+
+t.test('rank skips a geologist whose uid key reads null', function () {
+    var H = harness.boot();
+    var c = H.Steward.core.specialists;
+    var bad = H.specs.geologist({ name: 'bad', uid: 'x' });
+    bad.GetUniqueID = function () { return { toKeyString: function () { return null; } }; };
+    var good = H.specs.geologist({ name: 'good', uid: 'g1' });
+    var rows = c.rankGeologistsForDeposit('IronOre', { from: [bad, good] });
+    t.assert.strictEqual(rows.length, 1);
+    t.assert.strictEqual(rows[0].uid, 'g1');
+    rows = c.rankGeologistsForDeposit('IronOre', { from: [bad], exclude: { g1: true } });
+    t.assert.strictEqual(rows.length, 0);
+});
+
+t.test('dispatch on a dropped read that lacks its key is silent and sends nothing', function () {
+    var H = harness.boot();
+    var c = H.Steward.core.specialists;
+    var sends = [];
+    c.send = function () { sends.push(arguments); return true; };
+    var z = H.zone.zone()
+        .specialists([ghostGeologist(H), H.specs.geologist({ name: 'other', uid: 'g2' })])
+        .mountOnPlayer((H.host.game.gi.mCurrentPlayer = {}));
+    H.host.game.gi.mCurrentPlayerZone = z.zone;
+    var fire = dispatchAction(H);
+    t.assert.strictEqual(typeof fire, 'function');
+    H.clearLogs();
+
+    fire(['g1', 'irongut', 'IronOre']);
+
+    t.assert.strictEqual(sends.length, 0);
+    t.assert.strictEqual(geoWarns(H).length, 0);
+    t.assert.strictEqual(H.logs().filter(function (l) { return l.level === 'error'; }).length, 0);
+});
+
+t.test('dispatch on a clean read sends to the re-found geologist', function () {
+    var H = harness.boot();
+    var c = H.Steward.core.specialists;
+    var sends = [];
+    c.send = function (spec) { sends.push(spec); return true; };
+    var g1 = H.specs.geologist({ name: 'irongut', uid: 'g1' });
+    var z = H.zone.zone()
+        .specialists([H.specs.geologist({ name: 'other', uid: 'g2' }), g1])
+        .mountOnPlayer((H.host.game.gi.mCurrentPlayer = {}));
+    H.host.game.gi.mCurrentPlayerZone = z.zone;
+    var fire = dispatchAction(H);
+
+    fire(['g1', 'irongut', 'IronOre']);
+
+    t.assert.strictEqual(sends.length, 1);
+    t.assert.strictEqual(sends[0], g1);
+    t.assert.strictEqual(geoWarns(H).length, 0);
+});
+
+t.test('dispatch of a key that is really absent on a clean read still warns', function () {
+    var H = harness.boot();
+    var c = H.Steward.core.specialists;
+    var sends = [];
+    c.send = function () { sends.push(arguments); return true; };
+    var z = H.zone.zone()
+        .specialists([H.specs.geologist({ name: 'other', uid: 'g2' })])
+        .mountOnPlayer((H.host.game.gi.mCurrentPlayer = {}));
+    H.host.game.gi.mCurrentPlayerZone = z.zone;
+    var fire = dispatchAction(H);
+
+    fire(['g1', 'irongut', 'IronOre']);
+
+    t.assert.strictEqual(sends.length, 0);
+    var warns = geoWarns(H);
+    t.assert.strictEqual(warns.length, 1);
+    t.assert.ok(/could not re-find/.test(String(warns[0].args[0])), String(warns[0].args[0]));
 });
 
 t.test('plan dispatches nothing for a type whose byType fails', function () {

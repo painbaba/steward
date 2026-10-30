@@ -52,6 +52,7 @@ function makeSpec(opts) {
                 toString:    function () { return uid; }
             };
         },
+        getPlayerID: function () { return typeof opts.playerId === 'number' ? opts.playerId : 1; },
         GetTask:     function () { return task; },
         IsInUse:     function () { return !!task; },
         GetName_string: function () { return name; },
@@ -74,6 +75,27 @@ function makeSpec(opts) {
                 desc.GetTimeBonus = function () { return timeBonus; };
             }
             return desc;
+        }
+    };
+}
+
+// Turns spec into a bridge ghost: every function member except GetType reads
+// undefined, the way a live cSpecialist can for a moment. Only GetType is known
+// to keep working. Returns restore(), which puts the members back, so a test
+// can flip an entry on and off, also from inside a getter in the middle of a
+// pass. Non-function members stay as they are.
+function ghost(spec) {
+    var saved = {};
+    var key;
+    for (key in spec) {
+        if (!Object.prototype.hasOwnProperty.call(spec, key)) continue;
+        if (key === 'GetType' || typeof spec[key] !== 'function') continue;
+        saved[key] = spec[key];
+        delete spec[key];
+    }
+    return function restore() {
+        for (var k in saved) {
+            if (Object.prototype.hasOwnProperty.call(saved, k)) spec[k] = saved[k];
         }
     };
 }
@@ -105,6 +127,7 @@ module.exports = {
     geologist: geologist,
     explorer:  explorer,
     spec:      makeSpec,
+    ghost:     ghost,
     skill:     makeSkill,
     task:      task
 };

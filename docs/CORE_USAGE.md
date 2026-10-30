@@ -103,6 +103,20 @@ Otherwise subsequent reads in the same tick will return the stale snapshot.
 
 You don't need to invalidate after server packets that *trigger* an asynchronous mutation — invalidation is for when you've taken an action whose effect you need to see immediately. Most modules never need this.
 
+## Rule 3.5: a specialist read can drop entries
+
+The specialist list leaves out an entry whose members are unreadable for a moment (see the AIR bridge note in `TSO_API.md`). A dropped entry is unknown, not absent:
+
+- `Steward.core.specialists.lookup(key)` returns `ok: false` when the key is missing from a read that dropped entries. `refind` reports the same case with the reason `Steward.core.specialists.UNREADABLE`. Treat both as "try again later".
+- Around a count that drives a decision, read `Steward.core.specialists.dropped()` before and after the read, or check `listComplete()`. A count from a read with drops can be too low.
+- Do not pause, or record an entry as gone, on one read. The next tick is the retry.
+
+```js
+var before = Steward.core.specialists.dropped();
+var list   = Steward.core.specialists.geologists();
+if (Steward.core.specialists.dropped() !== before) return; // count is not reliable this tick
+```
+
 ## Rule 4: use the locale wrapper
 
 ```js

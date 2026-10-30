@@ -199,7 +199,10 @@
         }
         var waited = now() - r.since;
         if (missing) {
-            if (waited > GATE_MISSING_MS) {
+            // Called on every pass, so the grace runs even while waited is
+            // already over its limit, which it is on a re-entered Gate.
+            var gone = ld().missingLong(r, missing.key);
+            if (gone && waited > GATE_MISSING_MS) {
                 pause(S.RunPause.GeneralMissing, who(missing, inv) + ' is not on the island', missing, inv);
             }
             return;
@@ -237,6 +240,7 @@
             l = w.field[i];
             g = gen(inv, l.key);
             if (!g) {
+                if (!ld().missingLong(r, l.key)) return;
                 pause(S.RunPause.GeneralMissing, who(l, inv) + ' is not on the island', l, inv);
                 return;
             }
@@ -439,12 +443,17 @@
         if (resolveSent(r, w, inv)) return;
         var round = ld().currentRound(r, S.WaveStep.Attack);
         var all = true;
+        var retry = false;
         for (var i = 0; i < w.seq.length; i++) {
             var l = w.seq[i];
             if (isSent(r, l.key)) continue;
             all = false;
             var res = ld().resultOf(round, l.key);
             if (res) {
+                if (ld().unreadable(res)) {
+                    retry = true;
+                    continue;
+                }
                 if (l.kind === S.BattleLine.Attack) {
                     pause(S.RunPause.AttackRefused, 'attack of ' + who(l, inv) + ' on ' + targetText(l) +
                         ' refused: ' + res.reason, l, inv);
@@ -465,8 +474,12 @@
         // for ever. A line that went out was already settled above from its
         // sent marker and is not sent again; a line that never went out is
         // sent by the pacer in a fresh round. Dropped only here, after the
-        // round's recorded refusals were read.
-        if (round && !ld().complete(round)) st().dropRound('attempt no longer queued');
+        // round's recorded refusals were read. A line refused because its
+        // general could not be read never went out, and the pacer stops at
+        // a line with a result, so that round goes the same way.
+        if (round && (retry || !ld().complete(round))) {
+            st().dropRound(retry ? 'general not readable' : 'attempt no longer queued');
+        }
         // Added inside plan(), so the entry carries the module tag.
         S.kernel.queue.add(PACE_ACTION, [r.id, r.waveIndex], PACE_MS);
     }
@@ -510,7 +523,9 @@
     }
 
     // One step of the running wave. Holds (no send, no pause) while another
-    // zone is viewed. A throw leaves the step as it is for the next call.
+    // zone is viewed or the specialist list lost entries, because the steps
+    // read a general absent from the list as a fact. A throw leaves the step
+    // as it is for the next call.
     function plan() {
         var r = st().run();
         if (!r || r.status !== S.RunStatus.Running) return;
@@ -533,7 +548,9 @@
                 st().go(S.WaveStep.Gate, 'unknown step ' + step);
                 return;
             }
-            fn(r, view(r, file.lines), S.core.army.inventory());
+            var inv = S.core.army.inventory();
+            if (ld().listHold(r, inv)) return;
+            fn(r, view(r, file.lines), inv);
         } catch (e) {
             S.kernel.error(CATEGORY, st().waveLabel() + ': step ' + stepName(step) + ' threw:', e);
         }
@@ -666,7 +683,9 @@
 
     // Reads the template's loadout and waves fresh and checks them against
     // the island as it is now. Returns { ok, problems (fatal), warnings,
-    // loadoutKeys }; loadoutKeys is null when the loadout cannot be read.
+    // loadoutKeys, listOk }; loadoutKeys is null when the loadout cannot be
+    // read. listOk false means the specialist list lost entries, so the
+    // general problems of this check are not facts.
     // opts (optional): camps === false leaves out the camp checks (the map
     // is not viewed); fighters === false also skips the general checks (the
     // generals may be away), so only the files and the loadout keys count.
@@ -674,8 +693,9 @@
         var o = opts || {};
         var fighters = o.fighters !== false;
         var camps = fighters && o.camps !== false;
-        var out = { ok: false, problems: [], warnings: [], loadoutKeys: null };
+        var out = { ok: false, problems: [], warnings: [], loadoutKeys: null, listOk: true };
         var inv = S.core.army.inventory();
+        out.listOk = !fighters || inv.listOk !== false;
         if (camps) S.core.buildings.invalidate();
         var ctx = fighterCtx(inv, camps);
 

@@ -595,3 +595,165 @@ t.test('planPack: Mixed and Unknown holders are skipped', function () {
     assert.strictEqual(r.raises.length, 0);
     assert.deepStrictEqual(r.remainder, { Rifle: 10 });
 });
+
+// ---- ghosts: entries whose members read undefined for a moment -------------------
+
+function warnsOf(s, from) {
+    return s.H.logs().slice(from).filter(function (l) { return l.level === 'warn'; });
+}
+
+t.test('isOwn is false for a ghost and for an unreadable owner, with no warning', function () {
+    var s = setup({ fighters: [] });
+    var g = A.fighter({ uid: 'g1', army: { Rifle: 1 } });
+    var restore = specStubs.ghost(g);
+    var before = s.H.logs().length;
+    assert.strictEqual(s.army.isOwn(g), false);
+    assert.strictEqual(s.army.isOwn(null), false);
+    var mute = A.fighter({ uid: 'g2' });
+    mute.getPlayerID = function () { return undefined; };
+    assert.strictEqual(s.army.isOwn(mute), false);
+    var thrower = A.fighter({ uid: 'g3' });
+    thrower.getPlayerID = function () { throw new Error('boom'); };
+    assert.strictEqual(s.army.isOwn(thrower), false);
+    assert.strictEqual(warnsOf(s, before).length, 0);
+    restore();
+    assert.strictEqual(s.army.isOwn(g), true);
+});
+
+t.test('ownerOf: the player id, or null when it cannot be read', function () {
+    var s = setup({ fighters: [] });
+    assert.strictEqual(s.army.ownerOf(A.fighter({ uid: 'g1', playerId: 7 })), 7);
+    assert.strictEqual(s.army.ownerOf(null), null);
+    assert.strictEqual(s.army.ownerOf({}), null);
+    var ghost = A.fighter({ uid: 'g2' });
+    specStubs.ghost(ghost);
+    assert.strictEqual(s.army.ownerOf(ghost), null);
+    var mute = A.fighter({ uid: 'g3' });
+    mute.getPlayerID = function () { return undefined; };
+    assert.strictEqual(s.army.ownerOf(mute), null);
+    var str = A.fighter({ uid: 'g4' });
+    str.getPlayerID = function () { return '1'; };
+    assert.strictEqual(s.army.ownerOf(str), null);
+    var thrower = A.fighter({ uid: 'g5' });
+    thrower.getPlayerID = function () { throw new Error('boom'); };
+    assert.strictEqual(s.army.ownerOf(thrower), null);
+});
+
+t.test('ownReason: unreadable, not own, or null', function () {
+    var s = setup({ playerId: 1, fighters: [] });
+    var unreadable = s.S.core.specialists.UNREADABLE;
+    var mute = A.fighter({ uid: 'g1' });
+    mute.getPlayerID = function () { return undefined; };
+    assert.strictEqual(s.army.ownReason(mute), unreadable);
+    assert.strictEqual(s.army.ownReason(null), unreadable);
+    assert.strictEqual(s.army.ownReason(A.fighter({ uid: 'g2', playerId: 2 })), 'not own');
+    assert.strictEqual(s.army.ownReason(A.fighter({ uid: 'g3', playerId: 1 })), null);
+});
+
+t.test('readFighters: complete on a clean read, incomplete on a dropped or unreadable entry', function () {
+    var s = setup({ fighters: [A.fighter({ uid: 'g1' }), A.fighter({ uid: 'theirs', playerId: 2 })] });
+    var rf = s.army.readFighters();
+    assert.strictEqual(rf.complete, true);
+    assert.strictEqual(rf.list.length, 1);
+    assert.strictEqual(s.army.fighters().length, 1);
+
+    var ghost = A.fighter({ uid: 'g2' });
+    specStubs.ghost(ghost);
+    var d = setup({ fighters: [A.fighter({ uid: 'g1' }), ghost] });
+    var drop = d.army.readFighters();
+    assert.strictEqual(drop.complete, false);
+    assert.strictEqual(drop.list.length, 1);
+
+    var mute = A.fighter({ uid: 'g3' });
+    mute.getPlayerID = function () { return undefined; };
+    var m = setup({ fighters: [A.fighter({ uid: 'g1' }), mute] });
+    var unread = m.army.readFighters();
+    assert.strictEqual(unread.complete, false);
+    assert.strictEqual(unread.list.length, 1);
+});
+
+t.test('inventory: listOk and ok are false on a read that dropped an entry', function () {
+    var ghost = A.fighter({ uid: 'g2', army: { Rifle: 3 } });
+    specStubs.ghost(ghost);
+    var s = setup({ free: { Rifle: 1 }, fighters: [A.fighter({ uid: 'g1', army: { Rifle: 2 } }), ghost] });
+    var inv = s.army.inventory();
+    assert.strictEqual(inv.listOk, false);
+    assert.strictEqual(inv.ok, false);
+    assert.deepStrictEqual(Object.keys(inv.byKey), ['g1']);
+});
+
+t.test('inventory: listOk and ok are true on a clean read', function () {
+    var s = setup({ free: { Rifle: 1 }, fighters: [A.fighter({ uid: 'g1', army: { Rifle: 2 } })] });
+    var inv = s.army.inventory();
+    assert.strictEqual(inv.listOk, true);
+    assert.strictEqual(inv.ok, true);
+});
+
+t.test('inventory: an unreadable owner makes the read incomplete', function () {
+    var mute = A.fighter({ uid: 'g2' });
+    mute.getPlayerID = function () { return undefined; };
+    var s = setup({ free: { Rifle: 1 }, fighters: [A.fighter({ uid: 'g1' }), mute] });
+    var inv = s.army.inventory();
+    assert.strictEqual(inv.listOk, false);
+    assert.strictEqual(inv.ok, false);
+});
+
+t.test('inventory: a null uid key sets listOk false and leaves the entry out', function () {
+    var g2 = A.fighter({ uid: 'g2' });
+    // Each of generals() and carriers() reads the list, and the reader reads the
+    // key once per entry; the third read is the one inventory makes itself.
+    var calls = 0;
+    g2.GetUniqueID = function () {
+        calls++;
+        return { toKeyString: function () { return calls <= 2 ? 'g2' : null; } };
+    };
+    var s = setup({ free: { Rifle: 1 }, fighters: [A.fighter({ uid: 'g1' }), g2] });
+    var inv = s.army.inventory();
+    assert.strictEqual(inv.listOk, false);
+    assert.strictEqual(inv.ok, false);
+    assert.deepStrictEqual(Object.keys(inv.byKey), ['g1']);
+});
+
+t.test('inventory: an entry that turns into a ghost after the fighter read is caught by the last sweep', function () {
+    var g1 = A.fighter({ uid: 'g1', army: { Rifle: 2 } });
+    var g2 = A.fighter({ uid: 'g2', army: { Rifle: 3 } });
+    // g1 is already processed when g2's army is read, so only the final sweep
+    // of the pass can notice that g1 flipped.
+    g2.GetArmy = function () {
+        specStubs.ghost(g1);
+        return A.armyOf({ Rifle: 3 });
+    };
+    var s = setup({ free: { Rifle: 1 }, fighters: [g1, g2] });
+    var inv = s.army.inventory();
+    assert.strictEqual(inv.listOk, false);
+    assert.strictEqual(inv.ok, false);
+    assert.deepStrictEqual(Object.keys(inv.byKey).sort(), ['g1', 'g2']);
+});
+
+t.test('inventory: a thrown list leaves listOk true with ok false', function () {
+    var s = setup({ free: { Rifle: 1 }, fighters: [] });
+    s.H.host.game.gi.mCurrentPlayerZone.GetSpecialists_vector = function () { throw new Error('list'); };
+    var inv = s.army.inventory();
+    assert.strictEqual(inv.listOk, true);
+    assert.strictEqual(inv.ok, false);
+});
+
+t.test('raise and unload report unreadable, not not own or cannot unload, for an owner flip', function () {
+    var g = AC.general({ uid: 'g1', army: { Rifle: 5 } });
+    var s = actionSetup({ free: { Rifle: 10 }, generals: [g] });
+    g.getPlayerID = function () { return undefined; };
+    var a = runDef(s, s.army.raise('g1', { Rifle: 8 }));
+    var b = runDef(s, s.army.unload('g1'));
+    assert.strictEqual(a.status, s.S.ActionResult.Refused);
+    assert.strictEqual(a.reason, s.S.core.specialists.UNREADABLE);
+    assert.strictEqual(b.status, s.S.ActionResult.Refused);
+    assert.strictEqual(b.reason, s.S.core.specialists.UNREADABLE);
+    assert.strictEqual(a.sends + b.sends, 0);
+});
+
+t.test('raise and unload keep the not own reason for a real foreign general', function () {
+    var g = AC.general({ uid: 'g1', army: { Rifle: 5 }, playerId: 2 });
+    var s = actionSetup({ free: { Rifle: 10 }, generals: [g] });
+    assert.strictEqual(runDef(s, s.army.raise('g1', { Rifle: 8 })).reason, 'not own');
+    assert.strictEqual(runDef(s, s.army.unload('g1')).reason, 'not own');
+});

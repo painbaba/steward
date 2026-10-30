@@ -513,6 +513,10 @@ t.test('Depart: a general gone from home without a mark pauses GeneralMissing', 
     w.lists[HOME].splice(w.lists[HOME].indexOf(w.g2), 1);
     series(w, { step: w.S.RunStep.Depart, zoneId: ZONE });
     tick(w);
+    W.ticksFor(w, w.S.modules.adventures.loader.MISSING_GRACE_MS - 1);
+    assertStep(w, 'Depart');
+    w.t += 1;
+    tick(w);
     assertPaused(w, w.S.RunPause.GeneralMissing, /1\.2 left home without being sent/);
     assert.strictEqual(w.zoneSends.length, 0);
 });

@@ -385,9 +385,10 @@
 
     // True when a spec belongs to the player (not an NPC / foreign ghost).
     // autoTSO uses the same predicate at user_auto.js / 4-specialists.js:185.
-    // The host's specialist vector contains entries that aren't real
-    // cSpecialist objects for non-player slots; without filtering them out
-    // the deep dump trips over surrounding scope objects.
+    // Entries of the specialist vector are always real cSpecialist objects.
+    // Their members can read undefined for a moment on the JS side of the AIR
+    // bridge, so a failed call here counts as not owned. getPlayerID() is -1
+    // for NPC specialists, which the dump skips too.
     function ownedByPlayer(spec) {
         try {
             if (typeof spec.getPlayerID === 'function') {

@@ -29,6 +29,12 @@
  * The per-general helpers that the home and away steps share (read waits,
  * loadout key order, names, the departure test) live here as well.
  *
+ * A specialist list that lost entries says nothing about what it does not
+ * show. listHold() stops a step on such a read, missingLong() lets a general
+ * that a clean read lacks stay gone for a while before anyone pauses, and
+ * unreadable() tells a refusal over such a read from a real one. All three
+ * work from memory only and survive no restart: a new client reads afresh.
+ *
  * Bundle slot: module file; top level only assigns
  * S.modules.adventures.loader; state and every core are read at call time.
  */
@@ -41,6 +47,8 @@
     var MAX_ROUNDS        = 2;         // action rounds per step before a pause
     var MAX_UNLOAD_CYCLES = 2;         // Supply -> Unload -> Supply cycles per load
     var READ_MAX_MS       = 60000;     // an unreadable read pauses after this long
+    var MISSING_GRACE_MS  = READ_MAX_MS;  // a general stays gone this long before a pause
+    var MISSING_GAP_MS    = 30000;     // a longer silence restarts the two windows above
     var MARK_SETTLE_MS    = 30000;     // a sent, unseen mark waits this long for its effect
     var REMAINING_MAX_MS  = 3600000;   // clamp of one remaining-time reading
     var TRAVEL_SLACK_MS   = 60000;     // added to the longest remaining travel time
@@ -79,6 +87,56 @@
         }
     }
 
+    // Holds the step on a read that lost entries, and pauses NotObserved once
+    // such reads have gone on for READ_MAX_MS. Measured from the first bad
+    // read and not from r.since, so a step that has run for a while is not
+    // paused by one bad tick. Plan calls stop while another zone is viewed or
+    // the kernel is paused, so bad reads further than MISSING_GAP_MS apart
+    // are separate events and start a new window. The pause clears the window
+    // so a Resume gets a fresh one. Sends nothing and saves nothing.
+    function listHold(r, inv) {
+        var rs = st().current();
+        if (!inv || inv.listOk !== false) {
+            rs.listBadSince = null;
+            rs.listBadLast = null;
+            return false;
+        }
+        var t = now();
+        if (typeof rs.listBadSince !== 'number' || t - rs.listBadLast > MISSING_GAP_MS) {
+            rs.listBadSince = t;
+            rs.listBadLast = t;
+            return true;
+        }
+        rs.listBadLast = t;
+        if (t - rs.listBadSince > READ_MAX_MS) {
+            rs.listBadSince = null;
+            rs.listBadLast = null;
+            st().pause(S.RunPause.NotObserved, 'specialist list incomplete for ' +
+                Math.round(READ_MAX_MS / 1000) + ' s');
+        }
+        return true;
+    }
+
+    // Whether a general that a read lacks has now been gone long enough to
+    // pause over: false until reports have run for MISSING_GRACE_MS. A longer
+    // gap than MISSING_GAP_MS between two reports means the general was seen,
+    // or nobody looked, in between, so the time starts again. The record is
+    // kept after a true result: a Resume with the general still gone pauses
+    // on the next report. A script reload keeps runState without going
+    // through resetMemory, so the map may be absent.
+    function missingLong(r, key) {
+        var rs = st().current();
+        if (!rs.missing) rs.missing = {};
+        var t = now();
+        var rec = has(rs.missing, key) ? rs.missing[key] : null;
+        if (!rec || t - rec.last > MISSING_GAP_MS) {
+            rs.missing[key] = { since: t, last: t };
+            return false;
+        }
+        rec.last = t;
+        return t - rec.since >= MISSING_GRACE_MS;
+    }
+
     // Every pass treats the generals in the same order.
     function keysOf(r) {
         var keys = [];
@@ -110,9 +168,12 @@
     }
 
     // Whether any own fighter on the viewed zone has an Attack task; the wave
-    // settle and the Clear step both need the island quiet.
+    // settle and the Clear step both need the island quiet. A read that lost
+    // entries cannot show quiet, so it counts as not quiet.
     function anyAttacking() {
-        var list = S.core.army.fighters();
+        var rf = S.core.army.readFighters();
+        if (!rf.complete) return true;
+        var list = rf.list;
         for (var i = 0; i < list.length; i++) {
             if (S.core.specialists.orders.taskKind(list[i]) === S.GeneralTask.Attack) return true;
         }
@@ -142,10 +203,22 @@
         return true;
     }
 
-    // First Refused or Failed result: { key, status, reason } or null.
+    // Whether a result is a first-step refusal because the general could not
+    // be read: nothing was sent, so the round had no effect either way. Only
+    // this exact form counts. A Failed 'retry refused: ...' went out once, and
+    // taking it for no effect would send a marked order again.
+    function unreadable(res) {
+        return !!res && res.status === S.ActionResult.Refused &&
+            res.reason === S.core.specialists.UNREADABLE;
+    }
+
+    // First Refused or Failed result: { key, status, reason } or null. An
+    // unreadable refusal is no failure: its round counts as one without
+    // effect, which settleRound and roundsExhausted bound.
     function firstFailure(round) {
         for (var k in round.expected) {
             if (!has(round.expected, k) || !has(round.results, k)) continue;
+            if (unreadable(round.results[k])) continue;
             if (round.results[k].status !== S.ActionResult.Verified) {
                 return { key: k, status: round.results[k].status, reason: round.results[k].reason };
             }
@@ -280,6 +353,7 @@
     function supply(r, lines, inv, steps, opts) {
         var p = S.core.army.planSupply(lines, inv);
         if (p.missing.length) {
+            if (!missingLong(r, p.missing[0])) return;
             st().pause(S.RunPause.GeneralMissing, p.missing[0] + ' is not on the island', { general: p.missing[0] });
             return;
         }
@@ -325,6 +399,7 @@
         for (var i = 0; i < donors.length; i++) {
             var g = gen(inv, donors[i]);
             if (!g) {
+                if (!missingLong(r, donors[i])) return;
                 st().pause(S.RunPause.GeneralMissing, 'donor ' + donors[i] + ' is not on the island', { general: donors[i] });
                 return;
             }
@@ -352,6 +427,7 @@
             var s = lines[i];
             var g = gen(inv, s.key);
             if (!g) {
+                if (!missingLong(r, s.key)) return;
                 st().pause(S.RunPause.GeneralMissing, s.key + ' is not on the island', { general: s.key });
                 return;
             }
@@ -376,6 +452,7 @@
             return;
         }
         if (m.missing) {
+            if (!missingLong(r, m.key)) return;
             st().pause(S.RunPause.GeneralMissing, m.key + ' is not on the island', { general: m.key });
             return;
         }
@@ -461,6 +538,7 @@
         MAX_ROUNDS:        MAX_ROUNDS,
         MAX_UNLOAD_CYCLES: MAX_UNLOAD_CYCLES,
         READ_MAX_MS:       READ_MAX_MS,
+        MISSING_GRACE_MS:  MISSING_GRACE_MS,
         MARK_SETTLE_MS:    MARK_SETTLE_MS,
         REMAINING_MAX_MS:  REMAINING_MAX_MS,
         TRAVEL_SLACK_MS:   TRAVEL_SLACK_MS,
@@ -468,6 +546,8 @@
         now:               now,
         gen:               gen,
         waitRead:          waitRead,
+        listHold:          listHold,
+        missingLong:       missingLong,
         keysOf:            keysOf,
         who:               who,
         seenOnVerified:    seenOnVerified,
@@ -477,6 +557,7 @@
         currentRound:      currentRound,
         complete:          complete,
         firstFailure:      firstFailure,
+        unreadable:        unreadable,
         resultOf:          resultOf,
         record:            record,
         attempt:           attempt,

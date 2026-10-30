@@ -13,7 +13,9 @@
  *      speed tiebreak; ignores friendpremiumbuff1 — see core/specialists/
  *      geologists.js for the algorithm). A geologist already pinned by
  *      `overrides` is only eligible for deposits in its override list.
- *   4. Enqueue dispatch via queue.add('geologists.dispatch', ...).
+ *   4. Collect the picks, then enqueue them via
+ *      queue.add('geologists.dispatch', ...) unless the specialist list
+ *      lost entries during the pass; such a pass queues nothing.
  *
  * Honours the kernel's busy contract: once plan() has enqueued one
  * dispatch per intended slot the module is "busy" until the queue
@@ -99,32 +101,30 @@
             return;
         }
 
+        var before = c.dropped();
         var allGeos;
         try { allGeos = c.geologists(); }
         catch (e) {
             S.kernel.error('geologists', 'geologists() threw:', e);
             return;
         }
+        // Dropped busy geologists would shorten busyOnDeposit, raise wanted
+        // and over-dispatch the healthy idle ones, so this tick plans nothing.
+        if (c.dropped() !== before) return;
         if (!allGeos || !allGeos.length) return;
 
-        // Idle pool: idle status AND a stable uniqueID. Specs lacking a
-        // uid are "ghost" entries — host returns them in
-        // GetSpecialists_vector under transient conditions (likely
-        // unloaded data). Filtering here keeps the rest of the planner
-        // honest: we can't dispatch a queue action that re-finds them
-        // at fire time.
+        // Idle pool: idle status AND a stable uniqueID. The reader already
+        // leaves out entries without one; an entry can still lose its members
+        // after that read, and the queue action could not re-find it at fire
+        // time.
         var idleGeos = [];
-        var ghostCount = 0;
         for (var ig = 0; ig < allGeos.length; ig++) {
             var g0 = allGeos[ig];
             try {
                 if (c.status(g0) !== S.SpecialistStatus.Idle) continue;
             } catch (e) { continue; }
-            if (!c.uniqueIdKey(g0)) { ghostCount++; continue; }
+            if (!c.uniqueIdKey(g0)) continue;
             idleGeos.push(g0);
-        }
-        if (ghostCount > 0) {
-            S.kernel.log('geologists', 'skipped', ghostCount, 'spec(s) without uniqueID');
         }
         if (!idleGeos.length) return;
 
@@ -133,7 +133,7 @@
         var overrides = (s && s.overrides) || {};
         var assigned = {};   // uid → true (this tick)
         var delay = (typeof s.dispatchDelay === 'number') ? s.dispatchDelay : 1500;
-        var dispatched = 0;
+        var picks = [];
 
         for (var t = 0; t < types.length; t++) {
             var info = types[t];
@@ -165,21 +165,24 @@
                     requirePositive: false   // accept vanilla geo when no specialist is idle
                 });
                 if (!best) break;
-                // best.uid is non-null by invariant: idle pool was
-                // filtered to specs with uid above.
+                // best.uid is non-null: the ranking skips entries without one.
                 assigned[best.uid] = true;
 
                 var displayName = stripHtml(c.name(best.geo)) || '?';
-                S.kernel.queue.add('geologists.dispatch',
-                    [best.uid, displayName, info.name],
-                    dispatched === 0 ? 0 : delay);
-                dispatched++;
+                picks.push([best.uid, displayName, info.name]);
             }
         }
 
-        if (dispatched > 0) {
-            S.kernel.log('geologists', 'queued dispatch for', dispatched, 'geologist(s)');
+        if (!picks.length) return;
+        // An entry that lost its members inside this pass reads Idle, so the
+        // counts above may be wrong. One last read decides before anything is
+        // queued.
+        if (!c.listComplete()) return;
+
+        for (var p = 0; p < picks.length; p++) {
+            S.kernel.queue.add('geologists.dispatch', picks[p], p === 0 ? 0 : delay);
         }
+        S.kernel.log('geologists', 'queued dispatch for', picks.length, 'geologist(s)');
     }
 
     function boot() {
@@ -202,13 +205,14 @@
 
             // Re-find by uniqueID so the dispatch hits the same instance
             // we ranked. Names can collide across multiple specimens of
-            // the same GetType.
+            // the same GetType. A read that cannot tell ends here without a
+            // warning: the reader already logged and the next plan dispatches
+            // again.
             var spec = null;
             try {
-                var pool = c.geologists();
-                for (var i = 0; i < pool.length; i++) {
-                    if (c.uniqueIdKey(pool[i]) === uidKey) { spec = pool[i]; break; }
-                }
+                var l = c.lookup(uidKey);
+                if (!l.ok) return;
+                spec = l.spec;
             } catch (e) {
                 S.kernel.error('geologists', 'lookup for', displayName, 'threw:', e);
                 return;

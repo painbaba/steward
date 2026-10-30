@@ -84,20 +84,15 @@
         }
         if (rawIdle.length === 0) return;
 
-        // Filter out "ghost" specs — host returns entries in
-        // GetSpecialists_vector that pass classify() but lack a stable
-        // uniqueID (likely transient/unloaded). Without filtering, the
-        // dispatch loop emits a no-uniqueID warning per ghost on every
-        // tick. The queue contract needs uid for re-find at fire time,
-        // so they're not actionable to us anyway.
+        // The reader already leaves out entries without a stable uniqueID; an
+        // entry can still lose its members after that read. The queue contract
+        // needs the uid for the re-find at fire time. A dropped explorer only
+        // leaves fewer candidates, never a wrong count, so unlike geologists
+        // this pass does not hold on a read that dropped entries.
         var idleExplorers = [];
-        var ghostCount = 0;
         for (var ie = 0; ie < rawIdle.length; ie++) {
-            if (!c.uniqueIdKey(rawIdle[ie])) { ghostCount++; continue; }
+            if (!c.uniqueIdKey(rawIdle[ie])) continue;
             idleExplorers.push(rawIdle[ie]);
-        }
-        if (ghostCount > 0) {
-            S.kernel.log('explorers', 'skipped', ghostCount, 'spec(s) without uniqueID');
         }
         if (idleExplorers.length === 0) return;
 
@@ -115,8 +110,11 @@
             // can share a display name (e.g. multiple "Bewitching Explorer"
             // instances of GetType=51) — name-based lookup picks one and
             // sends to it repeatedly while ignoring the rest.
-            // uid is non-null by invariant: idle pool was filtered above.
+            // The key is read again here, so an entry can still turn
+            // unreadable between the idle filter and this read. A null key
+            // would queue an action that can never re-find its explorer.
             var uidKey = c.uniqueIdKey(spec);
+            if (!uidKey) continue;
             var name = stripHtml(c.name(spec)) || '?';
             S.kernel.queue.add('explorers.dispatch',
                 [uidKey, name, task],
@@ -144,16 +142,14 @@
             var c = S.core.specialists;
 
             // Re-find the explorer by uniqueID (display names can repeat
-            // across instances; uniqueID is stable per-instance).
+            // across instances; uniqueID is stable per-instance). A read that
+            // cannot tell ends here without a warning: the reader already
+            // logged and the next plan dispatches again.
             var spec = null;
             try {
-                var explorers = c.explorers();
-                for (var i = 0; i < explorers.length; i++) {
-                    if (c.uniqueIdKey(explorers[i]) === uidKey) {
-                        spec = explorers[i];
-                        break;
-                    }
-                }
+                var l = c.lookup(uidKey);
+                if (!l.ok) return;
+                spec = l.spec;
             } catch (e) {
                 S.kernel.error('explorers', 'lookup for', displayName, 'threw:', e);
                 return;

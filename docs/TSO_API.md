@@ -152,6 +152,11 @@ zone.GetSpecialists_vector();
 zone.mStreetDataMap.getDeposits_vectorByType('IronOre');
 // The AIR bridge can throw a transient "[undefined] is not a function" from this
 // call. Wrap it and retry once before treating the count as unknown.
+// Specialist entries are real cSpecialist objects, but in observed logs several
+// members can read undefined on the JS side at once. Only GetType has been seen
+// still working, and nothing ties these episodes to a list read. Treat a missing
+// member as unknown, not absent. The episodes recurred about every 120 s in the
+// logs; the cause (host garbage collection) is not established.
 ```
 
 ### Building accessors

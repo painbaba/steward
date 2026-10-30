@@ -29,9 +29,12 @@
  *
  * Memory-only parts of runState, never written: loaded, round (the action
  * round in flight), cache (parsed wave lines), questRetry (quest key ->
- * time a failed claim may be retried) and homeNote (the last wait the home
- * steps logged, so a repeated wait is logged once). They describe callbacks
- * and reads of this client session, which do not exist after a restart.
+ * time a failed claim may be retried), homeNote (the last wait the home
+ * steps logged, so a repeated wait is logged once), listBadSince and
+ * listBadLast (first and latest read of a specialist list that lost entries)
+ * and missing (general key -> { since, last } of the reads that lacked it).
+ * They describe callbacks and reads of this client session, which do not
+ * exist after a restart.
  * resetMemory() is the one place that resets them for a new or loaded run.
  * The round alone is also dropped at bundle load and by dropRound(), because a reload or a
  * cancelled queue removes its queued attempts while the run stays as it was.
@@ -462,13 +465,17 @@
         return out;
     }
 
-    // round, cache and questRetry belong to the run they were built for; a
-    // new request, a new run or a loaded file starts without them.
+    // round, cache, questRetry and the read windows belong to the run they
+    // were built for; a new request, a new run or a loaded file starts
+    // without them.
     function resetMemory(rs) {
         rs.round = null;
         rs.cache = null;
         rs.questRetry = {};
         rs.homeNote = null;
+        rs.listBadSince = null;
+        rs.listBadLast = null;
+        rs.missing = {};
     }
 
     // The only literal of the run object. start holds the facts fixed at

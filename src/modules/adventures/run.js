@@ -161,7 +161,9 @@
     }
 
     // Runs the executor's start check and logs its warnings; null when the
-    // executor is not loaded (the user has been told).
+    // executor is not loaded or the specialist list lost entries, whose
+    // generals would read as problems of the template (the user has been
+    // told either way).
     function startCheck(rec, opts) {
         var executor = S.modules.adventures.executor;
         if (!executor || !executor.check) {
@@ -169,6 +171,10 @@
             return null;
         }
         var chk = executor.check(rec, opts) || {};
+        if (chk.listOk === false) {
+            notify('The specialist list cannot be read right now; try again in a moment.');
+            return null;
+        }
         var warnings = listOf(chk.warnings);
         for (var i = 0; i < warnings.length; i++) {
             S.kernel.warn('adventures', 'start check "' + rec.label + '":', messageOf(warnings[i]));
