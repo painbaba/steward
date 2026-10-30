@@ -9,6 +9,14 @@
  *
  * isReady/plan throws are caught and logged — never propagate to the kernel
  * tick. A misbehaving module does not stop the system.
+ *
+ * Between ticks a module may ask for one extra plan() with wake(id, delayMs). A
+ * wake runs on its own timer and touches no cursor, no tickCount, no tick timer
+ * and no other module, so the others keep their tick. It obeys the same busy
+ * contract as a tick and ends with a drain, whose pending gap it cannot shorten.
+ * A module keeps a chain going by asking again from plan(); the next tick picks
+ * up a chain that ended. stop() clears pending wakes, so none survives a kernel
+ * Pause or a reload.
  */
 
 (function (S) {
@@ -18,7 +26,8 @@
         tickIntervalMs: S.kernel.TIMEOUTS.TICK_INTERVAL_MS,
         tickCount:      0,
         timer:          null,
-        cursors:        {}      // { priority: number }
+        cursors:        {},     // { priority: number }
+        wakes:          {}      // { moduleId: { timer, due } }
     };
 
     function buildContext() {
@@ -81,6 +90,16 @@
         state.cursors[priority] = (cursor + 1) % inTier.length;
     }
 
+    function drainQueue() {
+        try {
+            if (S.kernel.queue && typeof S.kernel.queue.drain === 'function') {
+                S.kernel.queue.drain();
+            }
+        } catch (e) {
+            S.kernel.error('scheduler', 'queue.drain threw:', e);
+        }
+    }
+
     function tick() {
         if (!state.running) return;
         state.tickCount++;
@@ -91,13 +110,7 @@
             walkTier(S.kernel.PRIORITY_ORDER[i], ctx);
         }
 
-        try {
-            if (S.kernel.queue && typeof S.kernel.queue.drain === 'function') {
-                S.kernel.queue.drain();
-            }
-        } catch (e) {
-            S.kernel.error('scheduler', 'queue.drain threw:', e);
-        }
+        drainQueue();
 
         scheduleNext();
     }
@@ -112,6 +125,50 @@
             state.timer = null;
             tick();
         }, state.tickIntervalMs);
+    }
+
+    function clearWakes() {
+        for (var id in state.wakes) {
+            if (state.wakes.hasOwnProperty(id)) clearTimeout(state.wakes[id].timer);
+        }
+        state.wakes = {};
+    }
+
+    // One extra plan() of this module after delayMs, between ticks. One wake per
+    // module; the earliest due time wins, so a Resume or a moved step is not held
+    // back by a slower wake already pending. Touches no cursor, no tickCount, no
+    // other module, so the others keep their tick.
+    function wake(id, delayMs) {
+        if (!state.running || !S.kernel.registry.get(id)) return false;
+        var ms = Math.max(typeof delayMs === 'number' ? delayMs : 0, S.kernel.TIMEOUTS.WAKE_MIN_MS);
+        var due = Date.now() + ms;
+        if (state.wakes.hasOwnProperty(id)) {
+            if (state.wakes[id].due <= due) return false;
+            clearTimeout(state.wakes[id].timer);
+        }
+        state.wakes[id] = {
+            due:   due,
+            timer: setTimeout(function () {
+                delete state.wakes[id];
+                runWake(id);
+            }, ms)
+        };
+        return true;
+    }
+
+    function runWake(id) {
+        if (!state.running) return;
+        var mod = S.kernel.registry.get(id);
+        if (!mod) return;
+        // The busy contract of walkTier. Waits for the queue without a game read.
+        if (S.kernel.queue.isModuleBusy(id)) {
+            wake(id, S.kernel.TIMEOUTS.WAKE_BUSY_RECHECK_MS);
+            return;
+        }
+        var ctx = buildContext();
+        if (safeIsReady(mod, ctx)) safePlan(mod, ctx);
+        // A pending gap keeps the queue draining, so this cannot shorten it.
+        drainQueue();
     }
 
     function configure(cfg) {
@@ -135,6 +192,7 @@
             clearTimeout(state.timer);
             state.timer = null;
         }
+        clearWakes();
         S.kernel.log('scheduler', 'stopped');
     }
 
@@ -142,6 +200,7 @@
         start:     start,
         stop:      stop,
         tick:      tick,           // manual trigger (mostly for diagnostics)
+        wake:      wake,           // one extra plan() of one module, between ticks
         configure: configure,
         state:     state
     };

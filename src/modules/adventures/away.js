@@ -465,9 +465,10 @@
     // needs a garrison, which a general has only on the map. A holder already
     // walking is waited on first, because it may show its new grid while not
     // yet idle, and so a restart or a kernel Pause never orders it twice.
-    // A missing holder is settled before the last round is: settleRound
-    // counts a finished round every time it runs, so a hold after it would
-    // count the same round on each pass and end in a false rounds pause.
+    // A missing holder is settled before the last round is: past its
+    // read-lag hold, settleRound counts a finished round every time it runs,
+    // so a hold after it would count the same round on each pass and end in a
+    // false rounds pause.
     function packStar(r, inv) {
         if (!inv.ok) {
             ld().waitRead(r, 'free troops and armies');
@@ -530,6 +531,9 @@
         }
         var round = ld().currentRound(r, S.RunStep.Pack);
         if (round && ld().complete(round) && !ld().firstFailure(round)) {
+            // A plan on a free pool that still shows the raised troops would
+            // raise too much.
+            if (ld().roundSettling(round)) return;
             var n = 0;
             for (var k in round.expected) { if (has(round.expected, k)) n++; }
             st().go(S.RunStep.Pack, 'packed ' + n + ' holder(s)');

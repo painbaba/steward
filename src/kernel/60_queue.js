@@ -4,9 +4,10 @@
  * Modules call Steward.kernel.queue.add(name, params, delay) from their plan()
  * functions. Actions are registered once per name via queue.action(name, fn).
  *
- * drain() runs from the scheduler at the end of each tick. Each action runs
- * after its own delay (default QUEUE_ACTION_GAP_MS). Actions never fire faster
- * than the kernel tick.
+ * drain() runs from the scheduler at the end of each tick and of each wake.
+ * Each entry carries its own delay (default QUEUE_ACTION_GAP_MS), which holds
+ * the queue after that action runs: the next action never fires sooner than one
+ * entry delay after the previous one, however often drain() is called.
  */
 
 (function (S) {

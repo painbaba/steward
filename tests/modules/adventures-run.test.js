@@ -439,6 +439,9 @@ t.test('Home load: short and not covered pauses TroopsShort', function () {
     var w = homeWorld({ free: { Rifle: 4 } });
     series(w, { step: w.S.RunStep.Supply, run: { snapshot: { Rifle: 4 } } });
     tick(w);
+    assertStep(w, 'Supply');
+    w.t += w.S.modules.adventures.loader.READ_LAG_MS;
+    tick(w);
     assertPaused(w, w.S.RunPause.TroopsShort, /troops short: /);
     assert.strictEqual(w.raises.length, 0);
 });

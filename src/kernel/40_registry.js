@@ -61,7 +61,9 @@
  * flags are refreshed when it opens and never on the status tick, so text
  * that changes often does not cost a native write per tick. When its item
  * set changes the module calls Steward.kernel.ui.refreshBarMenu(id), on a
- * user action only.
+ * user action only. An optional `visible` function on the spec says whether
+ * the entry is in the bar at build; the module then moves it with
+ * Steward.kernel.ui.showBarMenu(id, on). Without `visible` it is always shown.
  *
  * The `events` tab hosts read-only event tools.
  *
@@ -167,13 +169,18 @@
             S.kernel.warn('registry', moduleId, 'menu requires title and items (array or function)');
             return null;
         }
-        if (isFunction(raw.items)) return { title: String(raw.title), items: raw.items };
+        var visible = null;
+        if (raw.visible !== undefined && raw.visible !== null) {
+            if (isFunction(raw.visible)) visible = raw.visible;
+            else S.kernel.warn('registry', moduleId, 'menu visible must be a function, ignoring');
+        }
+        if (isFunction(raw.items)) return { title: String(raw.title), items: raw.items, visible: visible };
         var items = normalizeMenuItems(moduleId, raw.items);
         if (!items.length) {
             S.kernel.warn('registry', moduleId, 'menu has no valid items');
             return null;
         }
-        return { title: String(raw.title), items: items };
+        return { title: String(raw.title), items: items, visible: visible };
     }
 
     function register(spec) {

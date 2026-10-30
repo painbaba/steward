@@ -14,6 +14,8 @@
 
     S.kernel.TIMEOUTS = {
         TICK_INTERVAL_MS:        10000,    // Steward.scheduler default tick interval
+        WAKE_MIN_MS:             250,      // floor of a module wake; bounds a wake chain to 4 plans a second
+        WAKE_BUSY_RECHECK_MS:    500,      // re-check of a wake that found its module busy; reads no game state
         QUEUE_ACTION_GAP_MS:     1500,     // default delay between queued actions
         QUEUE_MODAL_RECHECK_MS:  2000,     // re-poll cadence while a host modal is open
         BOOT_DEFER_MS:           100,      // how long after script load we wait before boot()

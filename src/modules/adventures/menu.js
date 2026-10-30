@@ -69,7 +69,7 @@
     }
 
     // The run commands, in menu order. The one place their labels and run.js
-    // names are written; the Run bar menu reads the same table.
+    // names are written; the Adventures bar menu reads the same table.
     var COMMANDS = [
         { label: 'Pause run',      name: 'pause' },
         { label: 'Resume run',     name: 'resume' },

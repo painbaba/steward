@@ -1,15 +1,19 @@
 /*
- * The ~Run~ bar menu of the adventures module.
+ * The ~Adventures~ bar menu of the adventures module.
  *
  * A read-only view of the run plus the run controls: the run title, one
  * status line, the four commands enabled by what applies now, and the stage
  * rows grouped as the steps table in state.js folds them. The marks are
  * written here and nowhere else.
  *
+ * The entry stays built and joins or leaves the bar: it is in the bar only
+ * while the run is Running or Paused. Moving it creates no native object, so
+ * a run that ends inside plan() can hide it.
+ *
  * Labels and enabled flags refresh when the menu opens, not on the status
  * tick: a run changes this text far too often for a label write per tick,
  * and AIR grows objects on those writes. The row set is fixed between
- * rebuilds because a native item cannot be hidden, so the status line is
+ * rebuilds because a submenu row cannot be hidden, so the status line is
  * always present during a run and a rebuild happens only when the wave count
  * changes; a series keeps its count and rebuilds nothing. Labels read memory
  * only, never files.
@@ -245,16 +249,30 @@
         return list;
     }
 
-    // Rebuilds the bar menu when the row set differs from the last build.
+    // Whether the bar shows the menu now.
+    function visible() {
+        var r = st().run();
+        return !!r && (r.status === S.RunStatus.Running || r.status === S.RunStatus.Paused);
+    }
+
+    // Brings the entry in line with the run; true when it rebuilt the rows.
     function sync() {
-        if (signature() === lastSignature) return false;
         var ui = S.kernel.ui;
-        return ui && ui.refreshBarMenu ? ui.refreshBarMenu('adventures') : false;
+        var show = visible();
+        var rebuilt = false;
+        // Built before it shows; a hidden menu is not rebuilt. lastSignature keeps
+        // the last build, which is what the hidden entry still holds.
+        if (show && signature() !== lastSignature && ui && ui.refreshBarMenu) {
+            rebuilt = ui.refreshBarMenu('adventures');
+        }
+        if (ui && ui.showBarMenu) ui.showBarMenu('adventures', show);
+        return rebuilt;
     }
 
     S.modules.adventures.runmenu = {
         items:     items,
         sync:      sync,
+        visible:   visible,
         rows:      rows,
         signature: signature,
         MARK:      MARK

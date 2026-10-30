@@ -11,7 +11,8 @@
  *      submenu on a user action, and label functions refresh in place.
  *      A module may also declare a `barMenu`: one more root item right
  *      after ~Steward~, built the same way but refreshed when it opens
- *      instead of on the status tick.
+ *      instead of on the status tick. An entry may stay out of the bar
+ *      (its `visible` function) and be moved in and out with showBarMenu.
  *
  *   2. Dashboard modal — autoTSO-mirror layout:
  *        ┌──────────────────────────────────┐
@@ -79,6 +80,8 @@
     var BAR_PREFIX = 'StewardBarMenu_';
     var barEntries = {};
     var barLabels = {};
+    var barContainer = null;   // where the entries live, for showBarMenu
+    var barShown = {};         // id -> whether the entry is in the bar now
 
     var dashboard = {
         modal:     null,
@@ -186,6 +189,7 @@
             moduleLabels = {};
             barEntries = {};
             barLabels = {};
+            barShown = {};
             var attach = attachContainer();
             var container = attach.container;
             removeIfPresent(container, 'StewardRoot');
@@ -326,6 +330,7 @@
     // Each is guarded on its own: a bad bar menu must never fail the
     // ~Steward~ build, which has already been added at this point.
     function appendBarMenus(container) {
+        barContainer = container;
         var mods = barModules();
         for (var i = 0; i < mods.length; i++) {
             try {
@@ -333,10 +338,65 @@
                 entry.name = BAR_PREFIX + mods[i].id;
                 entry.submenu = buildBarInner(mods[i]);
                 barEntries[mods[i].id] = entry;
-                container.addItem(entry);
+                if (barVisible(mods[i])) {
+                    container.addItem(entry);
+                    barShown[mods[i].id] = true;
+                } else {
+                    barShown[mods[i].id] = false;
+                }
             } catch (e) {
                 S.kernel.error('ui', mods[i].id, 'bar menu failed:', e);
             }
+        }
+    }
+
+    // A module without a `visible` function is always in the bar. A throwing
+    // one counts as shown so its controls stay reachable.
+    function barVisible(mod) {
+        if (!mod.barMenu.visible) return true;
+        try {
+            return mod.barMenu.visible() === true;
+        } catch (e) {
+            S.kernel.error('ui', mod.id, 'bar menu visible failed:', e);
+            return true;
+        }
+    }
+
+    // Puts an entry right after ~Steward~ so the bar order stays the same
+    // however often it is hidden and shown. Falls back to the end of the bar
+    // when this host lacks the positional calls.
+    function placeBarEntry(entry) {
+        var root = barContainer.getItemByName ? barContainer.getItemByName('StewardRoot') : null;
+        if (root && barContainer.addItemAt && barContainer.getItemIndex) {
+            try {
+                barContainer.addItemAt(entry, barContainer.getItemIndex(root) + 1);
+                return;
+            } catch (e) {
+                S.kernel.warn('ui', 'bar menu addItemAt failed, appending:', e);
+            }
+        } else {
+            S.kernel.warn('ui', 'bar menu position unavailable, appending');
+        }
+        barContainer.addItem(entry);
+    }
+
+    // Moves a built entry in or out of the bar. Moving creates no native
+    // object, unlike a rebuild, so this may run from plan(). True only when
+    // it moved the item.
+    function showBarMenu(id, on) {
+        if (!initialized || disposed || !barContainer) return false;
+        var entry = barEntries[id];
+        if (!entry) return false;
+        var want = on === true;
+        if (barShown[id] === want) return false;
+        try {
+            if (want) placeBarEntry(entry);
+            else barContainer.removeItem(entry);
+            barShown[id] = want;
+            return true;
+        } catch (e) {
+            S.kernel.error('ui', id, 'bar menu show failed:', e);
+            return false;
         }
     }
 
@@ -1179,6 +1239,7 @@
     S.kernel.ui.isPaused         = isPaused;
     S.kernel.ui.refreshModuleMenu = refreshModuleMenu;
     S.kernel.ui.refreshBarMenu   = refreshBarMenu;
+    S.kernel.ui.showBarMenu      = showBarMenu;
     S.kernel.ui.notify           = notify;
     S.kernel.ui.seedPaused       = function (v) { paused = v === true; refreshStatus(); };
 

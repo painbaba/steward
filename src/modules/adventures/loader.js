@@ -26,6 +26,11 @@
  * own: it waits a settle time for the step's own observation and then the
  * step pauses until the user has looked.
  *
+ * The game may show a verified effect some seconds after the verify. A pass
+ * can come right after a round ends, so a step that would count, retry or
+ * pause on such a read waits READ_LAG_MS first. Only those paths wait; a
+ * read that already shows the effect moves on at once.
+ *
  * The per-general helpers that the home and away steps share (read waits,
  * loadout key order, names, the departure test) live here as well.
  *
@@ -46,6 +51,7 @@
     // Starting values, to be tuned in game.
     var MAX_ROUNDS        = 2;         // action rounds per step before a pause
     var MAX_UNLOAD_CYCLES = 2;         // Supply -> Unload -> Supply cycles per load
+    var READ_LAG_MS       = 10000;     // a verified effect may read this late; the old gap between two looks
     var READ_MAX_MS       = 60000;     // an unreadable read pauses after this long
     var MISSING_GRACE_MS  = READ_MAX_MS;  // a general stays gone this long before a pause
     var MISSING_GAP_MS    = 30000;     // a longer silence restarts the two windows above
@@ -203,6 +209,13 @@
         return true;
     }
 
+    // Whether a finished round is still inside the time its effect may take
+    // to read. doneAt lives in memory like the round, so a reload forgets it
+    // together with the round.
+    function roundSettling(round) {
+        return typeof round.doneAt === 'number' && now() - round.doneAt < READ_LAG_MS;
+    }
+
     // Whether a result is a first-step refusal because the general could not
     // be read: nothing was sent, so the round had no effect either way. Only
     // this exact form counts. A Failed 'retry refused: ...' went out once, and
@@ -241,6 +254,8 @@
             if (rs.round !== round || !r || r.id !== round.runId) return;
             if (S.core.zone.id() !== round.zoneId) return;
             round.results[key] = { status: result.status, reason: result.reason || '' };
+            // A later attempt added to this round writes this again when it ends.
+            if (complete(round)) round.doneAt = now();
             if (after) after(result, r);
         };
     }
@@ -272,11 +287,15 @@
     }
 
     // Shared round handling of an acting step. Returns 'new' when the caller
-    // should start a new round, 'paused' when it paused.
+    // should start a new round, 'paused' when it paused, 'wait' while a round
+    // without failure may still show its effect late: counting it now could
+    // send the same order twice or end in a false rounds pause. A failed round
+    // has no effect to wait for and pauses at once.
     function settleRound(r, step, onFailure, what) {
         dropOrphan(r);
         var round = currentRound(r, step);
         if (!round || !complete(round)) return 'new';     // none yet, or dropped above
+        if (!firstFailure(round) && roundSettling(round)) return 'wait';
         r.rounds++;
         st().save();
         var f = firstFailure(round);
@@ -357,6 +376,7 @@
             st().pause(S.RunPause.GeneralMissing, p.missing[0] + ' is not on the island', { general: p.missing[0] });
             return;
         }
+        var settling = now() - r.since < READ_LAG_MS;
         if (!p.covered) {
             var shortText = S.core.army.text(p.shortAfter);
             if (opts && opts.waitQueued && shortQueued(p.shortAfter)) {
@@ -373,11 +393,17 @@
                 }
                 return;
             }
+            if (settling) return;
             st().pause(S.RunPause.TroopsShort, 'troops short: ' + shortText);
             return;
         }
         if (isWaitBlocker(r.blocker)) r.blocker = null;
         if (p.donors.length) {
+            // Unload verifies the general's army and not the pool, so right
+            // after an Unload a short read may be lag, and acting on it would
+            // empty a further donor. With no unload cycle yet there is nothing
+            // to lag, so that Supply keeps its speed.
+            if (r.cycles > 0 && settling) return;
             var keys = [];
             for (var i = 0; i < p.donors.length; i++) keys.push(p.donors[i].key);
             r.donors = keys;
@@ -461,6 +487,10 @@
             st().go(steps.load, 'load round dropped, load again', { keepRounds: true });
             return;
         }
+        // Whatever the round's results: this step retries a failed round too,
+        // and a raise refused on a pool that lags after an unload needs the
+        // time before the retry can succeed.
+        if (roundSettling(round)) return;
         r.rounds++;
         if (r.rounds < MAX_ROUNDS) {
             st().go(steps.load, 'mismatch, retry once', { keepRounds: true });
@@ -537,6 +567,7 @@
     S.modules.adventures.loader = {
         MAX_ROUNDS:        MAX_ROUNDS,
         MAX_UNLOAD_CYCLES: MAX_UNLOAD_CYCLES,
+        READ_LAG_MS:       READ_LAG_MS,
         READ_MAX_MS:       READ_MAX_MS,
         MISSING_GRACE_MS:  MISSING_GRACE_MS,
         MARK_SETTLE_MS:    MARK_SETTLE_MS,
@@ -556,6 +587,7 @@
         startRound:        startRound,
         currentRound:      currentRound,
         complete:          complete,
+        roundSettling:     roundSettling,
         firstFailure:      firstFailure,
         unreadable:        unreadable,
         resultOf:          resultOf,

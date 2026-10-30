@@ -23,6 +23,8 @@ function installMenuStubs(H) {
         for (var i = 0; i < list.length; i++) list[i]();
     };
     NativeMenu.prototype.addItem = function (item) { this.items.push(item); return item; };
+    NativeMenu.prototype.addItemAt = function (item, index) { this.items.splice(index, 0, item); return item; };
+    NativeMenu.prototype.getItemIndex = function (item) { return this.items.indexOf(item); };
     NativeMenu.prototype.removeItem = function (item) {
         var i = this.items.indexOf(item);
         if (i >= 0) this.items.splice(i, 1);
@@ -590,4 +592,141 @@ t.test('enabled function on a submenu item refreshes on the tick', function () {
     t.assert.strictEqual(s.counts.enabledWrites, 1);
     s.H.Steward.kernel.ui.status.refresh();
     t.assert.strictEqual(s.counts.enabledWrites, 1);
+});
+
+// A module whose bar entry follows a `visible` function. state.visible is what
+// the function answers at build; state.boom makes it throw.
+function setupVis(opts) {
+    opts = opts || {};
+    var H = harness.boot({ sections: ['kernel'] });
+    var M = installMenuStubs(H);
+    var st = { visible: opts.visible !== false, boom: !!opts.boom };
+    var spec = {
+        id:       'vis',
+        priority: 'PriorityNormal',
+        isReady:  function () { return true; },
+        plan:     function () {},
+        barMenu:  { title: '~Vis~', items: [{ label: 'Go', onSelect: function () {} }] }
+    };
+    if (!opts.noVisible) {
+        spec.barMenu.visible = function () {
+            if (st.boom) throw new Error('boom');
+            return st.visible;
+        };
+    }
+    H.Steward.kernel.register(spec);
+    H.settings.write('vis', { enabled: true });
+    if (opts.noAddItemAt) delete M.rootMenu.addItemAt;
+    if (opts.throwAddItemAt) M.rootMenu.addItemAt = function () { throw new Error('no addItemAt'); };
+    H.Steward.kernel.ui.init();
+    return { H: H, counts: M.counts, rootMenu: M.rootMenu, st: st, K: H.Steward.kernel };
+}
+
+function visEntry(rootMenu) { return rootMenu.getItemByName('StewardBarMenu_vis'); }
+
+t.test('a visible false entry is built but not in the bar', function () {
+    var s = setupVis({ visible: false });
+    t.assert.strictEqual(visEntry(s.rootMenu), null);
+    t.assert.ok(s.rootMenu.getItemByName('StewardRoot'));
+    t.assert.strictEqual(s.counts.menus >= 2, true);
+});
+
+t.test('show puts the entry directly after the root even with a foreign item after it', function () {
+    var s = setupVis({ visible: false });
+    var NMI = s.H.ctx.air.NativeMenuItem;
+    s.rootMenu.addItem(new NMI('Foreign'));
+    t.assert.strictEqual(s.K.ui.showBarMenu('vis', true), true);
+    var items = s.rootMenu.items;
+    var root = s.rootMenu.getItemByName('StewardRoot');
+    t.assert.strictEqual(items.indexOf(visEntry(s.rootMenu)), items.indexOf(root) + 1);
+    t.assert.strictEqual(items[items.length - 1].label, 'Foreign');
+});
+
+t.test('hide removes the entry; show and hide build no native objects', function () {
+    var s = setupVis({ visible: true });
+    t.assert.ok(visEntry(s.rootMenu));
+    var before = snapshot(s.counts);
+    t.assert.strictEqual(s.K.ui.showBarMenu('vis', false), true);
+    t.assert.strictEqual(visEntry(s.rootMenu), null);
+    t.assert.strictEqual(s.K.ui.showBarMenu('vis', true), true);
+    t.assert.ok(visEntry(s.rootMenu));
+    t.assert.deepStrictEqual(snapshot(s.counts), before);
+});
+
+t.test('a second call with the same state returns false and changes nothing', function () {
+    var s = setupVis({ visible: true });
+    var n = s.rootMenu.items.length;
+    t.assert.strictEqual(s.K.ui.showBarMenu('vis', true), false);
+    t.assert.strictEqual(s.rootMenu.items.length, n);
+    s.K.ui.showBarMenu('vis', false);
+    n = s.rootMenu.items.length;
+    t.assert.strictEqual(s.K.ui.showBarMenu('vis', false), false);
+    t.assert.strictEqual(s.rootMenu.items.length, n);
+});
+
+t.test('showBarMenu is false before init, after dispose and for an unknown id', function () {
+    var H = harness.boot({ sections: ['kernel'] });
+    installMenuStubs(H);
+    t.assert.strictEqual(H.Steward.kernel.ui.showBarMenu('vis', true), false);
+
+    var s = setupVis({ visible: true });
+    t.assert.strictEqual(s.K.ui.showBarMenu('nope', false), false);
+    s.K.ui.dispose();
+    t.assert.strictEqual(s.K.ui.showBarMenu('vis', false), false);
+    t.assert.ok(visEntry(s.rootMenu));
+});
+
+t.test('a throwing visible logs and shows the entry', function () {
+    var s = setupVis({ boom: true });
+    t.assert.ok(visEntry(s.rootMenu));
+    t.assert.ok(errorLogs(s).length >= 1);
+});
+
+t.test('without addItemAt on the host the entry is appended', function () {
+    var s = setupVis({ visible: false, noAddItemAt: true });
+    t.assert.strictEqual(s.K.ui.showBarMenu('vis', true), true);
+    var items = s.rootMenu.items;
+    t.assert.strictEqual(items[items.length - 1], visEntry(s.rootMenu));
+});
+
+t.test('a throwing addItemAt falls back to addItem', function () {
+    var s = setupVis({ visible: false, throwAddItemAt: true });
+    t.assert.strictEqual(s.K.ui.showBarMenu('vis', true), true);
+    var items = s.rootMenu.items;
+    t.assert.strictEqual(items[items.length - 1], visEntry(s.rootMenu));
+});
+
+t.test('a throwing removeItem returns false and a later call tries again', function () {
+    var s = setupVis({ visible: true });
+    var realRemove = s.rootMenu.removeItem;
+    var fail = true;
+    s.rootMenu.removeItem = function (item) {
+        if (fail) throw new Error('cannot remove');
+        return realRemove.call(s.rootMenu, item);
+    };
+    t.assert.strictEqual(s.K.ui.showBarMenu('vis', false), false);
+    t.assert.ok(visEntry(s.rootMenu));
+    fail = false;
+    t.assert.strictEqual(s.K.ui.showBarMenu('vis', false), true);
+    t.assert.strictEqual(visEntry(s.rootMenu), null);
+});
+
+t.test('a rebuild with a hidden entry leaves at most one entry', function () {
+    var s = setupVis({ visible: true });
+    s.K.ui.showBarMenu('vis', false);
+    s.st.visible = false;
+    s.K.ui.init();
+    t.assert.strictEqual(countNamed(s.rootMenu, 'StewardBarMenu_vis'), 0);
+    s.st.visible = true;
+    s.K.ui.init();
+    t.assert.strictEqual(countNamed(s.rootMenu, 'StewardBarMenu_vis'), 1);
+    s.K.ui.showBarMenu('vis', false);
+    s.K.ui.init();
+    t.assert.ok(countNamed(s.rootMenu, 'StewardBarMenu_vis') <= 1);
+});
+
+t.test('a bar menu without visible is always shown', function () {
+    var s = setupVis({ noVisible: true });
+    t.assert.ok(visEntry(s.rootMenu));
+    t.assert.strictEqual(s.K.ui.showBarMenu('vis', true), false);
 });

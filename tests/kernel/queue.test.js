@@ -117,3 +117,23 @@ t.test('cancelByModule drops inherited entries', function () {
     t.assert.strictEqual(R.Q.depthByModule('mining'), 1);
     t.assert.strictEqual(R.Q.isModuleBusy('adventures'), false);
 });
+
+t.test('an entry added during a pending delay waits for that delay timer', function () {
+    var R = realQueue();
+    R.Q.action('first', noopAction);
+    var ran = 0;
+    R.Q.action('late', function () { ran++; });
+    R.Q.add('first', [], 400);
+    R.Q.drain();                       // runs 'first', arms its 400 ms delay
+    t.assert.strictEqual(R.timers.length, 1);
+    t.assert.strictEqual(R.timers[0].ms, 400);
+
+    R.Q.add('late', [], 10);
+    R.Q.drain();                       // the previous drain is still pacing
+    t.assert.strictEqual(ran, 0);
+    t.assert.strictEqual(R.Q.depth(), 1);
+
+    R.step();                          // the delay timer fires
+    t.assert.strictEqual(ran, 1);
+    t.assert.strictEqual(R.Q.depth(), 0);
+});

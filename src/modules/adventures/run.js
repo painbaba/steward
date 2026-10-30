@@ -21,7 +21,8 @@
  * a menu callback carries no module tag, so cancelByModule could not remove
  * it. The scheduler's plan() enqueues every step. Pause, Stop and replacing
  * a run cancel the module's queued entries so nothing acts after the user
- * said stop.
+ * said stop. A wake enqueues nothing, so Start and Resume may ask for one:
+ * the next plan() then comes right away instead of on the tick.
  *
  * The request and the run live on S.modules.adventures.runState and are
  * written to the run state file through S.modules.adventures.state, so both
@@ -111,6 +112,11 @@
     // Rewrites the menu status line in place; no menu rebuild.
     function refresh() {
         if (S.kernel.ui && S.kernel.ui.status && S.kernel.ui.status.refresh) S.kernel.ui.status.refresh();
+    }
+
+    // The first pass of a started or resumed run, sooner than the tick.
+    function wakeRun() {
+        S.kernel.scheduler.wake(MODULE_ID, 0);
     }
 
     // Drops this module's queued entries: action attempts and the attack pacer.
@@ -220,6 +226,7 @@
 
         var run = runFromTemplate(rec, chk, zoneId, w.wave - 1);
         store().begin(makeRequest(rec, count), run);
+        wakeRun();
         S.kernel.log('adventures', 'run started:', rec.label, 'x' + count, 'at wave', w.wave, 'of', waves,
             'zone', zoneId, '(' + warnings.length + ' warning(s))');
         notify('Run started at wave ' + w.wave + ' of ' + waves + ': ' + rec.label +
@@ -239,6 +246,7 @@
 
         var run = runFromTemplate(rec, chk, typeof zoneId === 'number' ? zoneId : null, 0, S.RunStep.Muster);
         store().begin(makeRequest(rec, count), run);
+        wakeRun();
         S.kernel.log('adventures', 'run started from home:', rec.label, 'x' + count, 'zone', zoneId,
             '(' + warnings.length + ' warning(s))');
         notify('Run started from home: ' + rec.label + ' ×' + count + '.' +
@@ -327,6 +335,7 @@
             return false;
         }
         if (!store().resume()) return false;
+        wakeRun();
         notify('Run resumed at ' + store().label() + ': ' + run.label + '.');
         return true;
     }

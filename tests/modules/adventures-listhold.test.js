@@ -541,7 +541,7 @@ t.test('anyAttacking: an incomplete read counts as not quiet', function () {
     assert.strictEqual(ld(w).anyAttacking(), true);
 });
 
-t.test('Settle: a flip inside the pass does not count as a settled tick', function () {
+t.test('Settle: a flip inside the pass does not start the quiet time', function () {
     var w = islandWorld();
     w.g2.state.grid = 55;
     w.sent.placeable = 3;
@@ -551,9 +551,9 @@ t.test('Settle: a flip inside the pass does not count as a settled tick', functi
     w.ghostAfterRead(w.g1);
     tick(w);
     assertStep(w, 'Settle');
-    assert.strictEqual(w.st.run().settled, 0);
+    assert.strictEqual(w.st.run().settledAt, null);
     tick(w);
-    assert.strictEqual(w.st.run().settled, 1);
+    assert.strictEqual(w.st.run().settledAt, w.t);
 });
 
 t.test('Validate: a flip before the check holds with no WaveFile pause', function () {

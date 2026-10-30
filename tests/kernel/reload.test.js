@@ -135,3 +135,21 @@ t.test('shutdown twice runs the teardown once', function () {
     }
     t.assert.strictEqual(n, 1);
 });
+
+t.test('reload clears a pending wake of the previous instance', function () {
+    var s = setup();
+    var prev = capturePrevious(s);
+    s.H.Steward.kernel.register({
+        id: 'waker', priority: s.H.Steward.Priority.Normal,
+        isReady: function () { return true; },
+        plan: function () {}
+    });
+    t.assert.strictEqual(prev.scheduler.wake('waker', 5000), true);
+    var wakeId = String(prev.scheduler.state.wakes.waker.timer);
+    t.assert.ok(s.timers.liveTimeouts().indexOf(wakeId) >= 0);
+
+    harness.reload(s.H);
+
+    t.assert.strictEqual(s.timers.liveTimeouts().indexOf(wakeId), -1);
+    t.assert.deepStrictEqual(Object.keys(prev.scheduler.state.wakes), []);
+});

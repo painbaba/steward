@@ -96,7 +96,7 @@ Steward.kernel.queue.action('collect', function (params) {
 });
 ```
 
-The queue drains FIFO with a default 1500 ms inter-action gap (overridable per action via `delay`). Actions never run faster than the kernel tick.
+The queue drains FIFO with a default 1500 ms inter-action gap (overridable per action via `delay`). The gap runs from the previous action, so an entry runs as soon as its delay has passed. The queue is drained at the end of each tick and of each module wake (see Module wake), not only on the tick.
 
 ### Module tagging and cancellation
 
@@ -125,7 +125,7 @@ This means each `plan()` call is *transactional*: the module declares its intent
 
 - A module's `plan()` enqueues N actions tagged with its id.
 - The scheduler skips that module on subsequent ticks until `queue.depthByModule(id) === 0` AND the action that's currently in-flight is not from that module.
-- When the queue drains (or `cancelByModule(id)` is called), the module becomes available again. Next tick, `isReady` is re-checked, then `plan()` runs.
+- When the queue drains (or `cancelByModule(id)` is called), the module becomes available again. Next tick or wake, `isReady` is re-checked, then `plan()` runs.
 
 Why this matters:
 
@@ -146,6 +146,22 @@ if (S.kernel.queue.isModuleBusy(mod.id)) continue;
 ```
 
 This contract supersedes any "auto-cancel-before-plan" idea — the same outcome is achieved more cleanly by simply not calling `plan()` until the previous cycle is done.
+
+## Module wake
+
+A module that knows its next step is due before the next tick can ask for one extra `plan()`:
+
+```js
+Steward.kernel.scheduler.wake(id, delayMs);   // true when a new wake was armed
+```
+
+- **Floor.** The delay is raised to `TIMEOUTS.WAKE_MIN_MS` (250 ms).
+- **One per module, earliest due time wins.** A later wake while one is pending returns `false`; a sooner one replaces it.
+- **Busy modules wait.** A wake on a busy module neither reads the game nor calls `isReady` or `plan()`. It re-checks after `TIMEOUTS.WAKE_BUSY_RECHECK_MS` (500 ms).
+- **No effect on the others.** A wake touches no tier cursor, no `tickCount` and no tick timer, so the other modules keep their turns.
+- **Not persistent.** `scheduler.stop()` clears pending wakes. Kernel Pause and script reload both reach it, so no wake survives them.
+- **Chains end by themselves.** A wake whose module reports `isReady` false stops there; the next tick restarts it. A `plan()` may call `wake` again to continue a chain.
+- **Unknown module or stopped scheduler:** `wake` returns `false` and arms nothing. Throws are swallowed as in a tick.
 
 ## Starvation, fairness, and back-pressure
 

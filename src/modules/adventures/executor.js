@@ -42,7 +42,7 @@
     // Starting values, to be tuned in game.
     var GATE_MISSING_MS   = 60000;     // a field general absent this long pauses
     var GATE_BUSY_MS      = 1800000;   // a field general busy this long pauses
-    var SETTLE_TICKS      = 2;         // settled plan() calls before a blocker pauses
+    var SETTLE_QUIET_MS   = 20000;     // island quiet this long before a blocker pauses
     var SETTLE_MAX_MS     = 900000;    // Settle gives up after this long
     var PACE_MS           = 500;       // pacer poll gap
 
@@ -244,9 +244,12 @@
                 pause(S.RunPause.GeneralMissing, who(l, inv) + ' is not on the island', l, inv);
                 return;
             }
+            // A walking general can show its new grid before it is idle, and
+            // any order to it would be refused, so being on the grid is not
+            // enough to hand over.
+            if (!(g.idle && !g.travelling) && !moving) moving = l;
             if (g.grid === l.grid) continue;
             moves.push(l);
-            if (!(g.idle && !g.travelling) && !moving) moving = l;
         }
         for (i = 0; i < w.stars.length; i++) {
             l = w.stars[i];
@@ -255,7 +258,7 @@
             g = gen(inv, l.key);
             if (!(g.idle && !g.travelling) && !moving) moving = l;
         }
-        if (!moves.length && !stars.length) {
+        if (!moves.length && !stars.length && !moving) {
             st().go(S.WaveStep.Supply, 'generals on their grids');
             return;
         }
@@ -375,10 +378,10 @@
             return;
         }
         r.blocker = blocked;
-        if (islandSettled()) r.settled++;
-        else r.settled = 0;
+        if (!islandSettled()) r.settledAt = null;
+        else if (r.settledAt === null) r.settledAt = now();
         st().save();
-        if (r.settled >= SETTLE_TICKS) {
+        if (r.settledAt !== null && now() - r.settledAt >= SETTLE_QUIET_MS) {
             st().pause(fromPosition ? S.RunPause.NotPlaceable : S.RunPause.Unreachable,
                 blocked.general + ': ' + blocked.reason + ' with no battle running and no quest waiting' +
                 ' (it may be a bug in the wave file)', { general: blocked.general, target: blocked.target });
@@ -731,7 +734,7 @@
         PACE_ACTION:       PACE_ACTION,
         GATE_MISSING_MS:   GATE_MISSING_MS,
         GATE_BUSY_MS:      GATE_BUSY_MS,
-        SETTLE_TICKS:      SETTLE_TICKS,
+        SETTLE_QUIET_MS:   SETTLE_QUIET_MS,
         SETTLE_MAX_MS:     SETTLE_MAX_MS,
         PACE_MS:           PACE_MS,
         check:             check,

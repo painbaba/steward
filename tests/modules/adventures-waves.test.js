@@ -203,7 +203,7 @@ t.test('state: a 0.6.0 run file loads Running at its step with the new fields de
             id: 42, templateId: 't1', label: 'Black Knights', adventure: 'BlackKnights', zoneId: ZONE,
             paths: ['C:/b/w1.txt'], loadoutPath: LOADOUT, loadoutKeys: { '1.1': true }, waveIndex: 0,
             step: 'WaveAttack', status: 'RunRunning', since: 7, rounds: 0, cycles: 0, settleFrom: null,
-            settled: 0, blocker: null, donors: [], lines: { '1.1': { sentAt: 9, seen: true, sentOnce: true } },
+            settled: 1, blocker: null, donors: [], lines: { '1.1': { sentAt: 9, seen: true, sentOnce: true } },
             pause: null
         }
     });
@@ -273,7 +273,22 @@ t.test('Position: only off-grid field lines get a move', function () {
     assert.strictEqual(stepName(w), 'Supply');
 });
 
-t.test('Position: not placeable goes to Settle without a send, settled twice pauses NotPlaceable', function () {
+t.test('Position: a general on its grid that is not idle yet holds the step; idle goes to Supply', function () {
+    var w = attackWorld();
+    w.g1.state.inUse = true;                       // shows the new grid while still walking
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    tick(w);
+    play(w);
+    tick(w);
+    assert.strictEqual(stepName(w), 'Position');
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    assert.strictEqual(w.orders.length, 0);
+    w.g1.state.inUse = false;
+    tick(w);
+    assert.strictEqual(stepName(w), 'Supply');
+});
+
+t.test('Position: not placeable goes to Settle without a send, quiet for 20 s pauses NotPlaceable', function () {
     var w = attackWorld();
     w.g2.state.grid = 55;
     w.sent.placeable = 3;
@@ -286,8 +301,10 @@ t.test('Position: not placeable goes to Settle without a send, settled twice pau
     assert.strictEqual(w.H.queued().length + w.pending.length, 0);
     tick(w);
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
-    assert.strictEqual(w.st.run().settled, 1);
-    tick(w);
+    assert.strictEqual(w.st.run().settledAt, w.t);
+    W.ticksFor(w, 10000);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    W.ticksFor(w, 10000);
     r = w.st.run();
     assert.strictEqual(r.status, w.S.RunStatus.Paused);
     assert.strictEqual(r.pause.reason, w.S.RunPause.NotPlaceable);
@@ -373,6 +390,10 @@ t.test('Supply: short on the whole island pauses TroopsShort listing units, with
     w.g2.state.army = {};
     startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Supply });
     tick(w);
+    // A short read inside the hold may be lag: nothing is paused yet.
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    w.t += w.S.modules.adventures.loader.READ_LAG_MS;
+    tick(w);
     var r = w.st.run();
     assert.strictEqual(r.status, w.S.RunStatus.Paused);
     assert.strictEqual(r.pause.reason, w.S.RunPause.TroopsShort);
@@ -388,11 +409,17 @@ t.test('Verify: a mismatch twice pauses LoadMismatch', function () {
     startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Load });
     tick(w);
     play(w);
+    // Inside the hold a mismatch neither retries nor counts.
+    tick(w);
+    assert.strictEqual(stepName(w), 'Verify');
+    assert.strictEqual(w.st.run().rounds, 0);
+    w.t += w.S.modules.adventures.loader.READ_LAG_MS;
     tick(w);
     assert.strictEqual(stepName(w), 'Load');
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
     tick(w);
     play(w);
+    w.t += w.S.modules.adventures.loader.READ_LAG_MS;
     tick(w);
     var r = w.st.run();
     assert.strictEqual(r.status, w.S.RunStatus.Paused);
@@ -416,7 +443,7 @@ t.test('Settle: unreachable while a fighter attacks stays in Settle', function (
     var r = w.st.run();
     assert.strictEqual(r.status, w.S.RunStatus.Running);
     assert.strictEqual(stepName(w), 'Settle');
-    assert.strictEqual(r.settled, 0);
+    assert.strictEqual(r.settledAt, null);
     assert.strictEqual(r.settleFrom, w.S.WaveStep.Reach);
 });
 
@@ -475,14 +502,16 @@ t.test('Settle: a path that appears goes back to Reach and on to Attack', functi
     assert.strictEqual(stepName(w), 'Attack');
 });
 
-t.test('Settle: still unreachable once settled pauses Unreachable naming line, general and target', function () {
+t.test('Settle: still unreachable after 20 s of quiet pauses Unreachable naming line, general and target', function () {
     var w = attackWorld();
     w.sent.pathLen = 0;
     startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Reach });
     tick(w);
     tick(w);
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
-    tick(w);
+    W.ticksFor(w, 10000);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    W.ticksFor(w, 10000);
     var r = w.st.run();
     assert.strictEqual(r.status, w.S.RunStatus.Paused);
     assert.strictEqual(r.pause.reason, w.S.RunPause.Unreachable);

@@ -186,3 +186,41 @@ t.test('enabled function is kept and needs onSelect', function () {
     t.assert.strictEqual(items[0].enabled, live);
     t.assert.strictEqual(items[1].enabled, false);
 });
+
+t.test('visible is kept for static and function barMenu items', function () {
+    var H = harness.boot({ sections: ['kernel'] });
+    var vis = function () { return true; };
+    var a = barSpec('a', [{ label: 'A', onSelect: function () {} }]);
+    a.barMenu.visible = vis;
+    var b = validSpec('b');
+    b.barMenu = { title: '~B~', items: function () { return []; }, visible: vis };
+    H.Steward.kernel.register(a);
+    H.Steward.kernel.register(b);
+    t.assert.strictEqual(H.Steward.kernel.registry.get('a').barMenu.visible, vis);
+    t.assert.strictEqual(H.Steward.kernel.registry.get('b').barMenu.visible, vis);
+});
+
+t.test('an absent visible is null', function () {
+    var H = harness.boot({ sections: ['kernel'] });
+    H.Steward.kernel.register(barSpec('a', [{ label: 'A', onSelect: function () {} }]));
+    var b = validSpec('b');
+    b.barMenu = { title: '~B~', items: function () { return []; } };
+    H.Steward.kernel.register(b);
+    t.assert.strictEqual(H.Steward.kernel.registry.get('a').barMenu.visible, null);
+    t.assert.strictEqual(H.Steward.kernel.registry.get('b').barMenu.visible, null);
+});
+
+t.test('a non-function visible is dropped with a warning', function () {
+    var H = harness.boot({ sections: ['kernel'] });
+    var a = barSpec('a', [{ label: 'A', onSelect: function () {} }]);
+    a.barMenu.visible = true;
+    H.clearLogs();
+    t.assert.strictEqual(H.Steward.kernel.register(a), true);
+    var m = H.Steward.kernel.registry.get('a').barMenu;
+    t.assert.ok(m);
+    t.assert.strictEqual(m.visible, null);
+    var warns = H.logs().filter(function (l) {
+        return l.level === 'warn' && l.category === 'registry';
+    });
+    t.assert.strictEqual(warns.length, 1);
+});

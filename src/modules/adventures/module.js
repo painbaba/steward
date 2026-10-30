@@ -17,8 +17,12 @@
  * Resume re-enters that step (a wave step re-enters the gate of its wave),
  * so nothing is skipped. The run state lives in its own steward file
  * (state.js), so a script reload or client restart picks it up again
- * without sending an order twice. The run shows in its own ~Run~ bar menu
- * (runmenu.js).
+ * without sending an order twice. The run shows in its own ~Adventures~ bar
+ * menu (runmenu.js) while it is Running or Paused.
+ *
+ * A run takes its next step as soon as the game allows: a pass that moved a
+ * step or left queue work asks the scheduler for another at once, a short
+ * wait polls every WAIT_MS, and a long wait stays on the scheduler tick.
  *
  * Each step names where it may run (home, the run's island, or anywhere),
  * and isReady is false on any other zone: nothing is sent and nothing
@@ -37,6 +41,8 @@
 
     if (!S.modules.adventures) S.modules.adventures = {};
 
+    var WAIT_MS = 2000;   // next pass while a short wait polls the game
+
     // Late-bound: state.js loads after this file in name order, and a script
     // reload may replace any part.
     function currentRun() {
@@ -48,6 +54,18 @@
         var run = currentRun();
         if (!run || run.status !== S.RunStatus.Running) return false;
         return S.modules.adventures.state.readyOn(run, ctx ? ctx.zone : null);
+    }
+
+    // The next pass, sooner than the tick when there is something to do. One pass
+    // stays one step, so each keeps its own turn and its own re-read of the game.
+    // A stopped chain costs nothing: the next tick picks the run up again. since
+    // counts too, because a step may re-enter itself with no queue work.
+    function nextPass(before, step, since) {
+        var r = currentRun();
+        if (!r || r.status !== S.RunStatus.Running) return;
+        var moved = r !== before || r.step !== step || r.since !== since;
+        if (moved || S.kernel.queue.isModuleBusy('adventures')) S.kernel.scheduler.wake('adventures', 0);
+        else if (!S.modules.adventures.state.waitsLong(r)) S.kernel.scheduler.wake('adventures', WAIT_MS);
     }
 
     // The watcher runs first so a finished quest is claimed before the
@@ -62,11 +80,13 @@
         }
         var run = currentRun();
         if (!run || !a.state) return;
-        var name = a.state.partOf(run.step);
+        var step = run.step;
+        var since = run.since;
+        var name = a.state.partOf(step);
         var part = name ? a[name] : null;
         if (part && part.plan) {
-            try { part.plan(); }
-            catch (e) { S.kernel.error('adventures', name + '.plan threw:', e); }
+            part.plan();
+            nextPass(run, step, since);
         }
     }
 
@@ -94,10 +114,14 @@
             }
         },
         barMenu: {
-            title: '~Run~',
+            title: '~Adventures~',
             // Late-bound for the same reason.
             items: function () {
                 return S.modules.adventures.runmenu ? S.modules.adventures.runmenu.items() : [];
+            },
+            visible: function () {
+                var m = S.modules.adventures.runmenu;
+                return m ? m.visible() : false;
             }
         }
     });

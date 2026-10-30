@@ -11,9 +11,10 @@
  * run.step holds either a wave step (S.WaveStep, run by the executor) or a
  * series step (S.RunStep). RUN_STEPS below is the one table of the series
  * steps: S.RunStep is filled from it, and which part runs a step, on which
- * zone it may run (partOf, readyOn) and how the steps fold into the rows of the
- * run menu (stepRows) are read from it, so no second list of steps exists to
- * drift from it. Wave steps always run on the run's island.
+ * zone it may run (partOf, readyOn), how the steps fold into the rows of the
+ * run menu (stepRows) and which steps wait long (waitsLong) are read from it,
+ * so no second list of steps exists to drift from it. Wave steps always run on
+ * the run's island.
  *
  * Storage: one file, <steward folder>/adventures/run.json, written whole
  * with S.kernel.files.writeText (temp file, then move). The file replaces
@@ -94,13 +95,14 @@
     var WAVES_GROUP = 'Waves';
     var WAVES_AFTER = 'Horseshoe';
 
-    // The series steps in run order: [key, value, where, group, row, option].
-    // The one table: S.RunStep, partOf(), readyOn() and the menu rows of
-    // stepRows() are all read from it. Steps next to each other with the same
-    // group and row fold into one menu row; option names what switches the
-    // row off.
+    // The series steps in run order: [key, value, where, group, row, option,
+    // long]. The one table: S.RunStep, partOf(), readyOn(), the menu rows of
+    // stepRows() and waitsLong() are all read from it. Steps next to each other
+    // with the same group and row fold into one menu row; option names what
+    // switches the row off. long marks a step that waits minutes for the game,
+    // where the 10 s tick looks often enough and a faster pass only adds reads.
     var RUN_STEPS = [
-        ['Muster',     'RunMuster',     HOME,      'Home',       'Check generals and files',   ''],
+        ['Muster',     'RunMuster',     HOME,      'Home',       'Check generals and files',   '', true],
         ['Validate',   'RunValidate',   HOME,      'Home',       'Check generals and files',   ''],
         ['Snapshot',   'RunSnapshot',   HOME,      'Home',       'Load generals',              ''],
         ['Supply',     'RunSupply',     HOME,      'Home',       'Load generals',              ''],
@@ -110,17 +112,17 @@
         ['StartMap',   'RunStartMap',   HOME,      'Home',       'Start map',                  ''],
         ['Depart',     'RunDepart',     HOME,      'Home',       'Send generals',              ''],
         ['Jump',       'RunJump',       ANY,       'Travel',     'Jump to the map',            ''],
-        ['Arrive',     'RunArrive',     ADVENTURE, 'Travel',     'Wait for all generals',      ''],
+        ['Arrive',     'RunArrive',     ADVENTURE, 'Travel',     'Wait for all generals',      '', true],
         ['StarAll',    'RunStarAll',    ADVENTURE, 'Travel',     'Send all to the star',       ''],
         ['Horseshoe',  'RunHorseshoe',  ADVENTURE, 'Travel',     'Horseshoe',                  OPT_HORSESHOE],
         ['PackStar',   'RunPackStar',   ADVENTURE, 'End of map', 'Place carriers',             ''],
         ['Pack',       'RunPack',       ADVENTURE, 'End of map', 'Pack leftover troops',       ''],
-        ['Clear',      'RunClear',      ADVENTURE, 'End of map', 'Wait for last quest',        ''],
+        ['Clear',      'RunClear',      ADVENTURE, 'End of map', 'Wait for last quest',        '', true],
         ['LastQuest',  'RunLastQuest',  ANY,       'End of map', 'Claim last quest and close', ''],
         ['Close',      'RunClose',      ANY,       'End of map', 'Claim last quest and close', ''],
         ['Recall',     'RunRecall',     ANY,       'Back home',  'Return home',                ''],
         ['JumpHome',   'RunJumpHome',   ANY,       'Back home',  'Return home',                ''],
-        ['ArriveHome', 'RunArriveHome', HOME,      'Back home',  'Return home',                ''],
+        ['ArriveHome', 'RunArriveHome', HOME,      'Back home',  'Return home',                '', true],
         ['Account',    'RunAccount',    HOME,      'Back home',  'Count lost troops',          OPT_RETRAIN],
         ['Population', 'RunPopulation', HOME,      'Back home',  'Retrain',                    OPT_RETRAIN],
         ['Retrain',    'RunRetrain',    HOME,      'Back home',  'Retrain',                    OPT_RETRAIN],
@@ -235,6 +237,15 @@
     function whereOf(step) {
         var i = stepIndex(step);
         return i < 0 ? 0 : RUN_STEPS[i][2];
+    }
+
+    // Whether the run waits for something that takes minutes, so the tick is
+    // enough to see it end. A blocker covers Settle and the wait for production
+    // at home, which are no long steps by themselves.
+    function waitsLong(r) {
+        if (r.blocker) return true;
+        var i = stepIndex(r.step);
+        return i >= 0 && RUN_STEPS[i][6] === true;
     }
 
     // The property of S.modules.adventures whose plan() runs the step, or
@@ -489,7 +500,8 @@
     // none). marks are the send markers of the series steps, in the shape of
     // lines. waitUntil is the deadline of the step that is waiting. popBase
     // is the free population read before the last population buff, so the
-    // next pass can tell whether the buff took effect.
+    // next pass can tell whether the buff took effect. settledAt is when the
+    // island was first seen quiet while Settle holds (null: not quiet).
     function newRun(start) {
         var s = isPlainObject(start) ? start : {};
         var t = clock();
@@ -512,7 +524,7 @@
             rounds:      0,
             cycles:      0,
             settleFrom:  null,
-            settled:     0,
+            settledAt:   null,
             blocker:     null,
             donors:      [],
             lines:       {},
@@ -642,7 +654,7 @@
         r.rounds     = count(v.rounds);
         r.cycles     = count(v.cycles);
         r.settleFrom = v.settleFrom === S.WaveStep.Position || v.settleFrom === S.WaveStep.Reach ? v.settleFrom : null;
-        r.settled    = count(v.settled);
+        r.settledAt  = num(v.settledAt);
         r.blocker    = normBlocker(v.blocker);
         r.donors     = strings(v.donors);
         r.lines      = normLines(v.lines);
@@ -738,7 +750,7 @@
             r.rounds = 0;
             rs.round = null;
         }
-        r.settled = 0;
+        r.settledAt = null;
         // Gate re-reads the wave file, so an edit made during a pause is seen.
         if (step === S.WaveStep.Gate) rs.cache = null;
         S.kernel.log('adventures', where + ': ' + stepName(from) + ' -> ' +
@@ -870,6 +882,9 @@
         save();
         notify('Adventure series done: ' + r.label + '.');
         refresh();
+        // This runs inside plan(), which may not rebuild a menu. A hide only moves
+        // the item out of the bar, so no rebuild comes from the tick.
+        syncMenu();
         return true;
     }
 
@@ -907,7 +922,8 @@
         isStep:        isStep,
         isWaveStep:    isWaveStep,
         partOf:        partOf,
-        readyOn:       readyOn
+        readyOn:       readyOn,
+        waitsLong:     waitsLong
     };
 
 }(Steward));

@@ -1,6 +1,6 @@
 'use strict';
 
-// The ~Run~ bar menu of the adventures module: the rows folded from the steps
+// The ~Adventures~ bar menu of the adventures module: the rows folded from the steps
 // table, their marks and details, the run controls and the row-set signature.
 // Runs are built in the home world of tests/stubs/adventures.js and put at the
 // step a test is about; the menu only reads memory, so no game traffic is
@@ -376,14 +376,17 @@ t.test('row count follows the wave count', function () {
     assert.strictEqual(four.rm.items().length, expected);
 });
 
-t.test('sync does not rebuild across a series, does on start and stop', function () {
+t.test('sync does not rebuild across a series, rebuilds on start and only hides on stop', function () {
     var w = setup({ none: true });
     var calls = [];
     w.S.kernel.ui = w.S.kernel.ui || {};
     w.S.kernel.ui.refreshBarMenu = function (id) { calls.push(id); return true; };
+    var shown = [];
+    w.S.kernel.ui.showBarMenu = function (id, show) { shown.push([id, show]); return true; };
     w.rm.items();
     assert.strictEqual(w.rm.sync(), false);
-    assert.strictEqual(calls.length, 0);
+    assert.strictEqual(calls.length, 0, 'no run builds nothing');
+    assert.deepStrictEqual(shown, [['adventures', false]]);
 
     var r = w.st.newRun({
         id: 42, templateId: 't1', label: 'Black Knights', adventure: 'BlackKnights', zoneId: null,
@@ -393,7 +396,9 @@ t.test('sync does not rebuild across a series, does on start and stop', function
         requested: w.t, finished: 0, closedAt: null };
     w.st.begin(req, r);
     assert.deepStrictEqual(calls, ['adventures'], 'start rebuilds');
+    assert.deepStrictEqual(shown[shown.length - 1], ['adventures', true], 'and shows');
     w.rm.items();
+    shown.length = 0;
 
     // The next run of the series has the same wave count.
     req.finished = 1;
@@ -402,9 +407,12 @@ t.test('sync does not rebuild across a series, does on start and stop', function
         paths: WAVES.slice(0, 2), loadoutPath: W.LOADOUT, loadoutKeys: {}, step: w.S.RunStep.Muster
     }));
     assert.strictEqual(calls.length, 1, 'a series rebuilds nothing');
+    assert.ok(shown.every(function (s) { return s[1] === true; }), 'and never hides');
 
+    shown.length = 0;
     w.st.clear();
-    assert.strictEqual(calls.length, 2, 'stop rebuilds');
+    assert.strictEqual(calls.length, 1, 'stop rebuilds nothing');
+    assert.deepStrictEqual(shown[shown.length - 1], ['adventures', false], 'it hides the entry');
 });
 
 t.test('no label throws with the core buffs throwing', function () {
