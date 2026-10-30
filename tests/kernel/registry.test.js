@@ -140,3 +140,49 @@ t.test('menuItems drops an item without label', function () {
     t.assert.strictEqual(out.length, 1);
     t.assert.strictEqual(out[0].label, 'Ok');
 });
+
+function barSpec(id, items) {
+    var s = validSpec(id);
+    s.barMenu = { title: '~Run~', items: items };
+    return s;
+}
+
+t.test('a valid barMenu appears in withBarMenu()', function () {
+    var H = harness.boot({ sections: ['kernel'] });
+    var fn = function () {};
+    H.Steward.kernel.register(validSpec('plain'));
+    H.Steward.kernel.register(menuSpec('onlymenu', [{ label: 'Open', onSelect: fn }]));
+    H.Steward.kernel.register(barSpec('withbar', [{ label: 'Open', onSelect: fn }]));
+    var list = H.Steward.kernel.registry.withBarMenu();
+    t.assert.strictEqual(list.length, 1);
+    t.assert.strictEqual(list[0].id, 'withbar');
+    t.assert.strictEqual(list[0].barMenu.title, '~Run~');
+    t.assert.strictEqual(list[0].barMenu.items[0].onSelect, fn);
+    t.assert.strictEqual(H.Steward.kernel.registry.withMenu().length, 1);
+});
+
+t.test('an invalid barMenu is dropped, the module registers', function () {
+    var H = harness.boot({ sections: ['kernel'] });
+    var noTitle = validSpec('a');
+    noTitle.barMenu = { items: [{ label: 'A', onSelect: function () {} }] };
+    var noItems = barSpec('b', [{ label: 'Broken' }]);
+    t.assert.strictEqual(H.Steward.kernel.register(noTitle), true);
+    t.assert.strictEqual(H.Steward.kernel.register(noItems), true);
+    t.assert.strictEqual(H.Steward.kernel.registry.get('a').barMenu, null);
+    t.assert.strictEqual(H.Steward.kernel.registry.get('b').barMenu, null);
+    t.assert.strictEqual(H.Steward.kernel.registry.withBarMenu().length, 0);
+});
+
+t.test('enabled function is kept and needs onSelect', function () {
+    var H = harness.boot({ sections: ['kernel'] });
+    var live = function () { return true; };
+    H.Steward.kernel.register(menuSpec('m', [
+        { label: 'Live', enabled: live, onSelect: function () {} },
+        { label: 'Live without select', enabled: live },
+        { label: 'Static off', enabled: false }
+    ]));
+    var items = H.Steward.kernel.registry.get('m').menu.items;
+    t.assert.strictEqual(items.length, 2);
+    t.assert.strictEqual(items[0].enabled, live);
+    t.assert.strictEqual(items[1].enabled, false);
+});

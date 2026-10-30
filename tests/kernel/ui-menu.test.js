@@ -5,15 +5,23 @@ var harness = require('../harness');
 
 // Native menu stubs with construction counters, so a test can tell an
 // in-place label update from a rebuild (which constructs new menus/items),
-// and a label-write counter (AIR leaks native objects on label writes).
+// and label/enabled write counters (AIR leaks native objects on writes).
 function installMenuStubs(H) {
     var air = H.ctx.air;
-    var counts = { menus: 0, items: 0, labelWrites: 0 };
+    var counts = { menus: 0, items: 0, labelWrites: 0, enabledWrites: 0 };
 
     function NativeMenu() {
         counts.menus++;
         this.items = [];
+        this.listeners = {};
     }
+    NativeMenu.prototype.addEventListener = function (type, fn) {
+        (this.listeners[type] = this.listeners[type] || []).push(fn);
+    };
+    NativeMenu.prototype.fire = function (type) {
+        var list = this.listeners[type] || [];
+        for (var i = 0; i < list.length; i++) list[i]();
+    };
     NativeMenu.prototype.addItem = function (item) { this.items.push(item); return item; };
     NativeMenu.prototype.removeItem = function (item) {
         var i = this.items.indexOf(item);
@@ -32,7 +40,7 @@ function installMenuStubs(H) {
         this._label = label; // direct: construction is not a label write
         this.isSeparator = !!isSep;
         this.name = '';
-        this.enabled = true;
+        this._enabled = true; // direct, like the label
         this.submenu = null;
         this.onSelect = null;
     }
@@ -40,13 +48,17 @@ function installMenuStubs(H) {
         get: function () { return this._label; },
         set: function (v) { this._label = v; counts.labelWrites++; }
     });
+    Object.defineProperty(NativeMenuItem.prototype, 'enabled', {
+        get: function () { return this._enabled; },
+        set: function (v) { this._enabled = v; counts.enabledWrites++; }
+    });
     NativeMenuItem.prototype.addEventListener = function (type, fn) {
         if (type === 'select') this.onSelect = fn;
     };
 
     air.NativeMenu = NativeMenu;
     air.NativeMenuItem = NativeMenuItem;
-    air.Event = { SELECT: 'select' };
+    air.Event = { SELECT: 'select', DISPLAYING: 'displaying', PREPARING: 'preparing' };
 
     var rootMenu = new NativeMenu();
     H.ctx.window = { nativeWindow: { menu: rootMenu } };
@@ -317,4 +329,265 @@ t.test('a throwing label function does not break the status tick', function () {
     t.assert.strictEqual(pause.label, 'Steward: ✕ Paused');
     var errors = s.H.logs().filter(function (l) { return l.level === 'error'; });
     t.assert.ok(errors.length >= 1);
+});
+
+// A module with a bar menu (its own root item beside ~Steward~) and a normal
+// submenu. All items read mutable state, so a test can change the text or the
+// flag and count which writes follow.
+function setupGamma(opts) {
+    opts = opts || {};
+    var H = harness.boot({ sections: ['kernel'] });
+    var M = installMenuStubs(H);
+    var g = { text: 'one', on: true, sub: true, boom: !!opts.boom, selected: 0,
+              itemsCalls: 0, passes: [], enabledPasses: [] };
+    if (opts.failTitle) {
+        var Real = H.ctx.air.NativeMenuItem;
+        H.ctx.air.NativeMenuItem = function (label, isSep) {
+            if (label === opts.failTitle) throw new Error('cannot build');
+            return new Real(label, isSep);
+        };
+    }
+    function register(Hx) {
+        Hx.Steward.kernel.register({
+            id:       'gamma',
+            priority: 'PriorityNormal',
+            isReady:  function () { return true; },
+            plan:     function () {},
+            menu: {
+                title: 'Gamma',
+                items: [{
+                    label: 'Act',
+                    enabled: function () { return g.sub; },
+                    onSelect: function () {}
+                }]
+            },
+            barMenu: {
+                title: '~Gamma~',
+                items: function () {
+                    g.itemsCalls++;
+                    return [
+                        { label: function (pass) { g.passes.push(pass); return g.text; }, enabled: false },
+                        { label: 'Go',
+                          enabled: function (pass) {
+                              g.enabledPasses.push(pass);
+                              if (g.boom) throw new Error('boom');
+                              return g.on;
+                          },
+                          onSelect: function () { g.selected++; } },
+                        { separator: true },
+                        { label: 'Head', enabled: false }
+                    ];
+                }
+            }
+        });
+        Hx.settings.write('gamma', { enabled: true });
+    }
+    if (opts.failTitle) {
+        H.Steward.kernel.register({
+            id:       'bad',
+            priority: 'PriorityNormal',
+            isReady:  function () { return true; },
+            plan:     function () {},
+            barMenu:  { title: opts.failTitle, items: [{ label: 'x', onSelect: function () {} }] }
+        });
+    }
+    register(H);
+    H.Steward.kernel.ui.init();
+    return { H: H, counts: M.counts, rootMenu: M.rootMenu, g: g, register: register };
+}
+
+function barEntry(rootMenu) { return rootMenu.getItemByName('StewardBarMenu_gamma'); }
+
+function countNamed(rootMenu, name) {
+    return rootMenu.items.filter(function (i) { return i.name === name; }).length;
+}
+
+// Idle state after the build: the writes of construction are not counted.
+function settleBar(s) {
+    s.H.Steward.kernel.ui.status.refresh();
+    s.counts.labelWrites = 0;
+    s.counts.enabledWrites = 0;
+}
+
+function errorLogs(s) {
+    return s.H.logs().filter(function (l) { return l.level === 'error'; });
+}
+
+t.test('bar menu is built right after the Steward root', function () {
+    var s = setupGamma();
+    var items = s.rootMenu.items;
+    var root = s.rootMenu.getItemByName('StewardRoot');
+    var bar = barEntry(s.rootMenu);
+    t.assert.ok(bar);
+    t.assert.strictEqual(bar.label, '~Gamma~');
+    t.assert.strictEqual(items.indexOf(bar), items.indexOf(root) + 1);
+    var inner = bar.submenu;
+    t.assert.strictEqual(inner.items.length, 4);
+    t.assert.strictEqual(inner.items[0].label, 'one');
+    t.assert.strictEqual(inner.items[0].enabled, false);
+    t.assert.strictEqual(inner.items[1].label, 'Go');
+    t.assert.strictEqual(inner.items[1].enabled, true);
+    t.assert.strictEqual(inner.items[2].isSeparator, true);
+    t.assert.strictEqual(inner.items[3].enabled, false);
+    inner.items[1].onSelect();
+    t.assert.strictEqual(s.g.selected, 1);
+});
+
+t.test('bar menu appears once after a rebuild', function () {
+    var s = setupGamma();
+    s.H.Steward.kernel.ui.init();
+    t.assert.strictEqual(countNamed(s.rootMenu, 'StewardBarMenu_gamma'), 1);
+    t.assert.strictEqual(countNamed(s.rootMenu, 'StewardRoot'), 1);
+    var H2 = harness.reload(s.H);
+    s.register(H2);
+    H2.Steward.kernel.ui.init();
+    t.assert.strictEqual(countNamed(s.rootMenu, 'StewardBarMenu_gamma'), 1);
+    t.assert.strictEqual(countNamed(s.rootMenu, 'StewardRoot'), 1);
+});
+
+t.test('status refresh writes no bar label and no enabled flag', function () {
+    var s = setupGamma();
+    settleBar(s);
+    s.g.text = 'two';
+    s.g.on = false;
+    for (var i = 0; i < 5; i++) s.H.Steward.kernel.ui.status.refresh();
+    t.assert.strictEqual(s.counts.labelWrites, 0);
+    t.assert.strictEqual(s.counts.enabledWrites, 0);
+    var inner = barEntry(s.rootMenu).submenu;
+    t.assert.strictEqual(inner.items[0].label, 'one');
+    t.assert.strictEqual(inner.items[1].enabled, true);
+});
+
+t.test('opening writes only the changed label', function () {
+    var s = setupGamma();
+    settleBar(s);
+    var inner = barEntry(s.rootMenu).submenu;
+    s.g.text = 'two';
+    inner.fire('preparing');
+    t.assert.strictEqual(s.counts.labelWrites, 1);
+    t.assert.strictEqual(s.counts.enabledWrites, 0);
+    t.assert.strictEqual(inner.items[0].label, 'two');
+    inner.fire('displaying');
+    t.assert.strictEqual(s.counts.labelWrites, 1);
+    t.assert.strictEqual(s.counts.enabledWrites, 0);
+});
+
+t.test('opening writes the enabled flag only on change', function () {
+    var s = setupGamma();
+    settleBar(s);
+    var inner = barEntry(s.rootMenu).submenu;
+    inner.fire('preparing');
+    t.assert.strictEqual(s.counts.enabledWrites, 0);
+    s.g.on = false;
+    inner.fire('preparing');
+    t.assert.strictEqual(s.counts.enabledWrites, 1);
+    t.assert.strictEqual(inner.items[1].enabled, false);
+    inner.fire('displaying');
+    t.assert.strictEqual(s.counts.enabledWrites, 1);
+    t.assert.strictEqual(s.counts.labelWrites, 0);
+});
+
+t.test('bar label functions share one pass per open', function () {
+    var s = setupGamma();
+    var inner = barEntry(s.rootMenu).submenu;
+    s.g.passes.length = 0;
+    s.g.enabledPasses.length = 0;
+    inner.fire('preparing');
+    inner.fire('displaying');
+    t.assert.strictEqual(s.g.passes.length, 2);
+    t.assert.strictEqual(s.g.enabledPasses.length, 2);
+    t.assert.strictEqual(s.g.passes[0], s.g.enabledPasses[0]);
+    t.assert.strictEqual(s.g.passes[1], s.g.enabledPasses[1]);
+    t.assert.notStrictEqual(s.g.passes[0], s.g.passes[1]);
+});
+
+t.test('a throwing enabled function gives a disabled item and an error log', function () {
+    var s = setupGamma({ boom: true });
+    var inner = barEntry(s.rootMenu).submenu;
+    t.assert.strictEqual(inner.items[1].enabled, false);
+    t.assert.ok(errorLogs(s).length >= 1);
+    s.H.clearLogs();
+    inner.fire('preparing');
+    t.assert.strictEqual(inner.items[1].enabled, false);
+    t.assert.ok(errorLogs(s).length >= 1);
+});
+
+t.test('refreshBarMenu rebuilds only the bar submenu', function () {
+    var s = setupGamma();
+    settleBar(s);
+    var root = s.rootMenu.getItemByName('StewardRoot');
+    var entry = barEntry(s.rootMenu);
+    var oldInner = entry.submenu;
+    var sub = root.submenu.getItemByName('StewardModuleMenu_gamma');
+    var subInner = sub.submenu;
+    var before = snapshot(s.counts);
+    t.assert.strictEqual(s.H.Steward.kernel.ui.refreshBarMenu('gamma'), true);
+    t.assert.strictEqual(s.counts.menus, before.menus + 1);
+    t.assert.strictEqual(s.counts.items, before.items + 4);
+    t.assert.strictEqual(s.rootMenu.getItemByName('StewardRoot'), root);
+    t.assert.strictEqual(barEntry(s.rootMenu), entry);
+    t.assert.notStrictEqual(entry.submenu, oldInner);
+    t.assert.strictEqual(sub.submenu, subInner);
+    t.assert.strictEqual(s.g.itemsCalls, 2);
+});
+
+t.test('the rebuilt menu refreshes on open', function () {
+    var s = setupGamma();
+    s.H.Steward.kernel.ui.refreshBarMenu('gamma');
+    settleBar(s);
+    var inner = barEntry(s.rootMenu).submenu;
+    s.g.text = 'three';
+    s.g.on = false;
+    inner.fire('preparing');
+    t.assert.strictEqual(inner.items[0].label, 'three');
+    t.assert.strictEqual(inner.items[1].enabled, false);
+    t.assert.strictEqual(s.counts.labelWrites, 1);
+    t.assert.strictEqual(s.counts.enabledWrites, 1);
+});
+
+t.test('refreshBarMenu returns false before init and for a module without a bar menu', function () {
+    var H = harness.boot({ sections: ['kernel'] });
+    installMenuStubs(H);
+    t.assert.strictEqual(H.Steward.kernel.ui.refreshBarMenu('gamma'), false);
+    var s = setupGamma();
+    t.assert.strictEqual(s.H.Steward.kernel.ui.refreshBarMenu('nope'), false);
+    var b = setupBeta();
+    t.assert.strictEqual(b.H.Steward.kernel.ui.refreshBarMenu('beta'), false);
+});
+
+t.test('a bar menu that fails to build leaves the Steward root in place', function () {
+    var s = setupGamma({ failTitle: '~Bad~' });
+    t.assert.ok(s.rootMenu.getItemByName('StewardRoot'));
+    t.assert.strictEqual(s.rootMenu.getItemByName('StewardBarMenu_bad'), null);
+    t.assert.ok(barEntry(s.rootMenu));
+    t.assert.ok(errorLogs(s).length >= 1);
+});
+
+t.test('open refresh is a no-op after dispose', function () {
+    var s = setupGamma();
+    settleBar(s);
+    var inner = barEntry(s.rootMenu).submenu;
+    s.H.Steward.kernel.ui.dispose();
+    s.g.text = 'late';
+    s.g.on = false;
+    s.g.passes.length = 0;
+    inner.fire('preparing');
+    inner.fire('displaying');
+    t.assert.strictEqual(s.g.passes.length, 0);
+    t.assert.strictEqual(s.counts.labelWrites, 0);
+    t.assert.strictEqual(s.counts.enabledWrites, 0);
+});
+
+t.test('enabled function on a submenu item refreshes on the tick', function () {
+    var s = setupGamma();
+    settleBar(s);
+    var root = s.rootMenu.getItemByName('StewardRoot');
+    var item = root.submenu.getItemByName('StewardModuleMenu_gamma').submenu.items[0];
+    t.assert.strictEqual(item.enabled, true);
+    s.g.sub = false;
+    s.H.Steward.kernel.ui.status.refresh();
+    t.assert.strictEqual(item.enabled, false);
+    t.assert.strictEqual(s.counts.enabledWrites, 1);
+    s.H.Steward.kernel.ui.status.refresh();
+    t.assert.strictEqual(s.counts.enabledWrites, 1);
 });

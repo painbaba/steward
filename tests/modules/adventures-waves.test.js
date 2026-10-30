@@ -170,6 +170,30 @@ t.test('state: every newRun field survives a fresh boot', function () {
     assert.strictEqual(loaded.waveIndex, 1);
 });
 
+t.test('state: a run file without retrain loads with retrain true', function () {
+    var w = attackWorld();
+    startRun(w, ['C:/b/w1.txt']);
+    assert.strictEqual(w.st.run().retrain, true, 'on by default');
+    w.st.save();
+    var data = JSON.parse(w.fs.disk[RUN_FILE]);
+    delete data.run.retrain;
+    writeJson(w.fs, RUN_FILE, data);
+    var w2 = world({ fs: w.fs });
+    w2.mod.boot();
+    assert.strictEqual(w2.st.run().retrain, true);
+});
+
+t.test('state: retrain false round trips through the file', function () {
+    var w = attackWorld();
+    var r = startRun(w, ['C:/b/w1.txt']);
+    r.retrain = false;
+    w.st.save();
+    assert.strictEqual(JSON.parse(w.fs.disk[RUN_FILE]).run.retrain, false);
+    var w2 = world({ fs: w.fs });
+    w2.mod.boot();
+    assert.strictEqual(w2.st.run().retrain, false);
+});
+
 t.test('state: a 0.6.0 run file loads Running at its step with the new fields defaulted', function () {
     var fs = world().fs;
     writeJson(fs, RUN_FILE, {

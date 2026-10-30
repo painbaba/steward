@@ -10,9 +10,10 @@
  *
  * run.step holds either a wave step (S.WaveStep, run by the executor) or a
  * series step (S.RunStep). RUN_STEPS below is the one table of the series
- * steps: S.RunStep is filled from it, and which part runs a step and on which
- * zone it may run (partOf, readyOn) are read from it, so no second list of
- * steps exists to drift from it. Wave steps always run on the run's island.
+ * steps: S.RunStep is filled from it, and which part runs a step, on which
+ * zone it may run (partOf, readyOn) and how the steps fold into the rows of the
+ * run menu (stepRows) are read from it, so no second list of steps exists to
+ * drift from it. Wave steps always run on the run's island.
  *
  * Storage: one file, <steward folder>/adventures/run.json, written whole
  * with S.kernel.files.writeText (temp file, then move). The file replaces
@@ -43,7 +44,8 @@
  * restarts the wave at Gate, an unknown status pauses the run, and a run
  * without its loadout keys pauses until the user stops and starts it again.
  * A file written before the series fields existed loads with their newRun
- * defaults (no snapshot, no marks, no runs finished).
+ * defaults (no snapshot, no marks, no runs finished). A run file without
+ * retrain reads as true, which is what such a run did.
  *
  * Resume re-enters the paused step with fresh rounds and a fresh start time,
  * after the user has looked at the game. A wave step restarts its wave at
@@ -80,34 +82,46 @@
     var ADVENTURE = 2;  // the run's adventure island is viewed
     var ANY = 3;        // any zone; the step itself handles where it is
 
-    // The series steps in run order: [key, value, where]. The one table:
-    // S.RunStep, partOf() and readyOn() are all read from it.
+    // The options a template can switch off, as named in the table below.
+    var OPT_HORSESHOE = 'horseshoe';
+    var OPT_RETRAIN = 'retrain';
+
+    // The waves are no series steps: they run between this row and the next
+    // one and show as one group of their own.
+    var WAVES_GROUP = 'Waves';
+    var WAVES_AFTER = 'Horseshoe';
+
+    // The series steps in run order: [key, value, where, group, row, option].
+    // The one table: S.RunStep, partOf(), readyOn() and the menu rows of
+    // stepRows() are all read from it. Steps next to each other with the same
+    // group and row fold into one menu row; option names what switches the
+    // row off.
     var RUN_STEPS = [
-        ['Muster',     'RunMuster',     HOME],
-        ['Validate',   'RunValidate',   HOME],
-        ['Snapshot',   'RunSnapshot',   HOME],
-        ['Supply',     'RunSupply',     HOME],
-        ['Unload',     'RunUnload',     HOME],
-        ['Load',       'RunLoad',       HOME],
-        ['Verify',     'RunVerify',     HOME],
-        ['StartMap',   'RunStartMap',   HOME],
-        ['Depart',     'RunDepart',     HOME],
-        ['Jump',       'RunJump',       ANY],
-        ['Arrive',     'RunArrive',     ADVENTURE],
-        ['StarAll',    'RunStarAll',    ADVENTURE],
-        ['Horseshoe',  'RunHorseshoe',  ADVENTURE],
-        ['PackStar',   'RunPackStar',   ADVENTURE],
-        ['Pack',       'RunPack',       ADVENTURE],
-        ['Clear',      'RunClear',      ADVENTURE],
-        ['LastQuest',  'RunLastQuest',  ANY],
-        ['Close',      'RunClose',      ANY],
-        ['Recall',     'RunRecall',     ANY],
-        ['JumpHome',   'RunJumpHome',   ANY],
-        ['ArriveHome', 'RunArriveHome', HOME],
-        ['Account',    'RunAccount',    HOME],
-        ['Population', 'RunPopulation', HOME],
-        ['Retrain',    'RunRetrain',    HOME],
-        ['Next',       'RunNext',       HOME]
+        ['Muster',     'RunMuster',     HOME,      'Home',       'Check generals and files',   ''],
+        ['Validate',   'RunValidate',   HOME,      'Home',       'Check generals and files',   ''],
+        ['Snapshot',   'RunSnapshot',   HOME,      'Home',       'Load generals',              ''],
+        ['Supply',     'RunSupply',     HOME,      'Home',       'Load generals',              ''],
+        ['Unload',     'RunUnload',     HOME,      'Home',       'Load generals',              ''],
+        ['Load',       'RunLoad',       HOME,      'Home',       'Load generals',              ''],
+        ['Verify',     'RunVerify',     HOME,      'Home',       'Load generals',              ''],
+        ['StartMap',   'RunStartMap',   HOME,      'Home',       'Start map',                  ''],
+        ['Depart',     'RunDepart',     HOME,      'Home',       'Send generals',              ''],
+        ['Jump',       'RunJump',       ANY,       'Travel',     'Jump to the map',            ''],
+        ['Arrive',     'RunArrive',     ADVENTURE, 'Travel',     'Wait for all generals',      ''],
+        ['StarAll',    'RunStarAll',    ADVENTURE, 'Travel',     'Send all to the star',       ''],
+        ['Horseshoe',  'RunHorseshoe',  ADVENTURE, 'Travel',     'Horseshoe',                  OPT_HORSESHOE],
+        ['PackStar',   'RunPackStar',   ADVENTURE, 'End of map', 'Place carriers',             ''],
+        ['Pack',       'RunPack',       ADVENTURE, 'End of map', 'Pack leftover troops',       ''],
+        ['Clear',      'RunClear',      ADVENTURE, 'End of map', 'Wait for last quest',        ''],
+        ['LastQuest',  'RunLastQuest',  ANY,       'End of map', 'Claim last quest and close', ''],
+        ['Close',      'RunClose',      ANY,       'End of map', 'Claim last quest and close', ''],
+        ['Recall',     'RunRecall',     ANY,       'Back home',  'Return home',                ''],
+        ['JumpHome',   'RunJumpHome',   ANY,       'Back home',  'Return home',                ''],
+        ['ArriveHome', 'RunArriveHome', HOME,      'Back home',  'Return home',                ''],
+        ['Account',    'RunAccount',    HOME,      'Back home',  'Count lost troops',          OPT_RETRAIN],
+        ['Population', 'RunPopulation', HOME,      'Back home',  'Retrain',                    OPT_RETRAIN],
+        ['Retrain',    'RunRetrain',    HOME,      'Back home',  'Retrain',                    OPT_RETRAIN],
+        ['Next',       'RunNext',       HOME,      'Back home',  'Next map',                   '']
     ];
 
     (function () {
@@ -206,12 +220,18 @@
         return isWaveStep(v) || isValue(S.RunStep, v);
     }
 
+    // The table index of a series step, or -1 for anything else.
+    function stepIndex(step) {
+        for (var i = 0; i < RUN_STEPS.length; i++) {
+            if (RUN_STEPS[i][1] === step) return i;
+        }
+        return -1;
+    }
+
     // The where of a series step, or 0 for anything else.
     function whereOf(step) {
-        for (var i = 0; i < RUN_STEPS.length; i++) {
-            if (RUN_STEPS[i][1] === step) return RUN_STEPS[i][2];
-        }
-        return 0;
+        var i = stepIndex(step);
+        return i < 0 ? 0 : RUN_STEPS[i][2];
     }
 
     // The property of S.modules.adventures whose plan() runs the step, or
@@ -242,6 +262,45 @@
 
     function stepName(step) {
         return nameOf(isWaveStep(step) ? S.WaveStep : S.RunStep, step);
+    }
+
+    // Where a step lies in run order, comparable across both step kinds: the
+    // table index, and for every wave step the point just after WAVES_AFTER.
+    // -1 for a value that is no step.
+    function position(step) {
+        if (isWaveStep(step)) return stepIndex(S.RunStep[WAVES_AFTER]) + 0.5;
+        return stepIndex(step);
+    }
+
+    // The menu rows in run order: { group, label, option, first, last, waves },
+    // where first and last are the positions the row covers. waves marks the
+    // one row that stands for all wave steps.
+    function stepRows() {
+        var rows = [];
+        for (var i = 0; i < RUN_STEPS.length; i++) {
+            var step = RUN_STEPS[i];
+            var prev = rows.length ? rows[rows.length - 1] : null;
+            if (prev && prev.group === step[3] && prev.label === step[4]) {
+                prev.last = i;
+            } else {
+                rows.push({ group: step[3], label: step[4], option: step[5], first: i, last: i, waves: false });
+            }
+            if (step[0] === WAVES_AFTER) {
+                var p = position(S.WaveStep.Gate);
+                rows.push({ group: WAVES_GROUP, label: '', option: '', first: p, last: p, waves: true });
+            }
+        }
+        return rows;
+    }
+
+    // Whether this run skips the stage of an option. A run started on an open
+    // map took no snapshot once it is past that step, so it retrains nothing.
+    function optionOff(r, option) {
+        if (option === OPT_HORSESHOE) return r.speedBuff === S.SpeedBuffChoice.None;
+        if (option === OPT_RETRAIN) {
+            return r.retrain === false || (!r.snapshot && position(r.step) > position(S.RunStep.Snapshot));
+        }
+        return false;
     }
 
     function now() {
@@ -276,6 +335,13 @@
         if (S.kernel.ui && S.kernel.ui.status && S.kernel.ui.status.refresh) S.kernel.ui.status.refresh();
     }
 
+    // The run menu's row set follows the run. Late-bound: state.js is the
+    // store and the menu view sits on top of it.
+    function syncMenu() {
+        var m = S.modules.adventures.runmenu;
+        if (m && m.sync) m.sync();
+    }
+
     // ---- Labels -----------------------------------------------------------
 
     function waveLabel() {
@@ -308,6 +374,11 @@
         return q && num(q.count) !== null && q.count >= 1 ? Math.floor(q.count) : 1;
     }
 
+    // The run and its place in the series, shared by both status texts.
+    function runPart(r) {
+        return r.label + ', run ' + (finishedRuns() + 1) + '/' + requestedRuns();
+    }
+
     function status() {
         var rs = current();
         var r = rs.run;
@@ -318,12 +389,21 @@
             return 'Requested: ' + rs.request.label;
         }
         if (r.status === S.RunStatus.Done) return 'Done: ' + r.label + ', ' + finishedRuns() + ' run(s)';
-        var where = r.label + ', run ' + (finishedRuns() + 1) + '/' + requestedRuns() + ', ' +
-            (isWaveStep(r.step) ? waveLabel() + ', ' : '') + stepName(r.step);
+        var where = runPart(r) + ', ' + (isWaveStep(r.step) ? waveLabel() + ', ' : '') + stepName(r.step);
         if (r.status === S.RunStatus.Paused) {
             return 'Paused: ' + where + ': ' + (r.pause ? r.pause.message : '');
         }
         return 'Running: ' + where;
+    }
+
+    // The short head of the run menu: the rows below it carry the step and
+    // the status line the pause reason.
+    function title() {
+        var rs = current();
+        var r = rs.run;
+        if (!r && !rs.request) return 'No run';
+        if (!r || r.status === S.RunStatus.Done) return status();
+        return (r.status === S.RunStatus.Paused ? 'Paused: ' : 'Running: ') + runPart(r);
     }
 
     // ---- File -------------------------------------------------------------
@@ -393,12 +473,12 @@
 
     // The only literal of the run object. start holds the facts fixed at
     // start: { id, templateId, label, adventure, zoneId, paths, loadoutPath,
-    // loadoutKeys, waveIndex, speedBuff } and optionally the first step
+    // loadoutKeys, waveIndex, speedBuff, retrain } and optionally the first step
     // (Gate when it is no step); every progress field takes its start value.
     // start may be omitted for the default shape.
     //
     // speedBuff is the template's choice as written and is resolved when it
-    // is used. snapshot is the army counted at home before loading (null:
+    // is used. retrain is true unless the start says false. snapshot is the army counted at home before loading (null:
     // none). marks are the send markers of the series steps, in the shape of
     // lines. waitUntil is the deadline of the step that is waiting. popBase
     // is the free population read before the last population buff, so the
@@ -418,6 +498,7 @@
             loadoutKeys: isPlainObject(s.loadoutKeys) ? s.loadoutKeys : {},
             waveIndex:   count(s.waveIndex),
             speedBuff:   str(s.speedBuff),
+            retrain:     s.retrain !== false,
             step:        isStep(s.step) ? s.step : S.WaveStep.Gate,
             status:      S.RunStatus.Running,
             since:       t,
@@ -539,7 +620,8 @@
             loadoutPath: str(v.loadoutPath),
             loadoutKeys: normKeys(v.loadoutKeys),
             waveIndex:   count(v.waveIndex),
-            speedBuff:   str(v.speedBuff)
+            speedBuff:   str(v.speedBuff),
+            retrain:     v.retrain !== false
         };
         var r = newRun(facts);
         var k;
@@ -736,6 +818,7 @@
         resetMemory(rs);
         save();
         refresh();
+        syncMenu();
         return true;
     }
 
@@ -748,6 +831,7 @@
         resetMemory(rs);
         save();
         refresh();
+        syncMenu();
         return true;
     }
 
@@ -804,11 +888,15 @@
         now:           now,
         nameOf:        nameOf,
         status:        status,
+        title:         title,
         finishedRuns:  finishedRuns,
         requestedRuns: requestedRuns,
         waveLabel:     waveLabel,
         label:         label,
         stepName:      stepName,
+        position:      position,
+        stepRows:      stepRows,
+        optionOff:     optionOff,
         isStep:        isStep,
         isWaveStep:    isWaveStep,
         partOf:        partOf,

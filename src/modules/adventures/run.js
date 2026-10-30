@@ -191,7 +191,8 @@
             loadoutKeys: chk.loadoutKeys,
             waveIndex:   waveIndex,
             step:        step,
-            speedBuff:   S.modules.adventures.templates.speedBuffChoice(rec)
+            speedBuff:   S.modules.adventures.templates.speedBuffChoice(rec),
+            retrain:     rec.retrain
         });
     }
 
@@ -274,9 +275,30 @@
         return false;
     }
 
+    // True while runs are requested beyond the one in progress, so there is
+    // a repetition left to end.
+    function repetitionLeft() {
+        return store().requestedRuns() > store().finishedRuns() + 1;
+    }
+
+    // Which commands apply now; each key is the name of its command. The
+    // conditions mirror the ones the commands guard themselves with, so a
+    // control this table enables is accepted by its command. The one exception
+    // is endRepetition: for a request without a run, this table is stricter
+    // and greys it out, while the command itself still accepts the call.
+    function can() {
+        var rs = store().current();
+        var status = rs.run ? rs.run.status : null;
+        return {
+            pause:         status === S.RunStatus.Running,
+            resume:        status === S.RunStatus.Paused,
+            endRepetition: !!rs.run && status !== S.RunStatus.Done && !!rs.request && repetitionLeft(),
+            stop:          !!rs.request || !!rs.run
+        };
+    }
+
     function pause() {
-        var run = store().run();
-        if (!run || run.status !== S.RunStatus.Running) {
+        if (!can().pause) {
             notify('No running adventure run to pause.');
             return false;
         }
@@ -311,12 +333,11 @@
             notify('No run requested.');
             return false;
         }
-        var finished = store().finishedRuns();
-        if (store().requestedRuns() <= finished + 1) {
+        if (!repetitionLeft()) {
             notify('This is the last run requested; there is no repetition to end.');
             return false;
         }
-        req.count = finished + 1;
+        req.count = store().finishedRuns() + 1;
         req.ended = true;
         store().save();
         S.kernel.log('adventures', 'run repetition ended:', req.label);
@@ -328,11 +349,11 @@
     // Drops the request and the run. Queued entries go first, so no attempt
     // or attack is sent after the state is gone.
     function stop() {
-        var rs = store().current();
-        if (!rs.request && !rs.run) {
+        if (!can().stop) {
             notify('No run requested.');
             return false;
         }
+        var rs = store().current();
         var label = rs.run ? rs.run.label : rs.request.label;
         cancelQueued();
         store().clear();
@@ -347,6 +368,7 @@
         countFrom:     countFrom,
         waveFrom:      waveFrom,
         available:     available,
+        can:           can,
         start:         start,
         pause:         pause,
         resume:        resume,

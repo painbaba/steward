@@ -68,6 +68,21 @@
         };
     }
 
+    // The run commands, in menu order. The one place their labels and run.js
+    // names are written; the Run bar menu reads the same table.
+    var COMMANDS = [
+        { label: 'Pause run',      name: 'pause' },
+        { label: 'Resume run',     name: 'resume' },
+        { label: 'End repetition', name: 'endRepetition' },
+        { label: 'Stop run',       name: 'stop' }
+    ];
+
+    function commandItems() {
+        var out = [];
+        for (var i = 0; i < COMMANDS.length; i++) out.push(command(COMMANDS[i].label, COMMANDS[i].name));
+        return out;
+    }
+
     function items() {
         var recs = records();
         lastSignature = signature(recs);
@@ -87,12 +102,10 @@
                 },
                 enabled: false
             },
-            command('Pause run', 'pause'),
-            command('Resume run', 'resume'),
-            command('End repetition', 'endRepetition'),
-            command('Stop run', 'stop'),
             { separator: true }
         ];
+        // After the status line (index 2), before the closing separator.
+        list.splice.apply(list, [3, 0].concat(commandItems()));
 
         if (recs.length === 0) {
             list.push({ label: 'No templates yet', enabled: false });
@@ -112,7 +125,9 @@
     S.modules.adventures.menu = {
         items:     items,
         sync:      sync,
-        signature: signature
+        signature: signature,
+        command:   command,
+        COMMANDS:  COMMANDS
     };
 
 }(Steward));

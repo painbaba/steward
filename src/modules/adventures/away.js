@@ -238,9 +238,10 @@
 
     // ---- Horseshoe ----------------------------------------------------------
 
-    // Optional: a missing horseshoe or a refused one only warns. It is sent
-    // at most once per run; a marker that went out (sentOnce survives a
-    // Resume) or was seen moves on without a second send.
+    // Optional: a missing horseshoe or a refused one only warns, and a run
+    // without one logs that and moves on. It is sent at most once per run; a
+    // marker that went out (sentOnce survives a Resume) or was seen moves on
+    // without a second send.
     function horseshoe(r) {
         var gate = 'to wave ' + (r.waveIndex + 1);
         var round = ld().currentRound(r, S.RunStep.Horseshoe);
@@ -264,7 +265,8 @@
         var name = S.modules.adventures.templates.resolveSpeedBuff({ speedBuff: r.speedBuff },
             S.core.buffs.speedBuffs());
         if (name === null) {
-            warn('no horseshoe in stock (or None chosen)');
+            if (r.speedBuff === S.SpeedBuffChoice.None) log('horseshoe not used');
+            else warn('no horseshoe in stock');
             st().go(S.WaveStep.Gate, gate);
             return;
         }

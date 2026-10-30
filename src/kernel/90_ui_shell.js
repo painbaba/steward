@@ -9,6 +9,9 @@
  *      dashboard remains the single configuration surface. Module
  *      submenus are built at init; a module may rebuild its own inner
  *      submenu on a user action, and label functions refresh in place.
+ *      A module may also declare a `barMenu`: one more root item right
+ *      after ~Steward~, built the same way but refreshed when it opens
+ *      instead of on the status tick.
  *
  *   2. Dashboard modal — autoTSO-mirror layout:
  *        ┌──────────────────────────────────┐
@@ -59,13 +62,23 @@
     // unchanged text is never rewritten. Kept in JS because NativeMenuItem is
     // sealed (no expando) and reading item.label back crosses the AIR bridge.
     var lastLabels = {};
+    // The same per slot for the enabled flag of items with a live `enabled`
+    // function, for the same reason.
+    var lastEnabled = {};
 
     // Module submenus: the ~Steward~ entry item per module id, so one
     // module's inner submenu can be swapped without touching the rest, and
-    // per module id the items whose label is a function, as
-    // [{ slot, item, fn }], refreshed in place on the status tick.
+    // per module id the items whose label or enabled flag is a function, as
+    // [{ slot, item, fn, enabledFn }], refreshed in place on the status tick.
     var moduleEntries = {};
     var moduleLabels = {};
+
+    // Bar menus: the root entry item and the same records per module id.
+    // Their records are kept apart from moduleLabels so the status tick
+    // never reads or writes them.
+    var BAR_PREFIX = 'StewardBarMenu_';
+    var barEntries = {};
+    var barLabels = {};
 
     var dashboard = {
         modal:     null,
@@ -125,6 +138,13 @@
         try { item.label = text; } catch (e) { /* invalidated */ }
     }
 
+    // The enabled-flag twin of writeLabel.
+    function writeEnabled(slot, item, on) {
+        if (!item || lastEnabled[slot] === on) return;
+        lastEnabled[slot] = on;
+        try { item.enabled = on; } catch (e) { /* invalidated */ }
+    }
+
     // Quick-toggle label, or null when the module has no `enabled` flag (no
     // toggle entry exists for it). Shared by the build and the in-place refresh.
     function toggleLabel(mod) {
@@ -161,15 +181,20 @@
             // Fresh items carry their constructor labels; the cache restarts
             // from those so the next tick does not rewrite identical text.
             lastLabels = {};
+            lastEnabled = {};
             moduleEntries = {};
             moduleLabels = {};
+            barEntries = {};
+            barLabels = {};
             var attach = attachContainer();
             var container = attach.container;
             removeIfPresent(container, 'StewardRoot');
+            removeBarMenus(container);
             // If mode flipped between rebuilds, also clean the *other* container
             // so we don't leave orphan entries behind.
             if (attach.mode === 'tools') {
                 removeIfPresent(window.nativeWindow.menu, 'StewardRoot');
+                removeBarMenus(window.nativeWindow.menu);
             }
 
             var root = new air.NativeMenuItem('~Steward~');
@@ -215,6 +240,7 @@
 
             root.submenu = sub;
             container.addItem(root);
+            appendBarMenus(container);
             S.kernel.debug('ui', 'menu rebuilt — mode:', attach.mode);
             return true;
         } catch (e) {
@@ -260,9 +286,10 @@
     }
 
     // One submenu per module that declares a `menu` in its register spec,
-    // built at init. Actionable items stay enabled (the module reports
-    // "nothing to show" itself); after init only label functions change, in
-    // place, unless the module rebuilds its own submenu on a user action.
+    // built at init. An actionable item stays enabled (the module reports
+    // "nothing to show" itself) unless its `enabled` is a function; after
+    // init only label and enabled functions change, in place, unless the
+    // module rebuilds its own submenu on a user action.
     function appendModuleMenus(sub) {
         try {
             if (!S.kernel.registry || typeof S.kernel.registry.withMenu !== 'function') return;
@@ -278,16 +305,76 @@
     function appendOneModuleMenu(sub, mod) {
         var entry = new air.NativeMenuItem(mod.menu.title);
         entry.name = 'StewardModuleMenu_' + mod.id;
-        entry.submenu = buildModuleInner(mod);
+        entry.submenu = buildModuleInner(mod, mod.menu, mod.id, moduleLabels);
         moduleEntries[mod.id] = entry;
         sub.addItem(entry);
     }
 
-    // The module's item list: a static array was normalised at register
+    function barModules() {
+        if (!S.kernel.registry || typeof S.kernel.registry.withBarMenu !== 'function') return [];
+        return S.kernel.registry.withBarMenu();
+    }
+
+    function removeBarMenus(menu) {
+        var mods = barModules();
+        for (var i = 0; i < mods.length; i++) {
+            removeIfPresent(menu, BAR_PREFIX + mods[i].id);
+        }
+    }
+
+    // One root item per module that declares a `barMenu`, after ~Steward~.
+    // Each is guarded on its own: a bad bar menu must never fail the
+    // ~Steward~ build, which has already been added at this point.
+    function appendBarMenus(container) {
+        var mods = barModules();
+        for (var i = 0; i < mods.length; i++) {
+            try {
+                var entry = new air.NativeMenuItem(mods[i].barMenu.title);
+                entry.name = BAR_PREFIX + mods[i].id;
+                entry.submenu = buildBarInner(mods[i]);
+                barEntries[mods[i].id] = entry;
+                container.addItem(entry);
+            } catch (e) {
+                S.kernel.error('ui', mods[i].id, 'bar menu failed:', e);
+            }
+        }
+    }
+
+    function buildBarInner(mod) {
+        var inner = buildModuleInner(mod, mod.barMenu, mod.id + '#bar', barLabels);
+        addOpenRefresh(mod, inner);
+        return inner;
+    }
+
+    // Refreshes a bar menu's records when it opens. Neither open event is
+    // proven to fire in this host, so both are registered; the second pass
+    // writes nothing because writes happen only on change. A host without
+    // either keeps the state of the last build. An open menu shows the state
+    // at opening, which is safe because every command guards itself.
+    function addOpenRefresh(mod, inner) {
+        function onOpen() {
+            if (disposed) return;
+            try {
+                var current = S.kernel.registry.get(mod.id);
+                var recs = barLabels[mod.id];
+                if (current && recs) refreshRecords(current, recs);
+            } catch (e) {
+                S.kernel.error('ui', mod.id, 'bar menu refresh threw:', e);
+            }
+        }
+        var types = [air.Event.PREPARING, air.Event.DISPLAYING];
+        for (var i = 0; i < types.length; i++) {
+            if (typeof types[i] === 'undefined') continue;
+            try { inner.addEventListener(types[i], onOpen); }
+            catch (e) { /* ignore */ }
+        }
+    }
+
+    // The menu's item list: a static array was normalised at register
     // time; an `items` function is evaluated now and its result goes
     // through the same registry normalisation.
-    function moduleMenuItems(mod) {
-        var items = mod.menu.items;
+    function moduleMenuItems(mod, menu) {
+        var items = menu.items;
         if (typeof items !== 'function') return items;
         var raw;
         try { raw = items(); }
@@ -308,6 +395,16 @@
         }
     }
 
+    // Value of an enabled function. A throwing one must not break the menu
+    // build or a refresh; the item goes disabled, the safe side for a control.
+    function enabledValue(mod, fn, pass) {
+        try { return fn(pass) === true; }
+        catch (e) {
+            S.kernel.error('ui', mod.id, 'menu enabled threw:', e);
+            return false;
+        }
+    }
+
     function addModuleSelect(mod, item, onSelect) {
         try {
             item.addEventListener(air.Event.SELECT, function () {
@@ -317,22 +414,29 @@
         } catch (e) { /* ignore */ }
     }
 
-    // Builds the module's inner NativeMenu. Its label-function slots are
-    // dropped from the label cache first and then seeded with the
-    // constructor text, so the new items are not rewritten on the next tick
-    // and no stale text from the previous items suppresses a needed write.
-    function buildModuleInner(mod) {
-        var prefix = 'mod:' + mod.id + ':';
+    function dropSlots(cache, prefix) {
         var stale = [];
-        var key;
-        for (key in lastLabels) {
-            if (lastLabels.hasOwnProperty(key) && key.indexOf(prefix) === 0) stale.push(key);
+        var slot;
+        for (slot in cache) {
+            if (cache.hasOwnProperty(slot) && slot.indexOf(prefix) === 0) stale.push(slot);
         }
-        for (var n = 0; n < stale.length; n++) delete lastLabels[stale[n]];
+        for (var n = 0; n < stale.length; n++) delete cache[stale[n]];
+    }
+
+    // Builds an inner NativeMenu from `menu`. `key` names its slots (the ':'
+    // after it keeps a module's submenu and bar menu slots disjoint) and
+    // `store` receives its records. Its slots are dropped from both caches
+    // first and then seeded with the constructor values, so the new items are
+    // not rewritten on the next refresh and no stale value from the previous
+    // items suppresses a needed write.
+    function buildModuleInner(mod, menu, key, store) {
+        var prefix = 'mod:' + key + ':';
+        dropSlots(lastLabels, prefix);
+        dropSlots(lastEnabled, prefix);
 
         var records = [];
         var pass = {};
-        var items = moduleMenuItems(mod);
+        var items = moduleMenuItems(mod, menu);
         var inner = new air.NativeMenu();
         for (var k = 0; k < items.length; k++) {
             var spec = items[k];
@@ -342,40 +446,72 @@
             }
             var isFn = typeof spec.label === 'function';
             var text = isFn ? labelText(mod, spec.label, pass) : spec.label;
+            var liveOn = typeof spec.enabled === 'function';
+            var on = liveOn ? enabledValue(mod, spec.enabled, pass) : spec.enabled !== false;
             var item = new air.NativeMenuItem(text);
-            item.enabled = spec.enabled !== false;
+            item.enabled = on;
             if (spec.onSelect) addModuleSelect(mod, item, spec.onSelect);
-            if (isFn) {
-                lastLabels[prefix + k] = text;
-                records.push({ slot: prefix + k, item: item, fn: spec.label });
+            if (isFn) lastLabels[prefix + k] = text;
+            if (liveOn) lastEnabled[prefix + k] = on;
+            if (isFn || liveOn) {
+                records.push({
+                    slot:      prefix + k,
+                    item:      item,
+                    fn:        isFn ? spec.label : null,
+                    enabledFn: liveOn ? spec.enabled : null
+                });
             }
             inner.addItem(item);
         }
-        moduleLabels[mod.id] = records;
+        store[mod.id] = records;
         return inner;
     }
 
-    // Rebuilds one module's inner submenu when its item set changed and
-    // assigns it to the existing entry. Each rebuild leaks native objects
-    // in AIR, so modules call this on a user action only, never on a timer.
+    // Rebuilds a submenu when its item set changed and assigns it to the
+    // existing entry. Each rebuild leaks native objects in AIR, so modules
+    // call this on a user action only, never on a timer.
+    function swapSubmenu(what, id, entry, build) {
+        try {
+            entry.submenu = build();
+            S.kernel.debug('ui', what, 'rebuilt:', id);
+            return true;
+        } catch (e) {
+            S.kernel.error('ui', what, 'rebuild failed:', id, e);
+            return false;
+        }
+    }
+
     function refreshModuleMenu(id) {
         if (!initialized || disposed) return false;
         var mod = S.kernel.registry.get(id);
         var entry = moduleEntries[id];
         if (!mod || !mod.menu || !entry) return false;
-        try {
-            entry.submenu = buildModuleInner(mod);
-            S.kernel.debug('ui', 'module menu rebuilt:', id);
-            return true;
-        } catch (e) {
-            S.kernel.error('ui', 'refreshModuleMenu failed:', id, e);
-            return false;
+        return swapSubmenu('module menu', id, entry, function () {
+            return buildModuleInner(mod, mod.menu, mod.id, moduleLabels);
+        });
+    }
+
+    function refreshBarMenu(id) {
+        if (!initialized || disposed) return false;
+        var mod = S.kernel.registry.get(id);
+        var entry = barEntries[id];
+        if (!mod || !mod.barMenu || !entry) return false;
+        return swapSubmenu('bar menu', id, entry, function () {
+            return buildBarInner(mod);
+        });
+    }
+
+    // Re-evaluates a module's records and writes only what changed. One
+    // fresh `pass` per refresh lets its functions share an expensive read.
+    function refreshRecords(mod, recs) {
+        var pass = {};
+        for (var i = 0; i < recs.length; i++) {
+            var rec = recs[i];
+            if (rec.fn) writeLabel(rec.slot, rec.item, labelText(mod, rec.fn, pass));
+            if (rec.enabledFn) writeEnabled(rec.slot, rec.item, enabledValue(mod, rec.enabledFn, pass));
         }
     }
 
-    // Re-evaluates every module label function and writes only changed
-    // text. One fresh `pass` per module per refresh lets a module's label
-    // functions share an expensive read.
     function refreshModuleLabels() {
         if (!initialized) return;
         try {
@@ -383,11 +519,7 @@
                 if (!moduleLabels.hasOwnProperty(id)) continue;
                 var mod = S.kernel.registry.get(id);
                 if (!mod) continue;
-                var recs = moduleLabels[id];
-                var pass = {};
-                for (var i = 0; i < recs.length; i++) {
-                    writeLabel(recs[i].slot, recs[i].item, labelText(mod, recs[i].fn, pass));
-                }
+                refreshRecords(mod, moduleLabels[id]);
             }
         } catch (e) {
             S.kernel.error('ui', 'refreshModuleLabels threw:', e);
@@ -1046,6 +1178,7 @@
     S.kernel.ui.toggle           = togglePause;
     S.kernel.ui.isPaused         = isPaused;
     S.kernel.ui.refreshModuleMenu = refreshModuleMenu;
+    S.kernel.ui.refreshBarMenu   = refreshBarMenu;
     S.kernel.ui.notify           = notify;
     S.kernel.ui.seedPaused       = function (v) { paused = v === true; refreshStatus(); };
 

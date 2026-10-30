@@ -235,7 +235,9 @@ S.kernel.register({
 });
 ```
 
-Menu items come in three shapes: an action `{ label, onSelect }`, a separator `{ separator: true }` and a display-only line `{ label, enabled: false }` (no `onSelect`). Actionable items are always enabled, because the menu is not rebuilt on a timer and an enabled flag would go stale; an item that depends on game state reports that itself when selected, as the event calculator's estimate alert does.
+Menu items come in three shapes: an action `{ label, onSelect }`, a separator `{ separator: true }` and a display-only line `{ label, enabled: false }` (no `onSelect`). An action may also set `enabled` to a function `enabled(pass)`, beside `onSelect`. The kernel evaluates it with the labels and writes the flag only when it changes. Without a function, actionable items stay enabled, and an item that depends on game state reports that itself when selected, as the event calculator's estimate alert does.
+
+A module may declare `barMenu: { title, items }` to add a root item beside `~Steward~`, validated like its submenus. It is refreshed when the bar opens and never on the tick, so its labels and enabled flags are current at each open. Rebuild its items with `S.kernel.ui.refreshBarMenu(id)` only on a user action, never from the tick. In linear menu style it lands in Tools with `~Steward~`. `src/modules/adventures/runmenu.js` is the example.
 
 `label` may be a function `label(pass)` returning the text. The kernel re-evaluates label functions on the 5 s status tick and writes only text that changed, in place. `pass` is one plain object shared by all label functions of the module within a single pass, so an expensive read can be cached on it (`pass.maps = ...`) instead of repeated per item.
 

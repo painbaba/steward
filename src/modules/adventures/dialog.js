@@ -51,12 +51,6 @@
         if (m && m.sync) m.sync();
     }
 
-    function fileName(path) {
-        var p = String(path || '');
-        var cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
-        return cut === -1 ? p : p.substring(cut + 1);
-    }
-
     function span(cls, text) {
         return '<span class="' + cls + '">' + esc(text) + '</span>';
     }
@@ -154,7 +148,7 @@
             return;
         }
         S.kernel.ui.ensureStyle(MODAL_ID);
-        state = { view: 'list', draft: null, confirmDelete: null, error: null, labelInput: null };
+        state = { view: 'list', draft: null, confirmDelete: null, error: null, labelInput: null, lastBuff: null };
         try {
             modal = new Modal(MODAL_ID, TITLE, true);
             modal.create();
@@ -176,7 +170,9 @@
 
     function newTemplate() {
         state.draft = T().normalize({});
-        state.draft.speedBuff = T().initialSpeedBuff(state.draft, S.core.buffs.speedBuffs());
+        // A new template starts with the horseshoe on, even with none in stock.
+        state.draft.speedBuff = T().enabledSpeedBuff(null, S.core.buffs.speedBuffs());
+        state.lastBuff = null;
         state.view = 'edit';
         render();
     }
@@ -190,6 +186,7 @@
         }
         state.draft = rec;
         state.draft.speedBuff = T().initialSpeedBuff(rec, S.core.buffs.speedBuffs());
+        state.lastBuff = null;
         state.view = 'edit';
         render();
     }
@@ -214,6 +211,7 @@
         var buffName = T().resolveSpeedBuff(rec, buffs);
         var buffText = buffName === null ? 'No horseshoe'
             : 'Horseshoe: ' + T().buffLabel(buffs, buffName);
+        if (rec.retrain === false) buffText += ', no retrain';
         var adventure = S.core.adventures.label(rec.adventure) || rec.adventure;
         var $btns = $('<span>');
         $btns.append(btn('Edit', act(function () { editTemplate(rec.id); })));
@@ -390,7 +388,7 @@
                 var path = draft.waves[idx];
                 var $li = $('<li>', { 'data-idx': String(idx) });
                 $li.append($('<span>', { 'class': 'steward-wave-no' }).text('Wave ' + (idx + 1) + '  '));
-                $li.append($('<span>', { title: path }).text(fileName(path)));
+                $li.append($('<span>', { title: path }).text(T().fileName(path)));
                 $li.append($('<span>').html('  ' + waveCounts(path)));
                 if (!sortable) {
                     $li.append(document.createTextNode(' '));
@@ -472,7 +470,7 @@
 
         var $lo = $('<span>');
         if (draft.loadout) {
-            $lo.append($('<span>', { title: draft.loadout }).text(fileName(draft.loadout)));
+            $lo.append($('<span>', { title: draft.loadout }).text(T().fileName(draft.loadout)));
             $lo.append(document.createTextNode(' '));
         }
         $lo.append(btn('Choose…', act(pickLoadout)));
@@ -490,20 +488,41 @@
         $c.append(h.gridRow([[12, btn('Add waves…', act(pickWaves))]]));
 
         var buffs = S.core.buffs.speedBuffs();
-        var options = t.speedBuffOptions(buffs, draft.speedBuff);
-        var $dd = h.dropdown(options, {
-            selected: draft.speedBuff,
-            onChange: function (v) {
-                draft.speedBuff = v;
+        var useShoe = draft.speedBuff !== S.SpeedBuffChoice.None;
+        // The re-render shows the switch off again when no buff exists at all,
+        // and turning it back on restores the buff it held.
+        $c.append(h.formRow('Use horseshoe', h.toggle({
+            checked: useShoe,
+            onChange: function (on) {
+                if (on) {
+                    draft.speedBuff = t.enabledSpeedBuff(state.lastBuff, buffs);
+                } else {
+                    state.lastBuff = draft.speedBuff;
+                    draft.speedBuff = S.SpeedBuffChoice.None;
+                }
                 render();
             }
-        });
-        $c.append(h.formRow('Horseshoe', $dd));
-        for (var i = 0; i < options.length; i++) {
-            if (options[i].value === draft.speedBuff && options[i].warn) {
-                $c.append(h.gridRow([[12, span('steward-warn', 'None in stock: a run would skip the horseshoe')]]));
+        })));
+        if (useShoe) {
+            var options = t.speedBuffOptions(buffs, draft.speedBuff);
+            var $dd = h.dropdown(options, {
+                selected: draft.speedBuff,
+                onChange: function (v) {
+                    draft.speedBuff = v;
+                    render();
+                }
+            });
+            $c.append(h.formRow('Horseshoe', $dd));
+            for (var i = 0; i < options.length; i++) {
+                if (options[i].value === draft.speedBuff && options[i].warn) {
+                    $c.append(h.gridRow([[12, span('steward-warn', 'None in stock: a run would skip the horseshoe')]]));
+                }
             }
         }
+        $c.append(h.formRow('Retrain lost troops', h.toggle({
+            checked: draft.retrain !== false,
+            onChange: function (on) { draft.retrain = on; }
+        })));
 
         var $btns = $('<span>');
         $btns.append(btn('Save', function () { saveDraft($label); }));

@@ -37,21 +37,31 @@
  * Item shapes:
  *
  *   { separator: true }                      // divider line
- *   { label: 'Do it', onSelect: fn }         // action; always enabled
+ *   { label: 'Do it', onSelect: fn }         // action
+ *   { label: 'Do it', onSelect: fn, enabled: fn }  // action, live enabled
  *   { label: 'Info', enabled: false }        // display-only line, no onSelect
  *
- * Actionable items are always enabled (a live enabled flag would go stale
- * between rebuilds); an item that depends on game state reports that
- * itself when selected. `label` is a string or a function `label(pass)`
- * returning the text. Label functions are re-evaluated on the status tick
- * and the text is written in place only when it changed, because every
- * native label write (and every rebuild) leaks objects in AIR. `pass` is
- * one fresh object per module per build or refresh, shared by that
- * module's label functions, so an expensive read can be done once per pass.
+ * `enabled` may be a function `enabled(pass)` beside `onSelect`; only a
+ * result of true enables the item. It is re-evaluated with the labels and
+ * the flag is written in place only when it changed. Without one, an
+ * actionable item is enabled and reports any state it depends on itself
+ * when selected. `label` is a string or a function `label(pass)` returning
+ * the text. Label functions are re-evaluated on the status tick and the
+ * text is written in place only when it changed, because every native
+ * label write (and every rebuild) leaks objects in AIR. `pass` is one fresh
+ * object per module per build or refresh, shared by that module's label
+ * and enabled functions, so an expensive read can be done once per pass.
  *
  * When the item set itself changes (not just a label), the module calls
  * Steward.kernel.ui.refreshModuleMenu(id), which rebuilds only its own
  * submenu. Do that on a user action only, never on a timer.
+ *
+ * Bar menu spec (optional): a `barMenu` field has the same shape as `menu`
+ * and becomes a separate root item beside ~Steward~. Its labels and enabled
+ * flags are refreshed when it opens and never on the status tick, so text
+ * that changes often does not cost a native write per tick. When its item
+ * set changes the module calls Steward.kernel.ui.refreshBarMenu(id), on a
+ * user action only.
  *
  * The `events` tab hosts read-only event tools.
  *
@@ -71,7 +81,7 @@
         misc:        true
     };
 
-    var modules = [];                         // [{ id, priority, isReady, plan, boot, ui?, menu? }]
+    var modules = [];                         // [{ id, priority, isReady, plan, boot, ui?, menu?, barMenu? }]
     var byId = {};
 
     function isFunction(x) { return typeof x === 'function'; }
@@ -132,8 +142,8 @@
                 S.kernel.warn('registry', moduleId, 'menu item', i, 'requires label');
                 continue;
             }
-            var enabled = it.enabled !== false;
-            if (enabled && !isFunction(it.onSelect)) {
+            var enabled = isFunction(it.enabled) ? it.enabled : it.enabled !== false;
+            if (enabled !== false && !isFunction(it.onSelect)) {
                 S.kernel.warn('registry', moduleId, 'menu item', i, 'requires label and onSelect');
                 continue;
             }
@@ -211,7 +221,8 @@
             boot:         isFunction(spec.boot) ? spec.boot : null,
             experimental: spec.experimental === true,
             ui:           validateUi(spec.id, spec.ui),
-            menu:         validateMenu(spec.id, spec.menu)
+            menu:         validateMenu(spec.id, spec.menu),
+            barMenu:      validateMenu(spec.id, spec.barMenu)
         };
         modules.push(entry);
         byId[spec.id] = entry;
@@ -260,6 +271,15 @@
         return out;
     }
 
+    // Modules that declare a menu-bar root item, in registration order.
+    function withBarMenu() {
+        var out = [];
+        for (var i = 0; i < modules.length; i++) {
+            if (modules[i].barMenu) out.push(modules[i]);
+        }
+        return out;
+    }
+
     S.kernel.register = register;
     S.kernel.registry = {
         list:    list,
@@ -267,6 +287,7 @@
         byTab:   byTab,
         withUi:  withUi,
         withMenu: withMenu,
+        withBarMenu: withBarMenu,
         menuItems: normalizeMenuItems,
         get:     get,
         count:   count,

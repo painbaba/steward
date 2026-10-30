@@ -197,6 +197,12 @@
     // A snapshot already taken (a resume or a reload) is kept: the troops may
     // have moved since.
     function snapshot(r, inv) {
+        // Only Account, Population and Retrain read the snapshot, and taking it
+        // can hold or pause the run, so a run that retrains nothing skips it.
+        if (r.retrain === false) {
+            st().go(S.RunStep.Supply, 'retrain off');
+            return;
+        }
         if (r.snapshot) {
             st().go(S.RunStep.Supply, 'snapshot kept');
             return;
@@ -430,6 +436,11 @@
 
     function account(r, inv) {
         if (!r.snapshot) {
+            if (r.retrain === false) {
+                log('retrain off; retraining skipped');
+                st().go(S.RunStep.Next, 'retrain off');
+                return;
+            }
             log('no troop snapshot (run started on an open map); retraining skipped');
             st().go(S.RunStep.Next, 'no snapshot');
             return;
@@ -625,7 +636,8 @@
             loadoutKeys: r.loadoutKeys,
             waveIndex:   0,
             step:        S.RunStep.Muster,
-            speedBuff:   r.speedBuff
+            speedBuff:   r.speedBuff,
+            retrain:     r.retrain
         }));
         S.kernel.log(CATEGORY, 'run ' + (finished + 1) + '/' + total + ' begins: ' + r.label);
     }

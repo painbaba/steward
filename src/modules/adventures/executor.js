@@ -116,6 +116,18 @@
         return line.kind === S.BattleLine.Attack || line.kind === S.BattleLine.Buff;
     }
 
+    // Attack and buff lines of a wave file, and how many of them went out.
+    // Exported so a progress display shares the executor's own tests.
+    function attackCount(r, lines) {
+        var out = { sent: 0, total: 0 };
+        for (var i = 0; i < lines.length; i++) {
+            if (!isSeqKind(lines[i])) continue;
+            out.total++;
+            if (isSent(r, lines[i].key)) out.sent++;
+        }
+        return out;
+    }
+
     // The views every step works on. open: lines still to act on (a speed
     // buff line never is, the template horseshoe applies instead; an attack
     // or buff already seen is done). seq: every attack and buff line in
@@ -705,7 +717,8 @@
         check:             check,
         plan:              plan,
         pace:              pace,
-        linesFor:          linesFor
+        linesFor:          linesFor,
+        attackCount:       attackCount
     };
 
     // The kernel queue file runs before every module on each load, so this

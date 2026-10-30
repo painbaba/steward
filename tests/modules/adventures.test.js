@@ -263,16 +263,60 @@ t.test('buffLabel: label when listed, name otherwise', function () {
     assert.strictEqual(s.tpl.buffLabel(buffs, 'GeneralSpeedBuff_Gone'), 'GeneralSpeedBuff_Gone');
 });
 
-t.test('speedBuffOptions: None first, no Default, zero stock warns, stored unknown kept', function () {
+t.test('speedBuffOptions: no None and no Default, zero stock warns, stored unknown kept', function () {
     var s = setup();
     var opts = s.tpl.speedBuffOptions(STOCK, 'GeneralSpeedBuff_Gone');
     assert.deepStrictEqual(plain(opts.map(function (o) { return o.value; })),
-        ['SpeedBuffNone', 'GeneralSpeedBuff_A', 'GeneralSpeedBuff_B', 'GeneralSpeedBuff_C', 'GeneralSpeedBuff_Gone']);
-    assert.strictEqual(opts[1].warn, true);
-    assert.strictEqual(opts[2].warn, false);
-    assert.strictEqual(opts[4].warn, true);
-    assert.strictEqual(s.tpl.speedBuffOptions(STOCK, 'SpeedBuffNone').length, 4);
-    assert.strictEqual(s.tpl.speedBuffOptions(STOCK, 'GeneralSpeedBuff_B').length, 4);
+        ['GeneralSpeedBuff_A', 'GeneralSpeedBuff_B', 'GeneralSpeedBuff_C', 'GeneralSpeedBuff_Gone']);
+    assert.strictEqual(opts.length, 4);
+    assert.strictEqual(opts[0].warn, true);
+    assert.strictEqual(opts[1].warn, false);
+    assert.strictEqual(opts[3].warn, true);
+    assert.strictEqual(s.tpl.speedBuffOptions(STOCK, 'SpeedBuffNone').length, 3);
+    assert.strictEqual(s.tpl.speedBuffOptions(STOCK, 'GeneralSpeedBuff_B').length, 3);
+});
+
+t.test('enabledSpeedBuff: last, first in stock, first listed, None', function () {
+    var s = setup();
+    var f = s.tpl.enabledSpeedBuff;
+    assert.strictEqual(f('GeneralSpeedBuff_C', STOCK), 'GeneralSpeedBuff_C', 'the last choice wins');
+    assert.strictEqual(f('GeneralSpeedBuff_Gone', STOCK), 'GeneralSpeedBuff_Gone', 'even one out of stock');
+    assert.strictEqual(f(null, STOCK), 'GeneralSpeedBuff_B', 'first in stock');
+    assert.strictEqual(f('SpeedBuffNone', STOCK), 'GeneralSpeedBuff_B', 'None is not a choice to restore');
+    assert.strictEqual(f('', STOCK), 'GeneralSpeedBuff_B');
+    assert.strictEqual(f(null, [STOCK[0]]), 'GeneralSpeedBuff_A', 'first listed when none is in stock');
+    assert.strictEqual(f(null, []), 'SpeedBuffNone');
+    assert.strictEqual(f(null, undefined), 'SpeedBuffNone');
+});
+
+t.test('fileName both separators', function () {
+    var s = setup();
+    assert.strictEqual(s.tpl.fileName('C:\\b\\w1.txt'), 'w1.txt');
+    assert.strictEqual(s.tpl.fileName('C:/b/w1.txt'), 'w1.txt');
+    assert.strictEqual(s.tpl.fileName('C:/b\\w2.txt'), 'w2.txt');
+    assert.strictEqual(s.tpl.fileName('w3.txt'), 'w3.txt');
+    assert.strictEqual(s.tpl.fileName(null), '');
+});
+
+t.test('template round trip keeps retrain', function () {
+    var s = setup();
+    var off = s.tpl.save(record({ retrain: false }), 1000);
+    var on = s.tpl.save(record({ label: 'Other' }), 2000);
+    assert.strictEqual(JSON.parse(s.fs.disk[DIR + '/t1000.json']).retrain, false);
+    assert.strictEqual(s.tpl.get(off.id).retrain, false);
+    assert.strictEqual(s.tpl.get(on.id).retrain, true, 'on by default');
+    assert.strictEqual(JSON.parse(s.fs.disk[DIR + '/t2000.json']).retrain, true);
+});
+
+t.test('a template file without retrain reads true', function () {
+    var s = setup();
+    s.fs.disk[DIR + '/old.json'] = JSON.stringify({
+        version: 1, label: 'Old', adventure: 'BlackKnights', loadout: 'l.json', waves: ['w.json'],
+        speedBuff: 'SpeedBuffDefault'
+    });
+    assert.strictEqual(s.tpl.get('old').retrain, true);
+    assert.strictEqual(s.tpl.normalize({ label: 'x' }).retrain, true);
+    assert.strictEqual(s.tpl.normalize({ label: 'x', retrain: false }).retrain, false);
 });
 
 // ---- wave order ---------------------------------------------------------------------

@@ -17,7 +17,8 @@
  * Resume re-enters that step (a wave step re-enters the gate of its wave),
  * so nothing is skipped. The run state lives in its own steward file
  * (state.js), so a script reload or client restart picks it up again
- * without sending an order twice.
+ * without sending an order twice. The run shows in its own ~Run~ bar menu
+ * (runmenu.js).
  *
  * Each step names where it may run (home, the run's island, or anywhere),
  * and isReady is false on any other zone: nothing is sent and nothing
@@ -90,6 +91,13 @@
             // reload may replace it.
             items: function () {
                 return S.modules.adventures.menu ? S.modules.adventures.menu.items() : [];
+            }
+        },
+        barMenu: {
+            title: '~Run~',
+            // Late-bound for the same reason.
+            items: function () {
+                return S.modules.adventures.runmenu ? S.modules.adventures.runmenu.items() : [];
             }
         }
     });

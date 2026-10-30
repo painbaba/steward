@@ -13,8 +13,9 @@
  * ignored. Any file in the folder whose base name matches ID_RE and ends in
  * EXT is a template, so a file shared by someone else can simply be dropped
  * in. File format: JSON.stringify of
- *   { version, label, adventure, loadout, waves, speedBuff, saved }
- * indented, so it stays readable and shareable.
+ *   { version, label, adventure, loadout, waves, speedBuff, retrain, saved }
+ * indented, so it stays readable and shareable. A file without `retrain` was
+ * written before the option existed and reads as true, the behaviour it had.
  *
  * A file that cannot be read or parsed is listed as a broken entry
  * { id, path, error } instead of being skipped, so the user sees it and can
@@ -53,6 +54,14 @@
 
     function validId(id) {
         return typeof id === 'string' && ID_RE.test(id);
+    }
+
+    // Pure. Battle files come from pickers and from hand-edited templates, so
+    // either separator can appear whatever the platform.
+    function fileName(path) {
+        var p = String(path || '');
+        var cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+        return cut === -1 ? p : p.substring(cut + 1);
     }
 
     // ---- Location ---------------------------------------------------------
@@ -124,6 +133,7 @@
             loadout:   str(rec.loadout),
             waves:     waves,
             speedBuff: speedBuffChoice(rec),
+            retrain:   rec.retrain !== false,
             saved:     typeof rec.saved === 'number' ? rec.saved : null
         };
     }
@@ -147,6 +157,7 @@
             loadout:   data.loadout,
             waves:     data.waves,
             speedBuff: data.speedBuff,
+            retrain:   data.retrain,
             saved:     data.saved
         });
         rec.id = id;
@@ -162,6 +173,7 @@
             loadout:   rec.loadout,
             waves:     rec.waves,
             speedBuff: rec.speedBuff,
+            retrain:   rec.retrain,
             saved:     rec.saved
         }, null, 2);
     }
@@ -333,6 +345,18 @@
         return firstAvailable(buffs || []) || S.SpeedBuffChoice.None;
     }
 
+    // Pure. The choice for a horseshoe switch turned on: the buff it held
+    // before it went off, else the first in stock, else the first listed, so
+    // a template can name a horseshoe that is not in stock yet. None only when
+    // the game lists no speed buff at all.
+    function enabledSpeedBuff(last, buffs) {
+        if (typeof last === 'string' && last !== '' && last !== S.SpeedBuffChoice.None) return last;
+        var list = buffs || [];
+        var first = firstAvailable(list);
+        if (first !== null) return first;
+        return list.length ? list[0].name : S.SpeedBuffChoice.None;
+    }
+
     // Pure. The label to put in the editor after the adventure changed from
     // prev to next, or null to keep the current text. A label that is empty
     // or still equal to the previous adventure's name was not typed by the
@@ -376,10 +400,10 @@
     }
 
     // Pure over `buffs` as from S.core.buffs.speedBuffs(). `stored` is the
-    // edited record's current choice.
+    // edited record's current choice. None is not an option: it is the off
+    // state of the editor's horseshoe switch.
     function speedBuffOptions(buffs, stored) {
-        var out = [{ value: S.SpeedBuffChoice.None, label: 'None', amount: null, warn: false }];
-        return out.concat(buffOptions(buffs || [], stored));
+        return buffOptions(buffs || [], stored);
     }
 
     // Pure. The waves in drag order: `order` lists the old indices in their new
@@ -427,6 +451,8 @@
         firstAvailable:      firstAvailable,
         resolveSpeedBuff:    resolveSpeedBuff,
         initialSpeedBuff:    initialSpeedBuff,
+        enabledSpeedBuff:    enabledSpeedBuff,
+        fileName:            fileName,
         autoLabel:           autoLabel,
         buffLabel:           buffLabel,
         speedBuffOptions:    speedBuffOptions,

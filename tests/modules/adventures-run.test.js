@@ -1545,3 +1545,74 @@ t.test('series: a malformed request count runs one run and ends Done', function 
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Done, 'status ' + w.st.run().status);
     assert.strictEqual(w.st.finishedRuns(), 1);
 });
+
+// ---- 20. Optional horseshoe and retraining ----------------------------------------------
+
+t.test('retrain off: Snapshot goes to Supply without reading troops', function () {
+    var w = homeWorld();
+    var reads = 0;
+    var queued = w.S.core.production.queued;
+    w.S.core.production.queued = function () { reads++; return queued.apply(this, arguments); };
+    // Troops that cannot be read would hold a snapshot; with retraining off
+    // nothing waits for them.
+    w.H.host.game.zone.GetArmy = function () { return null; };
+    series(w, { step: w.S.RunStep.Snapshot, run: { retrain: false } });
+    tick(w);
+    assertStep(w, 'Supply');
+    assert.strictEqual(w.st.run().snapshot, null);
+    assert.strictEqual(reads, 0);
+    assert.ok(logged(w, /Snapshot -> Supply \(retrain off\)/));
+});
+
+t.test('retrain off: Account goes to Next with no order', function () {
+    var w = homeWorld();
+    series(w, { step: w.S.RunStep.Account, run: { retrain: false } });
+    tick(w);
+    assertStep(w, 'Next');
+    assert.ok(logged(w, /retrain off; retraining skipped/));
+    assert.ok(!logged(w, /run started on an open map/));
+    assert.strictEqual(w.productionOrders.length, 0);
+    assert.strictEqual(popBuffs(w).length, 0);
+});
+
+t.test('nextRun keeps retrain on the next run', function () {
+    [false, true].forEach(function (retrain) {
+        var w = homeWorld();
+        series(w, { step: w.S.RunStep.Next, count: 2, run: { retrain: retrain } });
+        tick(w);
+        var r = w.st.run();
+        assert.strictEqual(r.step, w.S.RunStep.Muster, 'the next run begins');
+        assert.strictEqual(r.retrain, retrain);
+    });
+});
+
+t.test('horseshoe None sends nothing and logs not used', function () {
+    var w = homeWorld();
+    onIsland(w);
+    w.stock.push({ type: 'GeneralSpeedBuff_A', resource: '', amount: 2, uid: 'spd' });
+    series(w, { step: w.S.RunStep.Horseshoe, zoneId: ZONE, speedBuff: w.S.SpeedBuffChoice.None });
+    tick(w);
+    play(w);
+    assertStep(w, 'Gate');
+    assert.ok(logged(w, /horseshoe not used/, 'log'));
+    assert.ok(!logged(w, /no horseshoe in stock/));
+    assert.strictEqual(w.buffActions.filter(function (b) { return /SpeedBuff/.test(b.type); }).length, 0);
+});
+
+t.test('run from a template carries retrain', function () {
+    [false, true].forEach(function (retrain) {
+        var w = homeWorld();
+        var tpl = w.S.modules.adventures.templates;
+        w.H.ctx.prompt = function (text, def) { return def; };
+        w.S.modules.adventures.executor.check = function () {
+            return { ok: true, problems: [], warnings: [], loadoutKeys: { a: 1 } };
+        };
+        var saved = tpl.save({
+            label: 'Black Knights', adventure: 'BlackKnights', loadout: LOADOUT, waves: [WAVE],
+            speedBuff: 'SpeedBuffDefault', retrain: retrain
+        }, 1000);
+        assert.strictEqual(saved.ok, true);
+        assert.strictEqual(w.S.modules.adventures.run.start(saved.id), true);
+        assert.strictEqual(w.st.run().retrain, retrain);
+    });
+});
