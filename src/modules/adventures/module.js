@@ -3,19 +3,25 @@
  *
  * The user builds run templates (attack adventure, a loadout battle file,
  * ordered wave battle files, a horseshoe choice), validated when saved. The
- * menu lists the templates with their map counts and starts a run: with the
- * adventure open and viewed, the wave executor takes every wave file of the
- * template from the chosen start wave on (position, supply, load, verify,
- * reach, attack, confirm), and a quest watcher claims finished quests except
- * the last. Any failed check pauses the run with the wave, general and
- * reason; Resume re-enters the gate of that wave, so no wave is skipped. The
- * run state lives in its own steward file (state.js), so a script reload or
- * client restart picks it up again without sending an attack twice. When the
- * last wave is confirmed the run ends and the user finishes the map by hand.
+ * menu lists the templates with their map counts and starts a run, which is
+ * one persisted series of maps from home back to home: at home the loadout
+ * generals are mustered, the template is checked, the troops are
+ * snapshotted and loaded, the map is started and the generals are sent; on
+ * the island they are starred and the horseshoe applied, the wave executor
+ * takes every wave file (position, supply, load, verify, reach, attack,
+ * confirm) while a quest watcher claims finished quests except the last;
+ * after the last wave the end of map packs the free troops into carriers,
+ * claims the last quest, closes the map and recalls whoever is left; back
+ * home the lost troops are counted and retrained, and the next repetition
+ * starts. Any failed check pauses the run with where it stands and why;
+ * Resume re-enters that step (a wave step re-enters the gate of its wave),
+ * so nothing is skipped. The run state lives in its own steward file
+ * (state.js), so a script reload or client restart picks it up again
+ * without sending an order twice.
  *
- * The executor only acts while the run's adventure is the viewed zone. On
- * any other zone isReady is false: nothing is sent and nothing pauses, and
- * the run carries on when the user views the map again.
+ * Each step names where it may run (home, the run's island, or anywhere),
+ * and isReady is false on any other zone: nothing is sent and nothing
+ * pauses, and the run carries on when the user views that zone again.
  *
  * Menu handlers only change state; all queue work is enqueued from plan(),
  * where the scheduler tags it with this module, so Pause and Stop can cancel
@@ -40,22 +46,26 @@
     function isReady(ctx) {
         var run = currentRun();
         if (!run || run.status !== S.RunStatus.Running) return false;
-        if (!ctx || !ctx.zone) return false;
-        return ctx.zone.id === run.zoneId;
+        return S.modules.adventures.state.readyOn(run, ctx ? ctx.zone : null);
     }
 
     // The watcher runs first so a finished quest is claimed before the
-    // executor's Settle step asks whether the island has settled. Each part
-    // is guarded on its own: a watcher fault must not stall the waves.
+    // executor's Settle step asks whether the island has settled. Then the
+    // part that owns the run's step (executor, home or away) does one step.
+    // Each part is guarded on its own: a watcher fault must not stall the run.
     function plan() {
         var a = S.modules.adventures;
         if (a.watcher) {
             try { a.watcher.plan(); }
             catch (e) { S.kernel.error('adventures', 'watcher.plan threw:', e); }
         }
-        if (a.executor) {
-            try { a.executor.plan(); }
-            catch (e) { S.kernel.error('adventures', 'executor.plan threw:', e); }
+        var run = currentRun();
+        if (!run || !a.state) return;
+        var name = a.state.partOf(run.step);
+        var part = name ? a[name] : null;
+        if (part && part.plan) {
+            try { part.plan(); }
+            catch (e) { S.kernel.error('adventures', name + '.plan threw:', e); }
         }
     }
 

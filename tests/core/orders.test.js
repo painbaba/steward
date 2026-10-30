@@ -393,11 +393,11 @@ t.test('sendToZone calls ServiceManager.specialist.sendToZone and verifies on tr
 t.test('sendToZone verifies on the travel task or when the general left the list', function () {
     var g = AC.general({ uid: 'g1' });
     var s = setup({ generals: [g], onSendToZone: function () { g.state.task = { type: 7, newGrid: 0 }; } });
-    assert.strictEqual(run(s, s.orders.sendToZone('g1', 1)).status, s.S.ActionResult.Verified);
+    assert.strictEqual(run(s, s.orders.sendToZone('g1', 5)).status, s.S.ActionResult.Verified);
 
     var g2 = AC.general({ uid: 'g2' });
     var s2 = setup({ generals: [g2] });
-    var r = run(s2, s2.orders.sendToZone('g2', 1), function (n) { if (n === 1) hideGeneral(s2); });
+    var r = run(s2, s2.orders.sendToZone('g2', 5), function (n) { if (n === 1) hideGeneral(s2); });
     assert.strictEqual(r.status, s2.S.ActionResult.Verified);
     assert.strictEqual(r.sends, 1);
 });
@@ -405,21 +405,54 @@ t.test('sendToZone verifies on the travel task or when the general left the list
 t.test('sendToZone does not verify a missing general after the viewed zone changed', function () {
     var g = AC.general({ uid: 'g1' });
     var s = setup({ generals: [g] });
-    var r = run(s, s.orders.sendToZone('g1', 1), function (n) {
+    var r = run(s, s.orders.sendToZone('g1', 5), function (n) {
         if (n === 1) { hideGeneral(s); s.H.host.game.gi.mCurrentViewedZoneID = 2; }
     });
     assert.notStrictEqual(r.status, s.S.ActionResult.Verified);
 });
 
-t.test('sendToZone refuses off home, a bad zone id, a missing or unreadable general', function () {
+t.test('sendToZone is allowed from an adventure back to the home id', function () {
     var g = AC.general({ uid: 'g1' });
-    var away = setup({ generals: [g], home: false });
-    assert.strictEqual(run(away, away.orders.sendToZone('g1', 1)).reason, 'not home');
+    var s = setup({ generals: [g], home: false, onSendToZone: function () { g.state.travelling = true; } });
+    s.H.host.game.gi.mCurrentViewedZoneID = 9001;
+    var r = run(s, s.orders.sendToZone('g1', 5));
+    assert.strictEqual(r.status, s.S.ActionResult.Verified);
+    assert.strictEqual(s.zoneCalls.length, 1);
+    assert.strictEqual(s.zoneCalls[0].zoneId, 5);
+});
+
+t.test('sendToZone refuses the zone already viewed and an unreadable viewed zone', function () {
+    var s = setup({ generals: [AC.general({ uid: 'g1' })] });
+    s.H.host.game.gi.mCurrentViewedZoneID = 4711;
+    assert.strictEqual(run(s, s.orders.sendToZone('g1', 4711)).reason, 'already on zone 4711');
+    s.H.host.game.gi.mCurrentViewedZoneID = undefined;
+    assert.strictEqual(run(s, s.orders.sendToZone('g1', 4711)).reason, 'viewed zone unreadable');
+    assert.strictEqual(s.zoneCalls.length, 0);
+});
+
+t.test('remaining returns the task time as a number, else null', function () {
+    var s = setup();
+    function withTask(rem) {
+        return { GetTask: function () { return { GetRemainingTime: function () { return rem; } }; } };
+    }
+    assert.strictEqual(s.orders.remaining(withTask(5000)), 5000);
+    assert.strictEqual(s.orders.remaining(withTask(0)), 0);
+    assert.strictEqual(s.orders.remaining(withTask(-1)), null);
+    assert.strictEqual(s.orders.remaining(withTask(NaN)), null);
+    assert.strictEqual(s.orders.remaining(withTask('x')), null);
+    assert.strictEqual(s.orders.remaining({ GetTask: function () { return null; } }), null);
+    assert.strictEqual(s.orders.remaining({ GetTask: function () { throw new Error('x'); } }), null);
+    assert.strictEqual(s.orders.remaining(null), null);
+});
+
+t.test('sendToZone refuses a bad zone id, a missing or unreadable general', function () {
+    var g = AC.general({ uid: 'g1' });
+    var away = setup({ generals: [g] });
     var s = setup({ generals: [AC.general({ uid: 'g1' })] });
     assert.strictEqual(run(s, s.orders.sendToZone('g1', null)).reason, 'bad zone id null');
-    assert.strictEqual(run(s, s.orders.sendToZone('nope', 1)).reason, 'specialist not found');
+    assert.strictEqual(run(s, s.orders.sendToZone('nope', 5)).reason, 'specialist not found');
     breakList(s);
-    var r = run(s, s.orders.sendToZone('g1', 1));
+    var r = run(s, s.orders.sendToZone('g1', 5));
     assert.strictEqual(r.status, s.S.ActionResult.Refused);
     assert.strictEqual(r.reason, 'specialist unreadable');
     assert.strictEqual(away.zoneCalls.length + s.zoneCalls.length, 0);
@@ -428,7 +461,7 @@ t.test('sendToZone refuses off home, a bad zone id, a missing or unreadable gene
 t.test('sendToZone does not verify on a failed list read', function () {
     var g = AC.general({ uid: 'g1' });
     var s = setup({ generals: [g] });
-    var r = run(s, s.orders.sendToZone('g1', 1), function (n) { if (n === 1) breakList(s); });
+    var r = run(s, s.orders.sendToZone('g1', 5), function (n) { if (n === 1) breakList(s); });
     assert.strictEqual(r.status, s.S.ActionResult.Failed);
     assert.strictEqual(r.sends, 1);
     assert.ok(/retry refused: specialist unreadable/.test(r.reason));
@@ -437,7 +470,7 @@ t.test('sendToZone does not verify on a failed list read', function () {
 t.test('sendToZone fails after exactly two sends when nothing changes', function () {
     var g = AC.general({ uid: 'g1' });
     var s = setup({ generals: [g] });
-    var r = run(s, s.orders.sendToZone('g1', 1));
+    var r = run(s, s.orders.sendToZone('g1', 5));
     assert.strictEqual(r.status, s.S.ActionResult.Failed);
     assert.strictEqual(r.sends, 2);
     assert.strictEqual(s.zoneCalls.length, 2);

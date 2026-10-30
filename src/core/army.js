@@ -2,8 +2,9 @@
  * Army library.
  *
  * Reads the free troop pool and every own general's and carrier's squads,
- * classifies troops as base or elite, compares compositions exactly and plans
- * where the troops for a wave come from. The readers send nothing. raise()
+ * classifies troops as base or elite, compares compositions exactly, plans
+ * where the troops for a wave come from and how free troops are packed into
+ * carriers (one troop class each, within capacity). The readers send nothing. raise()
  * and unload() only build action defs (see actions.js); the caller runs them
  * with S.core.actions.attempt, which sends and verifies.
  *
@@ -221,7 +222,10 @@
         return readGeneralArmy(spec) || {};
     }
 
-    function freeArmy() {
+    // The free pool as a map, or null when the zone army is unavailable or the
+    // read threw. Accounting needs the difference between "empty" and
+    // "unreadable"; freeArmy flattens it.
+    function readFreeArmy() {
         try {
             if (typeof game !== 'undefined' && game && game.zone &&
                 typeof game.zone.GetArmy === 'function') {
@@ -230,10 +234,14 @@
             }
         } catch (e) {
             S.kernel.warn('army', 'freeArmy() threw:', e);
-            return {};
+            return null;
         }
         S.kernel.warn('army', 'freeArmy(): zone army unavailable');
-        return {};
+        return null;
+    }
+
+    function freeArmy() {
+        return readFreeArmy() || {};
     }
 
     // --- Ownership and specialist facts.
@@ -301,8 +309,14 @@
 
     // Free pool, per-general armies and the facts the planner needs, keyed
     // by the specialist's unique id key.
+    // ok is true only for a positive read: the specialist list, the free pool
+    // and every general's army were all readable. Accounting and packing
+    // must not act on an unreadable (and so seemingly empty) source.
     function inventory() {
-        var free = freeArmy();
+        var read = readFreeArmy();
+        var free = read || {};
+        var freeOk = read !== null;
+        var allArmies = true;
         var byKey = {};
         var assigned = {};
         var list = fighters();
@@ -310,7 +324,10 @@
             var spec = list[i];
             var key = S.core.specialists.uniqueIdKey(spec);
             if (!key) continue;
-            var army = generalArmy(spec);
+            var readArmy = readGeneralArmy(spec);
+            var army = readArmy || {};
+            var armyOk = readArmy !== null;
+            if (!armyOk) allArmies = false;
             var grid = garrisonGrid(spec);
             var idle = S.core.specialists.status(spec) === S.SpecialistStatus.Idle;
             var travelling = isTravelling(spec);
@@ -319,7 +336,8 @@
                 name:       S.core.specialists.name(spec),
                 cls:        S.core.specialists.classify(spec),
                 army:       army,
-                capacity:   S.core.specialists.troopCapacity(spec),
+                armyOk:     armyOk,
+                capacity:  S.core.specialists.troopCapacity(spec),
                 idle:       idle,
                 grid:       grid,
                 travelling: travelling,
@@ -327,7 +345,14 @@
             };
             assigned = add(assigned, army);
         }
-        return { free: free, assigned: assigned, total: add(free, assigned), byKey: byKey };
+        return {
+            free:     free,
+            assigned: assigned,
+            total:    add(free, assigned),
+            byKey:    byKey,
+            freeOk:   freeOk,
+            ok:       S.core.specialists.listReadable() && freeOk && allArmies
+        };
     }
 
     // --- Supply planner (pure).
@@ -405,6 +430,71 @@
             covered:     isEmpty(shortAfter),
             missing:     missing
         };
+    }
+
+    // --- Pack planner (pure).
+
+    // Units of the pool with a known class, as [{ unit, amount }] in name
+    // order; wantElite picks elite or base units. A unit whose class is
+    // unknown is never offered, since its class cannot be matched to a holder.
+    function packable(pool, wantElite, eliteFn) {
+        var names = [];
+        var out = [];
+        var k;
+        for (k in pool) if (has(pool, k) && pool[k] > 0) names.push(k);
+        names.sort();
+        for (var i = 0; i < names.length; i++) {
+            var flag = eliteFn(names[i]);
+            if (flag === null || flag === undefined) continue;
+            if (!!flag === wantElite) out.push({ unit: names[i], amount: pool[names[i]] });
+        }
+        return out;
+    }
+
+    function sumOf(list) {
+        var sum = 0;
+        for (var i = 0; i < list.length; i++) sum += list[i].amount;
+        return sum;
+    }
+
+    // Packs free troops into holders. holders = [{ key, capacity, army }] in
+    // priority order. A holder takes one troop class only: its own when it
+    // already holds troops, else the class with more troops left in the pool
+    // (base on a tie). A holder with mixed or unknown troops, or no capacity,
+    // or no room is skipped. Returns { raises: [{ key, target, added }],
+    // remainder } where target is the holder's army after the raise.
+    function planPack(free, holders, eliteFn) {
+        var fn = eliteFn || isElite;
+        var pool = add(free, {});
+        var raises = [];
+        holders = holders || [];
+        for (var i = 0; i < holders.length; i++) {
+            var h = holders[i];
+            var held = h.army || {};
+            var room = (h.capacity > 0) ? h.capacity - total(held) : 0;
+            if (!(room > 0)) continue;
+            var cls = classOf(held, fn);
+            if (cls === S.TroopClass.Mixed || cls === S.TroopClass.Unknown) continue;
+            var wantElite;
+            if (cls === S.TroopClass.Empty) {
+                wantElite = sumOf(packable(pool, true, fn)) > sumOf(packable(pool, false, fn));
+            } else {
+                wantElite = cls === S.TroopClass.Elite;
+            }
+            var units = packable(pool, wantElite, fn);
+            var taken = {};
+            var any = false;
+            for (var j = 0; j < units.length && room > 0; j++) {
+                var n = Math.min(units[j].amount, room);
+                taken[units[j].unit] = n;
+                room -= n;
+                any = true;
+            }
+            if (!any) continue;
+            pool = minus(pool, taken);
+            raises.push({ key: h.key, target: add(held, taken), added: taken });
+        }
+        return { raises: raises, remainder: pool };
     }
 
     // --- Raising and unloading (action defs for S.core.actions.attempt).
@@ -551,7 +641,8 @@
         generalArmy:   generalArmy,
         readGeneralArmy: readGeneralArmy,
         freeArmy:      freeArmy,
-        isOwn:         isOwn,
+        readFreeArmy:  readFreeArmy,
+        isOwn:        isOwn,
         fighters:      fighters,
         garrisonGrid:  garrisonGrid,
         isTravelling:  isTravelling,
@@ -564,7 +655,8 @@
         matches:       matches,
         classOf:       classOf,
         planSupply:    planSupply,
-        canUnload:     canUnload,
+        planPack:      planPack,
+        canUnload:    canUnload,
         buildRaiseVO:  buildRaiseVO,
         raise:         raise,
         unload:        unload

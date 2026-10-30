@@ -367,3 +367,51 @@ t.test('map start does not verify while own adventures cannot be read and stock 
     var res = run(s, s.buffs.map('AdvA'));
     assert.strictEqual(res.status, s.S.ActionResult.Failed);
 });
+
+t.test('population refuses when no single stack holds the amount', function () {
+    var s = acting({ buffs: [
+        { type: 'AddResource', resource: 'Population', amount: 20, uid: 'a' },
+        { type: 'AddResource', resource: 'Population', amount: 20, uid: 'b' }
+    ] });
+    assert.strictEqual(run(s, s.buffs.population(30)).reason, 'no single stack of 30');
+    assert.strictEqual(s.sent.actions.length, 0);
+});
+
+t.test('entry skips empty and resource-bound entries; population needs one stack of the amount', function () {
+    var e = setup({ buffs: [
+        { type: 'GeneralSpeedBuff_A', amount: 0, uid: 'empty' },
+        { type: 'GeneralSpeedBuff_A', resource: 'X', amount: 5, uid: 'bound' },
+        { type: 'GeneralSpeedBuff_A', amount: 3, uid: 'plain' }
+    ] });
+    assert.strictEqual(e.buffs.entry('GeneralSpeedBuff_A').uid.toKeyString(), 'plain');
+    assert.strictEqual(e.buffs.entry('GeneralSpeedBuff_A', 'X').uid.toKeyString(), 'bound');
+
+    var s = acting({ buffs: [
+        { type: 'AddResource', resource: 'Population', amount: 3, uid: 'a' },
+        { type: 'AddResource', resource: 'Population', amount: 3, uid: 'b' }
+    ] });
+    assert.strictEqual(run(s, s.buffs.population(4)).reason, 'no single stack of 4');
+    assert.strictEqual(s.sent.actions.length, 0);
+});
+
+t.test('population sends from the stack that holds at least the amount', function () {
+    var s = acting({ buffs: [
+        { type: 'AddResource', resource: 'Population', amount: 5, uid: 'small' },
+        { type: 'AddResource', resource: 'Population', amount: 25, uid: 'big' }
+    ] });
+    run(s, s.buffs.population(20));
+    assert.ok(s.sent.actions.length >= 1);
+    assert.strictEqual(s.sent.actions[0].p3, 20);
+    assert.strictEqual(s.sent.actions[0].data.toKeyString(), 'big');
+});
+
+t.test('populationStock returns the total and largest stack, null when unreadable', function () {
+    var s = acting({ buffs: [
+        { type: 'AddResource', resource: 'Population', amount: 20, uid: 'a' },
+        { type: 'AddResource', resource: 'Population', amount: 35, uid: 'b' },
+        { type: 'AddResource', resource: 'Coins', amount: 99, uid: 'c' }
+    ] });
+    assert.deepStrictEqual(plain(s.buffs.populationStock()), { total: 55, largest: 35 });
+    breakStock(s);
+    assert.strictEqual(s.buffs.populationStock(), null);
+});

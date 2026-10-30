@@ -1,15 +1,18 @@
 /*
  * Quest watcher for the adventures module.
  *
- * While a wave run is Running, every plan() of the module first claims at
- * most one finished quest of the viewed adventure. Claiming a quest can
+ * While a run is Running on its own island, every plan() of the module
+ * first claims at most one finished quest of that adventure. It never acts
+ * at home or on another zone, and not while the run's step belongs at home:
+ * the quest pool read there is not the run's. Claiming a quest can
  * unlock the next part of the map, so the executor's Settle step waits
  * until no claimable quest is left (pending() returns []) before it calls
  * a target unreachable.
  *
  * The adventure's last quest is never claimed here: claiming it closes the
- * adventure, and finishing the map is left to the user. claim() is called
- * without allowLast, so core/quests.js refuses it as well.
+ * adventure, so the end-of-map step claims it itself once the free troops
+ * are packed. claim() is called without allowLast, so core/quests.js
+ * refuses it here as well.
  *
  * A failed or refused claim never pauses the run; the quest is retried
  * after QUEST_RETRY_MS. The retry times live in runState.questRetry, which
@@ -73,6 +76,8 @@
         var st = stateApi();
         var r = st.run();
         if (!r || r.status !== S.RunStatus.Running) return;
+        if (typeof r.zoneId !== 'number' || S.core.zone.id() !== r.zoneId) return;
+        if (st.partOf(r.step) === 'home') return;
 
         var list = pending();
         if (!list || list.length === 0) return;

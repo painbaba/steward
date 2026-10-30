@@ -122,16 +122,36 @@
     // that reading failed, and a null reading counts as missing. null when the
     // unit's costs cannot be read.
     function shortfalls(unit, n) {
-        var list = costs(unit);
-        if (list === null) return null;
+        return jointShortfalls([{ unit: unit, count: n }]);
+    }
+
+    // Like shortfalls, for several orders paid from the same stock: the needs
+    // are summed per resource over all orders, so two orders that fit alone
+    // but not together are reported short. orders: [{ unit, count }]. null
+    // when any unit's costs cannot be read.
+    function jointShortfalls(orders) {
+        var names = [];
+        var needs = {};
+        var i;
+        for (i = 0; i < orders.length; i++) {
+            var list = costs(orders[i].unit);
+            if (list === null) return null;
+            for (var j = 0; j < list.length; j++) {
+                var name = list[j].name;
+                if (!needs.hasOwnProperty(name)) {
+                    needs[name] = 0;
+                    names.push(name);
+                }
+                needs[name] += list[j].amount * orders[i].count;
+            }
+        }
         var out = [];
-        for (var i = 0; i < list.length; i++) {
-            var need = list[i].amount * n;
-            var have = list[i].name === S.core.resources.POPULATION
+        for (i = 0; i < names.length; i++) {
+            var have = names[i] === S.core.resources.POPULATION
                 ? S.core.resources.freePopulation()
-                : S.core.resources.amount(list[i].name);
-            if (typeof have !== 'number' || have < need) {
-                out.push({ name: list[i].name, need: need, have: typeof have === 'number' ? have : null });
+                : S.core.resources.amount(names[i]);
+            if (typeof have !== 'number' || have < needs[names[i]]) {
+                out.push({ name: names[i], need: needs[names[i]], have: typeof have === 'number' ? have : null });
             }
         }
         return out;
@@ -251,6 +271,7 @@
         costs:              costs,
         stacks:             stacks,
         shortfalls:         shortfalls,
+        jointShortfalls:    jointShortfalls,
         affordable:         affordable,
         populationCost:     populationCost,
         populationShortfall: populationShortfall,

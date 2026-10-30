@@ -73,17 +73,9 @@
         return out;
     }
 
-    // First in-stock entry of exactly this type and resource ('' = not bound
-    // to a resource), carrying the uid object; null when there is none or the
-    // menu cannot be read.
+    // The same as entryAtLeast with no minimum, so empty entries are skipped.
     function entry(type, resource) {
-        var raw = readEntries();
-        if (!raw) return null;
-        var res = resource || '';
-        for (var i = 0; i < raw.length; i++) {
-            if (raw[i].type === type && (raw[i].resource || '') === res && raw[i].amount > 0) return raw[i];
-        }
-        return null;
+        return entryAtLeast(type, resource, 0);
     }
 
     // Stock of exactly this type and resource ('' = not bound to a resource):
@@ -112,12 +104,32 @@
         }
     }
 
+    // First in-stock entry of exactly this type and resource ('' = not bound
+    // to a resource) holding at least `amount`; null when there is none or the
+    // menu cannot be read. One buff action spends one entry, so a split stock
+    // cannot cover a larger amount. The entry is returned with its uid object.
+    function entryAtLeast(type, resource, amount) {
+        var raw = readEntries();
+        if (!raw) return null;
+        var res = resource || '';
+        for (var i = 0; i < raw.length; i++) {
+            if (raw[i].type === type && (raw[i].resource || '') === res &&
+                raw[i].amount > 0 && raw[i].amount >= amount) return raw[i];
+        }
+        return null;
+    }
+
+    // The one place the buff packet is sent; false when there is no entry or
+    // the packet could not be sent.
+    function sendEntry(e, grid, amount) {
+        if (!e || !e.uid) return false;
+        return S.core.packets.sendAction(61, 0, grid, amount, e.uid) === true;
+    }
+
     // Sends one buff of this type and resource to a grid; false when none is
     // in stock or the packet could not be sent.
     function send(type, resource, grid, amount) {
-        var e = entry(type, resource);
-        if (!e || !e.uid) return false;
-        return S.core.packets.sendAction(61, 0, grid, amount, e.uid) === true;
+        return sendEntry(entry(type, resource), grid, amount);
     }
 
     // Plain buffs only: entries bound to a resource are a different stock.
@@ -245,8 +257,27 @@
         };
     }
 
-    // Population buff: the exact amount the caller asks for. Verified by the
-    // free population rising by that amount or the stock dropping by it.
+    // Population buff stock: { total, largest } over the population entries,
+    // or null when the menu cannot be read. largest is the biggest amount one
+    // buff action can send.
+    function populationStock() {
+        var raw = readEntries();
+        if (!raw) return null;
+        var res = populationResource();
+        var total = 0;
+        var largest = 0;
+        for (var i = 0; i < raw.length; i++) {
+            if (raw[i].type !== POPULATION_TYPE || (raw[i].resource || '') !== res) continue;
+            var a = raw[i].amount || 0;
+            total += a;
+            if (a > largest) largest = a;
+        }
+        return { total: total, largest: largest };
+    }
+
+    // Population buff: the exact amount the caller asks for, sent from a
+    // single stack that holds at least that amount. Verified by the free
+    // population rising by that amount or the stock dropping by it.
     function population(amount) {
         return {
             label:     'population buff ' + amount,
@@ -257,6 +288,7 @@
                 var n = stock(POPULATION_TYPE, populationResource());
                 if (!isNum(n)) return 'buff stock unreadable';
                 if (n < amount) return 'not enough in stock';
+                if (!entryAtLeast(POPULATION_TYPE, populationResource(), amount)) return 'no single stack of ' + amount;
                 if (!isNum(S.core.resources.freePopulation())) return 'free population unreadable';
                 return null;
             },
@@ -266,7 +298,9 @@
                     stock: stock(POPULATION_TYPE, populationResource())
                 };
             },
-            send: function () { return send(POPULATION_TYPE, populationResource(), PLAYER_GRID, amount); },
+            send: function () {
+                return sendEntry(entryAtLeast(POPULATION_TYPE, populationResource(), amount), PLAYER_GRID, amount);
+            },
             check: function (base) {
                 if (!base) return false;
                 var free = S.core.resources.freePopulation();
@@ -335,7 +369,8 @@
         speed:         speed,
         camp:          camp,
         population:    population,
-        map:           map,
+        populationStock: populationStock,
+        map:          map,
         mapCounts:     mapCounts,
         definedNames:  definedNames,
         isSpeedBuff:   isSpeedBuff,

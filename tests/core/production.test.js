@@ -241,3 +241,27 @@ t.test('a late first order verifies on the retry without a second send', functio
     assert.strictEqual(r.results[0].status, b.S.ActionResult.Verified);
     assert.strictEqual(r.results[0].sends, 1);
 });
+
+t.test('jointShortfalls reports units that fit alone but not together', function () {
+    var b = setup();
+    b.world.free = 10;
+    assert.strictEqual(b.P.jointShortfalls([{ unit: 'Marksman', count: 5 }]).length, 0);
+    assert.strictEqual(b.P.jointShortfalls([{ unit: 'Rifleman', count: 10 }]).length, 0);
+    var joint = b.P.jointShortfalls([{ unit: 'Marksman', count: 5 }, { unit: 'Rifleman', count: 5 }]);
+    assert.strictEqual(joint.length, 1);
+    assert.strictEqual(joint[0].name, 'Population');
+    assert.strictEqual(joint[0].need, 15);
+    assert.strictEqual(joint[0].have, 10);
+});
+
+t.test('jointShortfalls returns null when a cost is unreadable; shortfalls answers as before', function () {
+    var b = setup();
+    assert.strictEqual(b.P.jointShortfalls([{ unit: 'Rifleman', count: 1 }, { unit: 'Nobody', count: 1 }]), null);
+    b.world.free = 3;
+    var one = b.P.shortfalls('Rifleman', 5);
+    assert.strictEqual(one.length, 1);
+    assert.strictEqual(one[0].name, 'Population');
+    assert.strictEqual(one[0].need, 5);
+    assert.strictEqual(one[0].have, 3);
+    assert.strictEqual(b.P.shortfalls('Nobody', 1), null);
+});

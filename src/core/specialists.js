@@ -524,6 +524,12 @@
         return readSpecialists(zone) || [];
     }
 
+    // true when the list of opts.zone (default: the viewed zone) is readable,
+    // so an empty list can be told from an unreadable one.
+    function listReadable(opts) {
+        return readSpecialists((opts && opts.zone) || S.core.zone.current()) !== null;
+    }
+
     function all(opts) {
         opts = opts || {};
         var zone = opts.zone || S.core.zone.current();
@@ -806,6 +812,7 @@
     // --- Public surface ---
 
     S.core.specialists.all              = all;
+    S.core.specialists.listReadable     = listReadable;
     S.core.specialists.lookup           = lookup;
     S.core.specialists.refind           = refind;
     S.core.specialists.byType           = byType;

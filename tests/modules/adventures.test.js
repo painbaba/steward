@@ -335,6 +335,22 @@ function runSetup(maps, extra) {
             return prev(name);
         };
     }
+    // The executor's file check needs battle files on disk; the tests stand in
+    // for it (opts.realCheck keeps the real one). `checks` records the options
+    // each call got, `problems` makes the stand-in report fatal problems.
+    s.checks = [];
+    s.problems = [];
+    if (!(extra && extra.realCheck)) {
+        S.modules.adventures.executor.check = function (rec, opts) {
+            s.checks.push(opts);
+            return {
+                ok: s.problems.length === 0,
+                problems: s.problems,
+                warnings: [],
+                loadoutKeys: { a: 1 }
+            };
+        };
+    }
     H.clearQueued();
     return s;
 }
@@ -357,23 +373,112 @@ t.test('statusText: no request, a request and an ended one', function () {
     assert.strictEqual(f({ label: 'Witch', count: 1, ended: true }), 'Requested: Witch ×1, repetition ended');
 });
 
-t.test('start stores the count clamped to the maps and queues nothing', function () {
+t.test('status: a started run shows its run number out of the count and its step', function () {
+    var s = runSetup(3);
+    s.answer = '3';
+    s.run.start(s.id);
+    var st = s.S.modules.adventures.state;
+    assert.strictEqual(st.status(), 'Running: Black Knights, run 1/3, ' + st.stepName(s.S.RunStep.Muster));
+    s.run.current().finished = 1;
+    assert.ok(/^Running: Black Knights, run 2\/3, /.test(st.status()), st.status());
+    s.run.pause();
+    assert.ok(/^Paused: Black Knights, run 2\/3, .*: paused by you$/.test(st.status()), st.status());
+});
+
+t.test('start at home with the map not open stores a Muster run with no zone and queues nothing', function () {
     var s = runSetup(3);
     s.answer = '10';
     assert.strictEqual(s.run.start(s.id), true);
-    assert.strictEqual(s.run.current().count, 3);
-    assert.strictEqual(s.run.current().ended, false);
-    assert.strictEqual(s.run.current().templateId, s.id);
+    var run = s.S.modules.adventures.state.run();
+    assert.strictEqual(run.step, s.S.RunStep.Muster);
+    assert.strictEqual(run.zoneId, null);
+    assert.strictEqual(run.speedBuff, 'SpeedBuffDefault');
+    assert.strictEqual(run.waveIndex, 0);
+    assert.deepStrictEqual(plain(run.paths), ['C:/battles/w1.json', 'C:/battles/w2.json']);
+    assert.deepStrictEqual(plain(run.loadoutKeys), { a: 1 });
+    var req = s.run.current();
+    assert.strictEqual(req.count, 3);
+    assert.strictEqual(req.ended, false);
+    assert.strictEqual(req.finished, 0);
+    assert.strictEqual(req.closedAt, null);
+    assert.strictEqual(req.templateId, s.id);
+    assert.strictEqual(s.prompts.length, 1);
     assert.strictEqual(s.prompts[0].def, '3');
+    assert.deepStrictEqual(plain(s.checks), [{ camps: false, fighters: false }]);
     assert.strictEqual(s.H.queued().length, 0);
 });
 
-t.test('start counts one more for an own open adventure', function () {
+t.test('start at home stores the template horseshoe choice', function () {
+    var s = runSetup(3);
+    s.S.modules.adventures.templates.save(record({ label: 'Pinned', speedBuff: 'GeneralSpeedBuff_B' }), 2000);
+    s.answer = '1';
+    assert.strictEqual(s.run.start('t2000'), true);
+    assert.strictEqual(s.S.modules.adventures.state.run().speedBuff, 'GeneralSpeedBuff_B');
+});
+
+t.test('start at home with the map open stores the zone and counts one more', function () {
     var s = runSetup(3, { open: true });
+    s.S.core.adventures.zoneIdOf = function () { return 7; };
     assert.strictEqual(s.run.start(s.id), true);
+    var run = s.S.modules.adventures.state.run();
+    assert.strictEqual(run.zoneId, 7);
+    assert.strictEqual(run.step, s.S.RunStep.Muster);
     assert.strictEqual(s.prompts[0].def, '4');
     assert.strictEqual(s.run.current().count, 4);
     assert.strictEqual(s.H.queued().length, 0);
+});
+
+t.test('start on the open map stores a run at Gate of the chosen wave', function () {
+    var s = runSetup(3, { open: true });
+    s.S.core.adventures.zoneIdOf = function () { return 7; };
+    s.S.core.zone.id = function () { return 7; };
+    s.H.host.game.gi.isOnHomzone = function () { return false; };
+    s.answer = '2';
+    assert.strictEqual(s.run.start(s.id), true);
+    var run = s.S.modules.adventures.state.run();
+    assert.strictEqual(run.step, s.S.WaveStep.Gate);
+    assert.strictEqual(run.zoneId, 7);
+    assert.strictEqual(run.waveIndex, 1);
+    assert.strictEqual(run.speedBuff, 'SpeedBuffDefault');
+    assert.strictEqual(s.prompts.length, 2);
+    assert.strictEqual(s.checks.length, 1);
+    assert.strictEqual(s.checks[0], undefined);
+});
+
+t.test('start elsewhere alerts and stores nothing', function () {
+    var s = runSetup(3);
+    s.S.core.adventures.zoneIdOf = function () { return 7; };
+    s.S.core.zone.id = function () { return 1; };
+    s.H.host.game.gi.isOnHomzone = function () { return false; };
+    s.answer = '2';
+    assert.strictEqual(s.run.start(s.id), false);
+    assert.strictEqual(s.run.current(), null);
+    assert.strictEqual(s.S.modules.adventures.state.run(), null);
+    assert.strictEqual(s.checks.length, 0);
+    assert.strictEqual(s.alerts.length, 1);
+    assert.ok(/Go home or view the .* island, then choose the template again/.test(s.alerts[0]), s.alerts[0]);
+    assert.strictEqual(s.H.queued().length, 0);
+});
+
+t.test('a fatal file problem at home stores nothing', function () {
+    var s = runSetup(3);
+    s.problems = [{ message: 'wave 1: file not found', fatal: true }];
+    s.answer = '2';
+    assert.strictEqual(s.run.start(s.id), false);
+    assert.strictEqual(s.run.current(), null);
+    assert.strictEqual(s.S.modules.adventures.state.run(), null);
+    assert.strictEqual(s.alerts.length, 1);
+    assert.ok(/cannot start: 1 problem/.test(s.alerts[0]), s.alerts[0]);
+    assert.ok(/file not found/.test(s.alerts[0]), s.alerts[0]);
+});
+
+t.test('the real file check at home stores nothing when the battle files are missing', function () {
+    var s = runSetup(3, { realCheck: true });
+    s.answer = '2';
+    assert.strictEqual(s.run.start(s.id), false);
+    assert.strictEqual(s.run.current(), null);
+    assert.strictEqual(s.S.modules.adventures.state.run(), null);
+    assert.ok(/cannot start/.test(s.alerts[0]), s.alerts[0]);
 });
 
 t.test('start with no maps alerts and stores nothing', function () {
@@ -420,7 +525,7 @@ t.test('replacing a request needs confirm; declined keeps the old one', function
     assert.strictEqual(s.H.queued().length, 0);
 });
 
-t.test('endRepetition sets count 1 and ended; count 1 or no request alerts', function () {
+t.test('endRepetition sets count to finished + 1 and ended; nothing to end alerts', function () {
     var s = runSetup(5);
     assert.strictEqual(s.run.endRepetition(), false);
     assert.strictEqual(s.alerts.length, 1);
@@ -434,6 +539,41 @@ t.test('endRepetition sets count 1 and ended; count 1 or no request alerts', fun
     assert.strictEqual(s.run.endRepetition(), false);
     assert.strictEqual(s.alerts.length, 2);
     assert.strictEqual(s.H.queued().length, 0);
+});
+
+t.test('endRepetition after finished runs keeps those and ends after the one in progress', function () {
+    var s = runSetup(5);
+    s.answer = '5';
+    s.run.start(s.id);
+    s.run.current().finished = 2;
+    assert.strictEqual(s.run.endRepetition(), true);
+    assert.strictEqual(s.run.current().count, 3);
+    assert.strictEqual(s.run.current().ended, true);
+    var saved = JSON.parse(s.fs.disk['C:/client/steward/adventures/run.json']).request;
+    assert.strictEqual(saved.count, 3);
+    assert.strictEqual(saved.ended, true);
+    s.alerts.length = 0;
+    assert.strictEqual(s.run.endRepetition(), false);
+    assert.strictEqual(s.run.current().count, 3);
+    assert.strictEqual(s.alerts.length, 1);
+});
+
+t.test('endRepetition follows the state counter rule for malformed counters', function () {
+    var s = runSetup(5);
+    s.answer = '5';
+    s.run.start(s.id);
+    s.alerts.length = 0;
+    // A non-numeric count reads as one requested run, so there is nothing to end.
+    s.run.current().count = 'x';
+    s.run.current().finished = 0;
+    assert.strictEqual(s.run.endRepetition(), false);
+    assert.strictEqual(s.alerts.length, 1);
+    // A fractional finished count is floored to 1, so the series ends after two runs.
+    s.run.current().count = 3;
+    s.run.current().finished = 1.7;
+    assert.strictEqual(s.run.endRepetition(), true);
+    assert.strictEqual(s.run.current().count, 2);
+    assert.strictEqual(s.run.current().ended, true);
 });
 
 t.test('stop removes the request and queued module entries; stopping again alerts', function () {
@@ -458,17 +598,6 @@ t.test('the request lives on the namespace and in the run file', function () {
     assert.strictEqual(JSON.parse(s.fs.disk[files[0]]).request.count, 2);
     s.S.modules.adventures.runState.request = null;
     assert.strictEqual(s.S.modules.adventures.run.current(), null);
-});
-
-t.test('start off the run island asks to view it and stores nothing', function () {
-    var s = runSetup(3);
-    s.S.core.adventures.zoneIdOf = function () { return 7; };
-    s.S.core.zone.id = function () { return 1; };
-    s.answer = '2';
-    assert.strictEqual(s.run.start(s.id), false);
-    assert.strictEqual(s.run.current(), null);
-    assert.strictEqual(s.alerts.length, 1);
-    assert.ok(/island, then choose the template again/.test(s.alerts[0]), s.alerts[0]);
 });
 
 // ---- menu sync ----------------------------------------------------------------------

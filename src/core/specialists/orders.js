@@ -1,5 +1,6 @@
 /*
- * General orders: move, attack, back to the star menu, send to an adventure.
+ * General orders: move, attack, back to the star menu, send to another zone
+ * (home to an adventure and back).
  *
  * Readers for a general's current task and action defs for the four orders.
  * The defs only describe how to check, send and observe; the caller runs them
@@ -87,6 +88,19 @@
             if (Object.prototype.hasOwnProperty.call(RAW_CODES, kind) && RAW_CODES[kind] === raw) return kind;
         }
         return null;
+    }
+
+    // Remaining travel time of the running task, or null. The unit is assumed
+    // to be milliseconds and has not been observed; callers log it raw.
+    function remaining(spec) {
+        try {
+            var t = task(spec);
+            if (!t || typeof t.GetRemainingTime !== 'function') return null;
+            var rem = t.GetRemainingTime();
+            return (typeof rem === 'number' && isFinite(rem) && rem >= 0) ? rem : null;
+        } catch (e) {
+            return null;
+        }
     }
 
     function newGrid(spec) {
@@ -326,19 +340,23 @@
         };
     }
 
-    // Sends a general from home to an open adventure zone (zoneId from
-    // S.core.adventures.zoneIdOf). Seen as sent when it left the home list,
-    // carries the travel task or reports travelling.
+    // Sends a general from the viewed zone to another: home to an adventure
+    // (zoneId from S.core.adventures.zoneIdOf), or an adventure back home. The
+    // client's battle window uses the same call for Return home. Seen as sent
+    // when it left the viewed list, carries the travel task or reports
+    // travelling.
     function sendToZone(key, zoneId) {
         return {
             label:     'send ' + key + ' to zone ' + zoneId,
             category:  CATEGORY,
             timeoutMs: ZONE_TIMEOUT_MS,
             precheck: function () {
-                if (S.core.zone.isHome() !== true) return 'not home';
+                if (typeof zoneId !== 'number') return 'bad zone id ' + zoneId;
+                var viewed = S.core.zone.id();
+                if (typeof viewed !== 'number') return 'viewed zone unreadable';
+                if (viewed === zoneId) return 'already on zone ' + zoneId;
                 var r = ready(key);
                 if (!r.spec) return r.reason;
-                if (typeof zoneId !== 'number') return 'bad zone id ' + zoneId;
                 return null;
             },
             baseline: function () {
@@ -381,6 +399,7 @@
         rawTaskType:       rawTaskType,
         taskKind:          taskKind,
         newGrid:           newGrid,
+        remaining:         remaining,
         isPlaceable:       isPlaceable,
         hasPath:           hasPath,
         sendTask:          sendTask,

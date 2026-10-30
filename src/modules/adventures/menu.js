@@ -4,7 +4,7 @@
  * Layout: "Run templates…", the run status line, "Pause run", "Resume
  * run", "End repetition", "Stop run", then one entry per readable template
  * labelled with the maps available for its adventure. Choosing a template
- * starts or requests a run of it. Every row only changes run state; the
+ * starts a run of it. Every row only changes run state; the
  * scheduler's plan() does the work. The list is flat instead of grouped by
  * adventure category: grouping needs the adventure definitions, which are
  * empty while the game is not loaded at menu build, so the groups would

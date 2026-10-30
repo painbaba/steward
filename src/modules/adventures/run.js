@@ -4,16 +4,18 @@
  *
  * Start asks for the run count, prefilled with the maps available (star-menu
  * maps plus one when an own adventure of that map is already open). What
- * happens next depends on the template's map:
- * - open and viewed: a second prompt asks for the start wave (default 1),
- *   the executor checks the loadout and wave files against the island, and
- *   a wave run starts at Gate of that wave. It acts only while the map is
- *   viewed.
- * - open but not viewed: nothing is stored; the user views the island and
- *   chooses the template again.
- * - not open: only the request is stored. Opening the map and sailing there
- *   are not automated yet, so the user opens it and chooses again.
- * End repetition cuts the count to one so a series stops after this run.
+ * happens next depends on where the user is:
+ * - the template's map is open and viewed: a second prompt asks for the
+ *   start wave (default 1), the executor checks the loadout and wave files
+ *   against the island, and the run starts at Gate of that wave. There is
+ *   no troop snapshot, so the first return home retrains nothing.
+ * - at home: the files and the loadout keys are checked without the
+ *   fighters, because the generals may still be away, and the run starts by
+ *   mustering them. The map is started by the run when it is not open yet.
+ * - anywhere else: nothing is stored; the user goes home or views the
+ *   island and chooses the template again.
+ * A fatal check problem stores nothing. End repetition lets the series stop
+ * after the current run.
  *
  * Menu handlers only change state. They never enqueue: an entry added from
  * a menu callback carries no module tag, so cancelByModule could not remove
@@ -28,7 +30,9 @@
  * template is configured. There is one request and one run at a time;
  * starting another asks before replacing them.
  *
- * Request shape: { templateId, label, adventure, count, ended, requested }.
+ * Request shape: { templateId, label, adventure, count, ended, requested,
+ * finished, closedAt }: finished counts the runs done in this series and
+ * closedAt is when the last map was closed.
  */
 
 (function (S) {
@@ -129,7 +133,7 @@
         var r = rs.run;
         var q = rs.request;
         var what = q ? '"' + q.label + '" ×' + q.count : '"' + r.label + '"';
-        if (r) what += ' (' + store().waveLabel() + ', ' + store().nameOf(S.RunStatus, r.status) + ')';
+        if (r) what += ' (' + store().label() + ', ' + store().nameOf(S.RunStatus, r.status) + ')';
         return 'Replace the requested run ' + what + '?';
     }
 
@@ -140,7 +144,9 @@
             adventure:  rec.adventure,
             count:      count,
             ended:      false,
-            requested:  store().now()
+            requested:  store().now(),
+            finished:   0,
+            closedAt:   null
         };
     }
 
@@ -154,6 +160,41 @@
         return false;
     }
 
+    // Runs the executor's start check and logs its warnings; null when the
+    // executor is not loaded (the user has been told).
+    function startCheck(rec, opts) {
+        var executor = S.modules.adventures.executor;
+        if (!executor || !executor.check) {
+            notify('The wave executor is not loaded; nothing started.');
+            return null;
+        }
+        var chk = executor.check(rec, opts) || {};
+        var warnings = listOf(chk.warnings);
+        for (var i = 0; i < warnings.length; i++) {
+            S.kernel.warn('adventures', 'start check "' + rec.label + '":', messageOf(warnings[i]));
+        }
+        chk.warnings = warnings;
+        return chk;
+    }
+
+    // A new run of the template, checked as chk. Without a step the store
+    // starts the run at Gate of the given wave.
+    function runFromTemplate(rec, chk, zoneId, waveIndex, step) {
+        return store().newRun({
+            id:          store().now(),
+            templateId:  rec.id,
+            label:       rec.label,
+            adventure:   rec.adventure,
+            zoneId:      zoneId,
+            paths:       rec.waves,
+            loadoutPath: rec.loadout,
+            loadoutKeys: chk.loadoutKeys,
+            waveIndex:   waveIndex,
+            step:        step,
+            speedBuff:   S.modules.adventures.templates.speedBuffChoice(rec)
+        });
+    }
+
     // The template's map is open and viewed: ask the start wave, check the
     // files against the island, then store a run at Gate of that wave.
     function startWaves(rec, count, zoneId) {
@@ -165,34 +206,35 @@
             return false;
         }
 
-        var executor = S.modules.adventures.executor;
-        if (!executor || !executor.check) {
-            notify('The wave executor is not loaded; nothing started.');
-            return false;
-        }
-        var chk = executor.check(rec) || {};
-        var warnings = listOf(chk.warnings);
-        for (var i = 0; i < warnings.length; i++) {
-            S.kernel.warn('adventures', 'start check "' + rec.label + '":', messageOf(warnings[i]));
-        }
+        var chk = startCheck(rec);
+        if (!chk) return false;
+        var warnings = chk.warnings;
         if (!chk.ok) return checkFailed(rec, listOf(chk.problems));
 
-        var run = store().newRun({
-            id:          store().now(),
-            templateId:  rec.id,
-            label:       rec.label,
-            adventure:   rec.adventure,
-            zoneId:      zoneId,
-            paths:       rec.waves,
-            loadoutPath: rec.loadout,
-            loadoutKeys: chk.loadoutKeys,
-            waveIndex:   w.wave - 1
-        });
+        var run = runFromTemplate(rec, chk, zoneId, w.wave - 1);
         store().begin(makeRequest(rec, count), run);
         S.kernel.log('adventures', 'run started:', rec.label, 'x' + count, 'at wave', w.wave, 'of', waves,
             'zone', zoneId, '(' + warnings.length + ' warning(s))');
         notify('Run started at wave ' + w.wave + ' of ' + waves + ': ' + rec.label +
             '. It acts while you view the map.' +
+            (warnings.length ? ' ' + warnings.length + ' warning(s) in the log.' : ''));
+        return true;
+    }
+
+    // At home: check the files and loadout keys only (the generals may be
+    // away), then store a run at Muster. zoneId is the open map's zone, or
+    // null until the run starts the map.
+    function startHome(rec, count, zoneId) {
+        var chk = startCheck(rec, { camps: false, fighters: false });
+        if (!chk) return false;
+        var warnings = chk.warnings;
+        if (!chk.ok) return checkFailed(rec, listOf(chk.problems));
+
+        var run = runFromTemplate(rec, chk, typeof zoneId === 'number' ? zoneId : null, 0, S.RunStep.Muster);
+        store().begin(makeRequest(rec, count), run);
+        S.kernel.log('adventures', 'run started from home:', rec.label, 'x' + count, 'zone', zoneId,
+            '(' + warnings.length + ' warning(s))');
+        notify('Run started from home: ' + rec.label + ' ×' + count + '.' +
             (warnings.length ? ' ' + warnings.length + ' warning(s) in the log.' : ''));
         return true;
     }
@@ -226,17 +268,10 @@
         }
 
         var zoneId = S.core.adventures.zoneIdOf(rec.adventure);
-        if (typeof zoneId === 'number') {
-            if (S.core.zone.id() === zoneId) return startWaves(rec, r.count, zoneId);
-            notify('View the ' + advLabel + ' island, then choose the template again to start the waves.');
-            return false;
-        }
-
-        store().begin(makeRequest(rec, r.count), null);
-        S.kernel.log('adventures', 'run requested:', rec.label, 'x' + r.count);
-        notify('Requested ' + r.count + ' run(s) of ' + rec.label + '. Open the map with its generals on the ' +
-            'island, then choose it again to run the waves.');
-        return true;
+        if (typeof zoneId === 'number' && S.core.zone.id() === zoneId) return startWaves(rec, r.count, zoneId);
+        if (S.core.zone.isHome() === true) return startHome(rec, r.count, zoneId);
+        notify('Go home or view the ' + advLabel + ' island, then choose the template again.');
+        return false;
     }
 
     function pause() {
@@ -256,7 +291,7 @@
             return false;
         }
         if (run.status === S.RunStatus.Done) {
-            notify('Waves are done; use Stop run.');
+            notify('The series is done; use Stop run.');
             return false;
         }
         if (run.status !== S.RunStatus.Paused) {
@@ -264,22 +299,24 @@
             return false;
         }
         if (!store().resume()) return false;
-        notify('Run resumed at ' + store().waveLabel() + ': ' + run.label + '.');
+        notify('Run resumed at ' + store().label() + ': ' + run.label + '.');
         return true;
     }
 
-    // Same meaning as autoTSO's end repetition: the remaining count becomes one.
+    // Same meaning as autoTSO's end repetition: the series ends with the run
+    // in progress, so the count becomes the runs finished plus that one.
     function endRepetition() {
         var req = current();
         if (!req) {
             notify('No run requested.');
             return false;
         }
-        if (req.count <= 1) {
-            notify('Only one run requested; there is no repetition to end.');
+        var finished = store().finishedRuns();
+        if (store().requestedRuns() <= finished + 1) {
+            notify('This is the last run requested; there is no repetition to end.');
             return false;
         }
-        req.count = 1;
+        req.count = finished + 1;
         req.ended = true;
         store().save();
         S.kernel.log('adventures', 'run repetition ended:', req.label);

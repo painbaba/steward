@@ -1,10 +1,18 @@
 /*
  * Run state store for the adventures module.
  *
- * Holds the run request and the wave run, and is the only writer of the
- * run's step and status. The wave executor, the quest watcher and the user
- * commands all change the run through the functions below, so every
- * transition is logged and persisted in one place.
+ * Holds the run request (the series: template, count, runs finished) and the
+ * current run, from muster at home through the waves and the end of the map
+ * back home, and is the only writer of the run's step and status. The home
+ * and away steps, the wave executor, the quest watcher and the user commands
+ * all change the run through the functions below, so every transition is
+ * logged and persisted in one place.
+ *
+ * run.step holds either a wave step (S.WaveStep, run by the executor) or a
+ * series step (S.RunStep). RUN_STEPS below is the one table of the series
+ * steps: S.RunStep is filled from it, and which part runs a step and on which
+ * zone it may run (partOf, readyOn) are read from it, so no second list of
+ * steps exists to drift from it. Wave steps always run on the run's island.
  *
  * Storage: one file, <steward folder>/adventures/run.json, written whole
  * with S.kernel.files.writeText (temp file, then move). The file replaces
@@ -19,11 +27,12 @@
  * file, and the executor re-observes the game before it sends anything.
  *
  * Memory-only parts of runState, never written: loaded, round (the action
- * round in flight), cache (parsed wave lines) and questRetry (quest key ->
- * time a failed claim may be retried). They describe callbacks and reads of
- * this client session, which do not exist after a restart. resetMemory() is
- * the one place that resets them for a new or loaded run. The round alone is
- * also dropped at bundle load and by dropRound(), because a reload or a
+ * round in flight), cache (parsed wave lines), questRetry (quest key ->
+ * time a failed claim may be retried) and homeNote (the last wait the home
+ * steps logged, so a repeated wait is logged once). They describe callbacks
+ * and reads of this client session, which do not exist after a restart.
+ * resetMemory() is the one place that resets them for a new or loaded run.
+ * The round alone is also dropped at bundle load and by dropRound(), because a reload or a
  * cancelled queue removes its queued attempts while the run stays as it was.
  *
  * newRun() is the one literal of the run's shape; starting a run and loading
@@ -33,13 +42,21 @@
  * A run file that cannot be trusted is never guessed at: an unknown step
  * restarts the wave at Gate, an unknown status pauses the run, and a run
  * without its loadout keys pauses until the user stops and starts it again.
+ * A file written before the series fields existed loads with their newRun
+ * defaults (no snapshot, no marks, no runs finished).
+ *
+ * Resume re-enters the paused step with fresh rounds and a fresh start time,
+ * after the user has looked at the game. A wave step restarts its wave at
+ * Gate instead, which re-reads the wave file. Unseen send markers (wave
+ * lines and series marks) are cleared, so an order that never showed in the
+ * game may be sent again.
  *
  * now() is the one clock of the run; callers read it through the namespace
  * at call time, so tests can replace it.
  *
- * Bundle slot: module file; top level fills S.WaveStep, S.RunStatus,
- * S.RunPause, drops runState.round and assigns S.modules.adventures.state;
- * all else at call time.
+ * Bundle slot: module file; top level fills S.WaveStep, S.RunStep,
+ * S.RunStatus, S.RunPause, drops runState.round and assigns
+ * S.modules.adventures.state; all else at call time.
  */
 
 (function (S) {
@@ -56,6 +73,46 @@
     S.WaveStep.Settle   = 'WaveSettle';
     S.WaveStep.Attack   = 'WaveAttack';
     S.WaveStep.Confirm  = 'WaveConfirm';
+
+    // Where a series step may run. File-local and never persisted: the
+    // file stores only the step value.
+    var HOME = 1;       // the home island is viewed
+    var ADVENTURE = 2;  // the run's adventure island is viewed
+    var ANY = 3;        // any zone; the step itself handles where it is
+
+    // The series steps in run order: [key, value, where]. The one table:
+    // S.RunStep, partOf() and readyOn() are all read from it.
+    var RUN_STEPS = [
+        ['Muster',     'RunMuster',     HOME],
+        ['Validate',   'RunValidate',   HOME],
+        ['Snapshot',   'RunSnapshot',   HOME],
+        ['Supply',     'RunSupply',     HOME],
+        ['Unload',     'RunUnload',     HOME],
+        ['Load',       'RunLoad',       HOME],
+        ['Verify',     'RunVerify',     HOME],
+        ['StartMap',   'RunStartMap',   HOME],
+        ['Depart',     'RunDepart',     HOME],
+        ['Jump',       'RunJump',       ANY],
+        ['Arrive',     'RunArrive',     ADVENTURE],
+        ['StarAll',    'RunStarAll',    ADVENTURE],
+        ['Horseshoe',  'RunHorseshoe',  ADVENTURE],
+        ['Clear',      'RunClear',      ADVENTURE],
+        ['PackStar',   'RunPackStar',   ADVENTURE],
+        ['Pack',       'RunPack',       ADVENTURE],
+        ['LastQuest',  'RunLastQuest',  ANY],
+        ['Close',      'RunClose',      ANY],
+        ['Recall',     'RunRecall',     ANY],
+        ['JumpHome',   'RunJumpHome',   ANY],
+        ['ArriveHome', 'RunArriveHome', HOME],
+        ['Account',    'RunAccount',    HOME],
+        ['Population', 'RunPopulation', HOME],
+        ['Retrain',    'RunRetrain',    HOME],
+        ['Next',       'RunNext',       HOME]
+    ];
+
+    (function () {
+        for (var i = 0; i < RUN_STEPS.length; i++) S.RunStep[RUN_STEPS[i][0]] = RUN_STEPS[i][1];
+    }());
 
     S.RunStatus.Running = 'RunRunning';
     S.RunStatus.Paused  = 'RunPaused';
@@ -77,6 +134,16 @@
     S.RunPause.AttackUnconfirmed = 'PauseAttackUnconfirmed';
     S.RunPause.BuffFailed        = 'PauseBuffFailed';
     S.RunPause.NotObserved       = 'PauseNotObserved';
+    S.RunPause.MapFailed         = 'PauseMapFailed';
+    S.RunPause.DepartFailed      = 'PauseDepartFailed';
+    S.RunPause.JumpFailed        = 'PauseJumpFailed';
+    S.RunPause.StarFailed        = 'PauseStarFailed';
+    S.RunPause.PackFailed        = 'PausePackFailed';
+    S.RunPause.QuestFailed       = 'PauseQuestFailed';
+    S.RunPause.CloseFailed       = 'PauseCloseFailed';
+    S.RunPause.ClearTimeout      = 'PauseClearTimeout';
+    S.RunPause.RetrainShort      = 'PauseRetrainShort';
+    S.RunPause.RetrainFailed     = 'PauseRetrainFailed';
 
     var FILE_VERSION = 1;
     var SUBDIR = 'adventures';
@@ -129,6 +196,54 @@
         return value === null || value === undefined ? '' : String(value);
     }
 
+    // ---- Steps --------------------------------------------------------------
+
+    function isWaveStep(v) {
+        return isValue(S.WaveStep, v);
+    }
+
+    function isStep(v) {
+        return isWaveStep(v) || isValue(S.RunStep, v);
+    }
+
+    // The where of a series step, or 0 for anything else.
+    function whereOf(step) {
+        for (var i = 0; i < RUN_STEPS.length; i++) {
+            if (RUN_STEPS[i][1] === step) return RUN_STEPS[i][2];
+        }
+        return 0;
+    }
+
+    // The property of S.modules.adventures whose plan() runs the step, or
+    // null for a value that is no step.
+    function partOf(step) {
+        if (isWaveStep(step)) return 'executor';
+        var w = whereOf(step);
+        if (w === HOME) return 'home';
+        if (w === ADVENTURE || w === ANY) return 'away';
+        return null;
+    }
+
+    // Whether the run's step may run on the zone the scheduler saw
+    // ({ id, isHome }). A wave step runs on the run's island like an
+    // ADVENTURE step. An unknown step runs nowhere.
+    function readyOn(r, zone) {
+        if (!r) return false;
+        var z = zone || {};
+        var w = isWaveStep(r.step) ? ADVENTURE : whereOf(r.step);
+        if (w === ANY) return true;
+        if (w === HOME) {
+            if (typeof z.isHome === 'boolean') return z.isHome;
+            return !!(S.core.zone && S.core.zone.isHome() === true);
+        }
+        if (w === ADVENTURE) return typeof r.zoneId === 'number' && z.id === r.zoneId;
+        return false;
+    }
+
+    function stepName(step) {
+        return nameOf(isWaveStep(step) ? S.WaveStep : S.RunStep, step);
+    }
+
     function now() {
         return new Date().getTime();
     }
@@ -170,6 +285,29 @@
         return 'wave ' + Math.min(r.waveIndex + 1, n) + '/' + n;
     }
 
+    // Where the run is, for log, pause and notify texts: the wave during the
+    // waves, else the series step.
+    function labelOf(step) {
+        return isWaveStep(step) ? waveLabel() : stepName(step);
+    }
+
+    function label() {
+        var r = run();
+        return r ? labelOf(r.step) : '';
+    }
+
+    // Runs finished and runs requested; a run without a request counts as a
+    // series of one.
+    function finishedRuns() {
+        var q = current().request;
+        return q ? count(q.finished) : 0;
+    }
+
+    function requestedRuns() {
+        var q = current().request;
+        return q && num(q.count) !== null && q.count >= 1 ? Math.floor(q.count) : 1;
+    }
+
     function status() {
         var rs = current();
         var r = rs.run;
@@ -179,8 +317,9 @@
             if (runCmd && runCmd.statusText) return runCmd.statusText(rs.request);
             return 'Requested: ' + rs.request.label;
         }
-        if (r.status === S.RunStatus.Done) return 'Waves done: ' + r.label + ' (' + r.paths.length + ' waves)';
-        var where = r.label + ', ' + waveLabel() + ', ' + nameOf(S.WaveStep, r.step);
+        if (r.status === S.RunStatus.Done) return 'Done: ' + r.label + ', ' + finishedRuns() + ' run(s)';
+        var where = r.label + ', run ' + (finishedRuns() + 1) + '/' + requestedRuns() + ', ' +
+            (isWaveStep(r.step) ? waveLabel() + ', ' : '') + stepName(r.step);
         if (r.status === S.RunStatus.Paused) {
             return 'Paused: ' + where + ': ' + (r.pause ? r.pause.message : '');
         }
@@ -230,20 +369,40 @@
         return true;
     }
 
+    // ---- Run shape ----------------------------------------------------------
+
+    // A troop count per unit: own keys with finite counts >= 0 are kept.
+    // null (not a map) means "no snapshot", which skips retraining.
+    function normArmy(v) {
+        if (!isPlainObject(v)) return null;
+        var out = {};
+        for (var k in v) {
+            if (has(v, k) && typeof v[k] === 'number' && isFinite(v[k]) && v[k] >= 0) out[k] = v[k];
+        }
+        return out;
+    }
+
     // round, cache and questRetry belong to the run they were built for; a
     // new request, a new run or a loaded file starts without them.
     function resetMemory(rs) {
         rs.round = null;
         rs.cache = null;
         rs.questRetry = {};
+        rs.homeNote = null;
     }
-
-    // ---- Run shape ----------------------------------------------------------
 
     // The only literal of the run object. start holds the facts fixed at
     // start: { id, templateId, label, adventure, zoneId, paths, loadoutPath,
-    // loadoutKeys, waveIndex }; every progress field takes its start value.
+    // loadoutKeys, waveIndex, speedBuff } and optionally the first step
+    // (Gate when it is no step); every progress field takes its start value.
     // start may be omitted for the default shape.
+    //
+    // speedBuff is the template's choice as written and is resolved when it
+    // is used. snapshot is the army counted at home before loading (null:
+    // none). marks are the send markers of the series steps, in the shape of
+    // lines. waitUntil is the deadline of the step that is waiting. popBase
+    // is the free population read before the last population buff, so the
+    // next pass can tell whether the buff took effect.
     function newRun(start) {
         var s = isPlainObject(start) ? start : {};
         var t = clock();
@@ -258,7 +417,8 @@
             loadoutPath: str(s.loadoutPath),
             loadoutKeys: isPlainObject(s.loadoutKeys) ? s.loadoutKeys : {},
             waveIndex:   count(s.waveIndex),
-            step:        S.WaveStep.Gate,
+            speedBuff:   str(s.speedBuff),
+            step:        isStep(s.step) ? s.step : S.WaveStep.Gate,
             status:      S.RunStatus.Running,
             since:       t,
             rounds:      0,
@@ -268,6 +428,10 @@
             blocker:     null,
             donors:      [],
             lines:       {},
+            snapshot:    null,
+            marks:       {},
+            waitUntil:   null,
+            popBase:     null,
             pause:       null
         };
     }
@@ -283,7 +447,9 @@
             adventure:  str(q.adventure),
             count:      n !== null && n >= 1 ? Math.floor(n) : 1,
             ended:      q.ended === true,
-            requested:  num(q.requested)
+            requested:  num(q.requested),
+            finished:   count(q.finished),
+            closedAt:   num(q.closedAt)
         };
     }
 
@@ -334,7 +500,7 @@
         return {
             reason:  isValue(S.RunPause, p.reason) ? p.reason : S.RunPause.NotObserved,
             message: str(p.message),
-            step:    isValue(S.WaveStep, p.step) ? p.step : null,
+            step:    isStep(p.step) ? p.step : null,
             wave:    num(p.wave),
             general: scalar(p.general),
             target:  scalar(p.target),
@@ -372,7 +538,8 @@
             paths:       strings(v.paths),
             loadoutPath: str(v.loadoutPath),
             loadoutKeys: normKeys(v.loadoutKeys),
-            waveIndex:   count(v.waveIndex)
+            waveIndex:   count(v.waveIndex),
+            speedBuff:   str(v.speedBuff)
         };
         var r = newRun(facts);
         var k;
@@ -390,11 +557,15 @@
         r.blocker    = normBlocker(v.blocker);
         r.donors     = strings(v.donors);
         r.lines      = normLines(v.lines);
+        r.snapshot   = normArmy(v.snapshot);
+        r.marks      = normLines(v.marks);
+        r.waitUntil  = num(v.waitUntil);
+        r.popBase    = num(v.popBase);
         r.pause      = normPause(v.pause);
         for (k in facts) {
             if (has(facts, k)) r[k] = facts[k];
         }
-        if (!isValue(S.WaveStep, r.step)) {
+        if (!isStep(r.step)) {
             repaired.push('unknown step ' + String(r.step) + ' -> Gate');
             r.step = S.WaveStep.Gate;
         }
@@ -456,18 +627,24 @@
 
     // The only writer of run.step. A new step starts with no action round
     // unless opts.keepRounds carries the round over (Load -> Verify, and
-    // Attack -> Confirm, which reads the round's results).
+    // Attack -> Confirm, which reads the round's results). Going to the same
+    // step re-enters it with fresh rounds and a fresh start time. Every step
+    // change drops the waiting deadline; a waiting step sets its own.
     function go(step, why, opts) {
         var rs = current();
         var r = rs.run;
         if (!r) return false;
-        if (!isValue(S.WaveStep, step)) {
-            S.kernel.warn('adventures', 'not a wave step:', step);
+        if (!isStep(step)) {
+            S.kernel.warn('adventures', 'not a run step:', step);
             return false;
         }
         var from = r.step;
+        // Leaving a wave keeps the wave in the log line (wave 3/3: Confirm ->
+        // Clear); otherwise the line names where the run now is.
+        var where = isWaveStep(from) ? labelOf(from) : labelOf(step);
         r.step = step;
         r.since = clock();
+        r.waitUntil = null;
         if (!(opts && opts.keepRounds)) {
             r.rounds = 0;
             rs.round = null;
@@ -475,8 +652,8 @@
         r.settled = 0;
         // Gate re-reads the wave file, so an edit made during a pause is seen.
         if (step === S.WaveStep.Gate) rs.cache = null;
-        S.kernel.log('adventures', waveLabel() + ': ' + nameOf(S.WaveStep, from) + ' -> ' +
-            nameOf(S.WaveStep, step) + (why ? ' (' + why + ')' : ''));
+        S.kernel.log('adventures', where + ': ' + stepName(from) + ' -> ' +
+            stepName(step) + (why ? ' (' + why + ')' : ''));
         save();
         refresh();
         return true;
@@ -503,39 +680,53 @@
         var who = '';
         if (r.pause.general !== null) who += ' general ' + r.pause.general;
         if (r.pause.target !== null) who += ' target ' + r.pause.target;
-        S.kernel.warn('adventures', 'run paused at ' + waveLabel() + ' (' + nameOf(S.WaveStep, r.step) + '): ' +
+        S.kernel.warn('adventures', 'run paused at ' + label() + ' (' + stepName(r.step) + '): ' +
             nameOf(S.RunPause, reason) + ': ' + r.pause.message + who);
         save();
-        notify('Adventure run paused at ' + waveLabel() + ' (' + nameOf(S.WaveStep, r.step) + '): ' + r.pause.message);
+        notify('Adventure run paused at ' + label() + ' (' + stepName(r.step) + '): ' + r.pause.message);
         refresh();
         return true;
     }
 
-    // The user has looked at the map: a line that was sent but never seen is
-    // sent again, and the wave restarts at Gate. sentOnce stays: it records
-    // that a packet went out at some time, so a camp that is gone after the
-    // resume can be counted as beaten by that attack instead of unreachable.
+    // Clears sentAt of every unseen record of a lines or marks map and
+    // returns their names. sentOnce stays: it records that a packet went out
+    // at some time, so a camp that is gone after the resume can be counted as
+    // beaten by that attack instead of unreachable.
+    function clearUnseen(recs) {
+        var cleared = [];
+        if (!isPlainObject(recs)) return cleared;
+        for (var k in recs) {
+            if (!has(recs, k) || !isPlainObject(recs[k])) continue;
+            if (!recs[k].seen && recs[k].sentAt !== null && recs[k].sentAt !== undefined) {
+                recs[k].sentAt = null;
+                cleared.push(k);
+            }
+        }
+        return cleared;
+    }
+
+    // The user has looked at the game: a line or order that was sent but
+    // never seen may be sent again. A wave step restarts its wave at Gate;
+    // a series step is entered again with fresh rounds.
     function resume() {
         var rs = current();
         var r = rs.run;
         if (!r || r.status !== S.RunStatus.Paused) return false;
-        var cleared = [];
-        for (var k in r.lines) {
-            if (!has(r.lines, k)) continue;
-            if (!r.lines[k].seen && r.lines[k].sentAt !== null) {
-                r.lines[k].sentAt = null;
-                cleared.push(k);
-            }
+        var lines = clearUnseen(r.lines);
+        var marks = clearUnseen(r.marks);
+        if (lines.length) {
+            S.kernel.log('adventures', 'resume: sent marker cleared for unseen lines', lines.join(', '));
         }
-        if (cleared.length) {
-            S.kernel.log('adventures', 'resume: sent marker cleared for unseen lines', cleared.join(', '));
+        if (marks.length) {
+            S.kernel.log('adventures', 'resume: sent marker cleared for unseen orders', marks.join(', '));
         }
         r.pause = null;
         r.blocker = null;
         r.settleFrom = null;
         r.cycles = 0;
         r.status = S.RunStatus.Running;
-        return go(S.WaveStep.Gate, 'resumed');
+        if (isWaveStep(r.step)) return go(S.WaveStep.Gate, 'resumed');
+        return go(r.step, 'resumed');
     }
 
     function clear() {
@@ -575,6 +766,7 @@
         return true;
     }
 
+    // The series is done: every requested run has finished.
     function done() {
         var rs = current();
         var r = rs.run;
@@ -583,9 +775,9 @@
         r.pause = null;
         rs.round = null;
         rs.cache = null;
-        S.kernel.log('adventures', 'waves done:', r.label, '(' + r.paths.length + ' waves)');
+        S.kernel.log('adventures', 'series done: ' + r.label + ' (' + finishedRuns() + ' run(s))');
         save();
-        notify('Adventure waves done: ' + r.label + '. Finish the map by hand.');
+        notify('Adventure series done: ' + r.label + '.');
         refresh();
         return true;
     }
@@ -596,23 +788,31 @@
     current().round = null;
 
     S.modules.adventures.state = {
-        FILE_VERSION: FILE_VERSION,
-        current:      current,
-        run:          run,
-        load:         load,
-        newRun:       newRun,
-        begin:        begin,
-        save:         save,
-        go:           go,
-        pause:        pause,
-        resume:       resume,
-        clear:        clear,
-        dropRound:    dropRound,
-        done:         done,
-        now:          now,
-        nameOf:       nameOf,
-        status:       status,
-        waveLabel:    waveLabel
+        FILE_VERSION:  FILE_VERSION,
+        current:       current,
+        run:           run,
+        load:          load,
+        newRun:        newRun,
+        begin:         begin,
+        save:          save,
+        go:            go,
+        pause:         pause,
+        resume:        resume,
+        clear:         clear,
+        dropRound:     dropRound,
+        done:          done,
+        now:           now,
+        nameOf:        nameOf,
+        status:        status,
+        finishedRuns:  finishedRuns,
+        requestedRuns: requestedRuns,
+        waveLabel:     waveLabel,
+        label:         label,
+        stepName:      stepName,
+        isStep:        isStep,
+        isWaveStep:    isWaveStep,
+        partOf:        partOf,
+        readyOn:       readyOn
     };
 
 }(Steward));

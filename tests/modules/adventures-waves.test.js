@@ -1,234 +1,41 @@
 'use strict';
 
 // Wave executor of the adventures module: run state file, executor steps,
-// attack pacer, quest watcher, start command and scheduler wiring. The game
-// is the army/actions stub host; a small "world" applies the effect of each
-// order the way the client would, and play() runs the queued entries in
-// order with a test clock that advances by each entry's delay.
+// attack pacer, quest watcher, start command and scheduler wiring. The world
+// (tests/stubs/adventures.js) applies the effect of each order the way the
+// client would, and play() runs the queued entries with a test clock. After
+// the last wave the run hands over to the end of the map (RunStep.Clear),
+// which these tests stop at.
 
 var t = require('../runner');
 var harness = require('../harness');
-var airfs = require('../stubs/airfs');
 var A = require('../stubs/army');
 var AC = require('../stubs/actions');
+var W = require('../stubs/adventures');
 
 var assert = t.assert;
 
-var ZONE = 7;
-var RUN_FILE = 'C:/client/steward/adventures/run.json';
-var LOADOUT = 'C:/b/loadout.txt';
-var ADVENTURE_MANAGER = 'com.bluebyte.tso.adventure.logic::AdventureManager';
+var ZONE = W.ZONE;
+var RUN_FILE = W.RUN_FILE;
+var LOADOUT = W.LOADOUT;
 
-function plain(v) { return JSON.parse(JSON.stringify(v)); }
+var plain = W.plain;
+var writeJson = W.writeJson;
+var patchCore = W.patchCore;
+var world = W.world;
+var drain = W.drain;
+var tick = W.tick;
+var play = W.play;
+var runOut = W.runOut;
+var startRun = W.startRun;
+var stepName = W.stepName;
 
-function keyOf(spec) { return spec.GetUniqueID().toKeyString(); }
-
-function writeJson(fs, path, data) { fs.disk[path] = JSON.stringify(data); }
-
-// ---- world ----------------------------------------------------------------
-
-// The world's view of the core library: camps, camp buffs and quests. Core
-// functions live in the bundle, so a script reload needs this applied again.
-function patchCore(w) {
-    var S = w.S;
-    S.core.buildings.byGrid = function (grid) {
-        if (!w.camps[grid]) return null;
-        return { grid: grid, GetStreetGridEntry: function () { return grid + 1000; } };
-    };
-    S.core.buildings.isEnemy = function (b) { return !!b && w.camps[b.grid] === true; };
-
-    S.core.buffs.camp = function (name, grid) {
-        var done = false;
-        return {
-            label: 'buff ' + name + ' -> ' + grid,
-            timeoutMs: 15000,
-            send: function () { w.buffs.push({ name: name, grid: grid, t: w.t }); done = true; return true; },
-            check: function () { return done; }
-        };
-    };
-
-    S.core.quests.finished = function () {
-        if (w.quests === null) return null;
-        return w.quests.filter(function (q) { return q.finished; });
-    };
-    S.core.quests.claim = function (key, opts) {
-        w.claims.push({ key: key, opts: opts });
-        return {
-            label: 'claim quest ' + key,
-            timeoutMs: 15000,
-            send: function () {
-                w.quests = w.quests.filter(function (q) { return q.key !== key; });
-                return true;
-            },
-            check: function () { return true; }
-        };
-    };
+// The last wave is confirmed: the run goes on to the end of the map.
+function assertHandedOver(w) {
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Running, 'status ' + r.status);
+    assert.strictEqual(r.step, w.S.RunStep.Clear, 'step ' + stepName(w));
 }
-
-// o.generals: AC.general list (the zone's specialist list, mutable through
-// w.fighters); o.free: free pool map; o.camps: grid -> true (enemy) or 'own';
-// o.quests: [{ key, name, finished, last }] or null (unreadable);
-// o.fs: an airfs disk to boot on (fresh boot on the same disk).
-function world(o) {
-    o = o || {};
-    var fs = o.fs || airfs.make();
-    var alerts = [];
-    var H = harness.boot({ host: { air: fs.air, showGameAlert: function (m) { alerts.push(m); } } });
-    var S = H.Steward;
-    var fighters = (o.generals || []).slice(0);
-    A.install(H, { fighters: fighters, units: A.unitCatalogue([], ['Rifle', 'Bow']) });
-    var sent = AC.wire(H);
-    var gi = H.host.game.gi;
-
-    var w = {
-        fs: fs, H: H, S: S, sent: sent, alerts: alerts, fighters: fighters,
-        t: 1000000,
-        free: o.free || { Rifle: 100, Bow: 100 },
-        camps: o.camps || { 100: true, 200: true, 300: true },
-        quests: o.quests === undefined ? [] : o.quests,
-        auto: { move: true, attack: true, star: true, raise: true, unload: true },
-        orders: [], raises: [], unloads: [], buffs: [], claims: [],
-        pending: [], entries: [],
-        adventures: [{ adventureName: 'BlackKnights', zoneID: ZONE }]
-    };
-    w.st = S.modules.adventures.state;
-    w.ex = S.modules.adventures.executor;
-    w.mod = H.module('adventures');
-
-    w.st.now = function () { return w.t; };
-    gi.mCurrentViewedZoneID = ZONE;
-    H.host.game.zone.GetArmy = function () { return A.armyOf(w.free); };
-
-    w.byKey = function (key) {
-        for (var i = 0; i < fighters.length; i++) if (keyOf(fighters[i]) === key) return fighters[i];
-        return null;
-    };
-
-    // Order codes come from the orders table, so the test follows it.
-    var RAW = S.core.specialists.orders.RAW_CODES;
-    w.code = { move: RAW[S.GeneralTask.Move], attack: RAW[S.GeneralTask.Attack], star: RAW[S.GeneralTask.ToStar] };
-    var sendAction = gi.SendServerAction;
-    gi.SendServerAction = function (id, p1, p2, p3, data) {
-        sendAction.apply(this, arguments);
-        var key = data && data.uniqueID ? data.uniqueID.toKeyString() : null;
-        w.orders.push({ key: key, code: p1, grid: p2, t: w.t });
-        var g = w.byKey(key);
-        if (!g) return;
-        if (p1 === w.code.move && w.auto.move) g.state.grid = p2;
-        if (p1 === w.code.attack && w.auto.attack) g.state.task = { type: w.code.attack };
-        if (p1 === w.code.star && w.auto.star) fighters.splice(fighters.indexOf(g), 1);
-    };
-
-    // Raise: message 1031 with the full target composition.
-    var sendMessage = gi.mClientMessages.SendMessagetoServer;
-    gi.mClientMessages.SendMessagetoServer = function (id, zone, data) {
-        sendMessage.apply(this, arguments);
-        if (id !== 1031) return;
-        var key = data.armyHolderSpecialistVO.uid;
-        w.raises.push(key);
-        var g = w.byKey(key);
-        if (!g || !w.auto.raise) return;
-        var want = {};
-        data.unitSquads.items.forEach(function (r) { want[r.name_string] = r.amount; });
-        Object.keys(want).forEach(function (u) {
-            var draw = want[u] - (g.state.army[u] || 0);
-            if (draw > 0) w.free[u] = (w.free[u] || 0) - draw;
-        });
-        g.state.army = want;
-    };
-
-    sent.registerDef('MilitarySystem::cMilitaryUtil', {
-        SendRaiseArmyToServer: function (host, spec) {
-            w.unloads.push(keyOf(spec));
-            if (!w.auto.unload) return;
-            Object.keys(spec.state.army).forEach(function (u) {
-                w.free[u] = (w.free[u] || 0) + spec.state.army[u];
-            });
-            spec.state.army = {};
-        }
-    });
-
-    sent.registerDef(ADVENTURE_MANAGER, {
-        getInstance: function () {
-            return {
-                getAdventures: function () { return w.adventures; },
-                isMyAdventure: function () { return true; }
-            };
-        }
-    });
-
-    patchCore(w);
-
-    return w;
-}
-
-// Moves the captured queue into w.pending, keeping FIFO order.
-function drain(w) {
-    w.pending = w.pending.concat(w.H.queued());
-    w.H.clearQueued();
-}
-
-// One scheduler tick: plan() only when isReady, tagged with the module as
-// the scheduler does.
-function tick(w) {
-    if (!w.mod.isReady({ zone: { id: w.S.core.zone.id() } })) return false;
-    w.S.kernel._currentModule = 'adventures';
-    try { w.mod.plan({}); }
-    finally { w.S.kernel._currentModule = null; }
-    drain(w);
-    return true;
-}
-
-// Runs queued entries one by one (core.attempt through actions.step, the
-// pacer through executor.pace) until none is left or until() holds. Each
-// entry advances the clock by its delay and runs under its own module tag,
-// so a re-enqueue inherits it as in the kernel queue.
-function play(w, until) {
-    drain(w);
-    for (var n = 0; n < 2000 && w.pending.length; n++) {
-        var e = w.pending.shift();
-        w.entries.push(e);
-        w.t += e.delay || 0;
-        w.S.kernel._currentModule = e.moduleId;
-        try {
-            if (e.name === 'core.attempt') w.S.core.actions.step(e.params);
-            else if (e.name === w.ex.PACE_ACTION) w.ex.pace(e.params);
-        } finally {
-            w.S.kernel._currentModule = null;
-        }
-        drain(w);
-        if (until && until()) return n + 1;
-    }
-    return n;
-}
-
-// Ticks and plays until the run is no longer Running or `max` ticks passed.
-function runOut(w, max) {
-    for (var i = 0; i < (max || 40); i++) {
-        var r = w.st.run();
-        if (!r || r.status !== w.S.RunStatus.Running) return;
-        tick(w);
-        play(w);
-    }
-}
-
-// A run at `step` of wave index `waveIndex` over the given wave files.
-function startRun(w, paths, over) {
-    over = over || {};
-    var S = w.S;
-    var keys = {};
-    w.fighters.forEach(function (g) { keys[keyOf(g)] = true; });
-    var r = w.st.newRun({
-        id: 42, templateId: 't1', label: 'Black Knights', adventure: 'BlackKnights', zoneId: ZONE,
-        paths: paths, loadoutPath: LOADOUT, loadoutKeys: over.loadoutKeys || keys,
-        waveIndex: over.waveIndex || 0
-    });
-    if (over.step) r.step = over.step;
-    w.st.begin({ templateId: 't1', label: 'Black Knights', adventure: 'BlackKnights', count: 1, ended: false, requested: w.t }, r);
-    return w.st.run();
-}
-
-function stepName(w) { return w.st.nameOf(w.S.WaveStep, w.st.run().step); }
 
 function attacksOf(w, key) {
     return w.orders.filter(function (o) { return o.code === w.code.attack && (!key || o.key === key); });
@@ -294,11 +101,17 @@ t.test('state: an unknown step loads as Gate', function () {
 t.test('state: status text for Running, Paused and Done', function () {
     var w = attackWorld();
     startRun(w, ['C:/b/w1.txt', 'C:/b/w2.txt'], { step: w.S.WaveStep.Supply });
-    assert.strictEqual(w.st.status(), 'Running: Black Knights, wave 1/2, Supply');
+    assert.strictEqual(w.st.status(), 'Running: Black Knights, run 1/1, wave 1/2, Supply');
     w.st.pause(w.S.RunPause.User, 'paused by you');
-    assert.strictEqual(w.st.status(), 'Paused: Black Knights, wave 1/2, Supply: paused by you');
+    assert.strictEqual(w.st.status(), 'Paused: Black Knights, run 1/1, wave 1/2, Supply: paused by you');
+    w.st.resume();
+    w.st.current().request.count = 3;
+    w.st.current().request.finished = 1;
+    w.st.go(w.S.RunStep.Clear, 'test');
+    assert.strictEqual(w.st.status(), 'Running: Black Knights, run 2/3, Clear');
+    w.st.current().request.finished = 3;
     w.st.done();
-    assert.strictEqual(w.st.status(), 'Waves done: Black Knights (2 waves)');
+    assert.strictEqual(w.st.status(), 'Done: Black Knights, 3 run(s)');
     w.st.clear();
     assert.strictEqual(w.st.status(), 'No run requested');
 });
@@ -355,6 +168,38 @@ t.test('state: every newRun field survives a fresh boot', function () {
     assert.strictEqual(loaded.loadoutPath, LOADOUT);
     assert.deepStrictEqual(plain(loaded.paths), ['C:/b/w1.txt', 'C:/b/w2.txt']);
     assert.strictEqual(loaded.waveIndex, 1);
+});
+
+t.test('state: a 0.6.0 run file loads Running at its step with the new fields defaulted', function () {
+    var fs = world().fs;
+    writeJson(fs, RUN_FILE, {
+        version: 1,
+        request: { templateId: 't1', label: 'Black Knights', adventure: 'BlackKnights', count: 2, ended: false, requested: 5 },
+        run: {
+            id: 42, templateId: 't1', label: 'Black Knights', adventure: 'BlackKnights', zoneId: ZONE,
+            paths: ['C:/b/w1.txt'], loadoutPath: LOADOUT, loadoutKeys: { '1.1': true }, waveIndex: 0,
+            step: 'WaveAttack', status: 'RunRunning', since: 7, rounds: 0, cycles: 0, settleFrom: null,
+            settled: 0, blocker: null, donors: [], lines: { '1.1': { sentAt: 9, seen: true, sentOnce: true } },
+            pause: null
+        }
+    });
+    var w = world({ fs: fs });
+    w.mod.boot();
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Running);
+    assert.strictEqual(r.step, w.S.WaveStep.Attack);
+    assert.strictEqual(r.zoneId, ZONE);
+    assert.deepStrictEqual(plain(r.lines['1.1']), { sentAt: 9, seen: true, sentOnce: true });
+    assert.strictEqual(r.speedBuff, '');
+    assert.strictEqual(r.snapshot, null);
+    assert.deepStrictEqual(plain(r.marks), {});
+    assert.strictEqual(r.waitUntil, null);
+    assert.strictEqual(r.popBase, null);
+    var q = w.st.current().request;
+    assert.strictEqual(q.count, 2);
+    assert.strictEqual(q.finished, 0);
+    assert.strictEqual(q.closedAt, null);
+    assert.strictEqual(w.st.status(), 'Running: Black Knights, run 1/2, wave 1/1, Attack');
 });
 
 // ---- Gate -------------------------------------------------------------------
@@ -567,6 +412,29 @@ t.test('watcher: a finished non-last quest is claimed, the last never', function
     assert.ok(w.H.logs().some(function (l) { return /quest Scout claimed/.test(l.args.join(' ')); }));
 });
 
+t.test('watcher: claims nothing while the viewed zone is not the run island', function () {
+    var w = attackWorld();
+    w.sent.pathLen = 0;
+    w.quests = [{ key: 'q1', name: 'Scout', finished: true, last: false }];
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Reach });
+    w.H.host.game.gi.mCurrentViewedZoneID = ZONE + 1;
+    // The plan runs directly: the scheduler would not even call it here.
+    w.S.kernel._currentModule = 'adventures';
+    w.mod.plan({});
+    w.S.kernel._currentModule = null;
+    play(w);
+    // A step that runs on any zone is ticked off the island as well.
+    w.st.go(w.S.RunStep.LastQuest, 'test');
+    for (var i = 0; i < 3; i++) { tick(w); play(w); }
+    assert.deepStrictEqual(w.claims.map(function (c) { return c.key; }), []);
+    // Back on the island the same quest is claimed.
+    w.H.host.game.gi.mCurrentViewedZoneID = ZONE;
+    w.st.go(w.S.WaveStep.Reach, 'test');
+    tick(w);
+    play(w);
+    assert.deepStrictEqual(w.claims.map(function (c) { return c.key; }), ['q1']);
+});
+
 t.test('Settle: a path that appears goes back to Reach and on to Attack', function () {
     var fighting = AC.general({ uid: '1.6', grid: 60 });
     var w = attackWorld({ extra: [fighting] });
@@ -630,7 +498,7 @@ t.test('Attack: lines go out in parsed order, each gap at least its time, buff t
     tick(w);
     assert.strictEqual(stepName(w), 'Confirm');
     tick(w);
-    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done);
+    assertHandedOver(w);
 });
 
 t.test('Attack: line 1 seen early still holds line 2 until line1.sentAt + time', function () {
@@ -672,7 +540,7 @@ t.test('Attack: a pacer run while line 2 is in flight starts no second attempt',
 
 // ---- Confirm ----------------------------------------------------------------
 
-t.test('Confirm: every line seen moves to Gate of the next wave; the last wave ends Done', function () {
+t.test('Confirm: every line seen moves to Gate of the next wave; the last wave hands over to Clear', function () {
     var w = attackWorld();
     startRun(w, ['C:/b/w1.txt', 'C:/b/w2.txt'], { step: w.S.WaveStep.Attack });
     tick(w);
@@ -688,7 +556,7 @@ t.test('Confirm: every line seen moves to Gate of the next wave; the last wave e
     w.g1.state.task = null;
     w.g2.state.task = null;
     runOut(w);
-    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done);
+    assertHandedOver(w);
     assert.strictEqual(attacksOf(w).length, 4);
 });
 
@@ -717,7 +585,7 @@ t.test('Confirm: an attack not observed pauses AttackNotSeen; Resume re-enters G
     assert.strictEqual(stepName(w), 'Gate');
     assert.strictEqual(w.st.run().lines['1.2'].sentAt, null);
     runOut(w);
-    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done);
+    assertHandedOver(w);
     assert.strictEqual(attacksOf(w, '1.1').length, 1);
     assert.ok(attacksOf(w, '1.2').length >= 2);
 });
@@ -757,7 +625,7 @@ t.test('Reload: a line with sentAt is never resent; attacking now counts as seen
     tick(w);
     assert.strictEqual(w.st.run().lines['1.1'].seen, true);
     runOut(w);
-    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done);
+    assertHandedOver(w);
     assert.strictEqual(attacksOf(w, '1.1').length, 1);
     assert.strictEqual(attacksOf(w, '1.2').length, 1);
 });
@@ -805,7 +673,7 @@ t.test('Reload: with line 2 in flight the pacer does not stall and line 2 goes o
     reloadBundle(w);
     assert.strictEqual(w.st.current().round, null);
     runOut(w);
-    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done);
+    assertHandedOver(w);
     assert.strictEqual(attacksOf(w, '1.1').length, 1);
     assert.strictEqual(attacksOf(w, '1.2').length, 1);
 });
@@ -815,8 +683,7 @@ t.test('Reload: with line 2 in flight the pacer does not stall and line 2 goes o
 // only its own entries (queue.cancelByModule). The kernel queue is stubbed to
 // capture entries, so both are applied to the captured and pending entries.
 function kernelReset(w) {
-    w.H.clearQueued();
-    w.pending = [];
+    w.kernelPause();
 }
 
 function kernelCancelByModule(w, moduleId) {
@@ -831,7 +698,7 @@ function assertOrphanedRoundRecovers(w) {
     runOut(w, 20);
     var paces = w.entries.slice(before).filter(function (e) { return e.name === w.ex.PACE_ACTION; }).length;
     assert.ok(paces < 100, 'pacer entries after the drop: ' + paces);
-    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done, 'step ' + stepName(w));
+    assertHandedOver(w);
     assert.strictEqual(attacksOf(w, '1.1').length, 1);
     assert.strictEqual(attacksOf(w, '1.2').length, 1);
 }
@@ -872,7 +739,7 @@ t.test('Replace: an aborted replace drops the round; the old run still sends the
     assert.strictEqual(w.st.current().round, null);
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
     runOut(w);
-    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done);
+    assertHandedOver(w);
     assert.strictEqual(attacksOf(w, '1.1').length, 1);
     assert.strictEqual(attacksOf(w, '1.2').length, 1);
 });
@@ -892,7 +759,7 @@ t.test('Resume: a pause after a sent and won attack resumes without an Unreachab
     runOut(w);
     var r = w.st.run();
     assert.notStrictEqual(r.pause && r.pause.reason, w.S.RunPause.Unreachable);
-    assert.strictEqual(r.status, w.S.RunStatus.Done);
+    assertHandedOver(w);
     assert.strictEqual(attacksOf(w, '1.1').length, 1);
     assert.strictEqual(attacksOf(w, '1.2').length, 1);
 });

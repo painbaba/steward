@@ -10,10 +10,10 @@
  * first and never relies on a callback having fired.
  *
  * Every order runs through S.core.actions.attempt with the existing core
- * defs. Results of one batch of attempts (a "round") are kept in memory on
- * runState.round; a callback writes its result only while that same round is
- * current and the run's zone is still viewed, so a pause, a step change, a
- * newer run or a zone change turns a late callback into a no-op.
+ * defs. The round handling (results kept in memory on runState.round, late
+ * callbacks dropped) and the Supply -> Unload -> Load -> Verify flow are
+ * shared with the load at home and live in the loader; this file passes
+ * the wave steps to them.
  *
  * Attacks and camp buffs are paced by the 'adventures.attack' queue action.
  * The battle window sends the first line at once and each later line its own
@@ -25,10 +25,12 @@
  *
  * A wave is never skipped. Every failed check or timeout pauses with the
  * wave, general, target and reason; Resume re-enters Gate of the same wave.
+ * After the last wave is confirmed the run hands over to the end of the
+ * map (RunStep.Clear); the series steps run elsewhere.
  *
  * Bundle slot: module file; top level assigns S.modules.adventures.executor
- * and registers the pacer queue action; state, watcher and every core are
- * read at call time.
+ * and registers the pacer queue action; state, loader, watcher and every
+ * core are read at call time.
  */
 
 (function (S) {
@@ -42,8 +44,6 @@
     var GATE_BUSY_MS      = 1800000;   // a field general busy this long pauses
     var SETTLE_TICKS      = 2;         // settled plan() calls before a blocker pauses
     var SETTLE_MAX_MS     = 900000;    // Settle gives up after this long
-    var MAX_ROUNDS        = 2;         // action rounds per step before a pause
-    var MAX_UNLOAD_CYCLES = 2;         // Supply -> Unload -> Supply cycles per wave
     var PACE_MS           = 500;       // pacer poll gap
 
     var CATEGORY = 'adventures';
@@ -60,34 +60,21 @@
         return S.modules.adventures.state.now();
     }
 
+    // loader.js loads after this file in name order.
+    function ld() {
+        return S.modules.adventures.loader;
+    }
+
     function stepName(step) {
-        return st().nameOf(S.WaveStep, step);
+        return st().stepName(step);
     }
 
     // ---- Wave lines ---------------------------------------------------------
 
-    // Parsed lines of the run's current wave, cached for the wave. The loadout
-    // keys come from the run (persisted at start), never from a reload of the
-    // loadout file, so a file edited mid-run cannot widen the general set.
+    // Parsed lines of the run's current wave, cached for the wave by the
+    // loader together with the loadout check against the run's keys.
     function linesFor(r) {
-        var rs = st().current();
-        var c = rs.cache;
-        if (c && c.runId === r.id && c.waveIndex === r.waveIndex && c.lines) return { ok: true, lines: c.lines };
-        var path = r.paths[r.waveIndex];
-        if (typeof path !== 'string' || !path) return { ok: false, message: 'wave ' + (r.waveIndex + 1) + ' has no file' };
-        var ld = S.core.battles.load(path);
-        if (!ld.ok) {
-            var msg = 'wave file cannot be used';
-            for (var i = 0; i < ld.problems.length; i++) {
-                if (ld.problems[i].fatal) { msg = ld.problems[i].message; break; }
-            }
-            return { ok: false, message: msg };
-        }
-        var extra = S.core.battles.notInLoadout(ld.lines, r.loadoutKeys || {});
-        if (extra.length) return { ok: false, message: extra[0].message };
-        rs.cache = { runId: r.id, waveIndex: r.waveIndex, lines: ld.lines };
-        S.kernel.log(CATEGORY, st().waveLabel() + ': wave file read, ' + ld.lines.length + ' lines: ' + path);
-        return { ok: true, lines: ld.lines };
+        return ld().linesOf(r, r.paths[r.waveIndex], r.waveIndex, 'wave');
     }
 
     // The run's record of a line; created on first use. sentOnce stays set
@@ -152,7 +139,7 @@
     }
 
     function gen(inv, key) {
-        return inv && inv.byKey && has(inv.byKey, key) ? inv.byKey[key] : null;
+        return ld().gen(inv, key);
     }
 
     function who(line, inv) {
@@ -182,93 +169,10 @@
         return !!s && S.core.specialists.orders.taskKind(s) === S.GeneralTask.Attack;
     }
 
-    // ---- Rounds -------------------------------------------------------------
-
-    function startRound(r, step, keys) {
-        var round = { runId: r.id, waveIndex: r.waveIndex, step: step, expected: {}, results: {} };
-        for (var i = 0; i < keys.length; i++) round.expected[keys[i]] = true;
-        st().current().round = round;
-        return round;
-    }
-
-    function currentRound(r, step) {
-        var round = st().current().round;
-        if (round && round.runId === r.id && round.waveIndex === r.waveIndex && round.step === step) return round;
-        return null;
-    }
-
-    function complete(round) {
-        for (var k in round.expected) {
-            if (has(round.expected, k) && !has(round.results, k)) return false;
-        }
-        return true;
-    }
-
-    // First Refused or Failed result: { key, status, reason } or null.
-    function firstFailure(round) {
-        for (var k in round.expected) {
-            if (!has(round.expected, k) || !has(round.results, k)) continue;
-            if (round.results[k].status !== S.ActionResult.Verified) {
-                return { key: k, status: round.results[k].status, reason: round.results[k].reason };
-            }
-        }
-        return null;
-    }
-
-    function resultOf(round, key) {
-        return round && has(round.results, key) ? round.results[key] : null;
-    }
-
-    // onDone for an attempt of this round. The result counts only while the
-    // round is still the current one of the same run and the run's zone is
-    // viewed; a result that spans a zone change says nothing about this map.
-    function record(round, key, after) {
-        return function (result) {
-            var rs = st().current();
-            var r = rs.run;
-            if (rs.round !== round || !r || r.id !== round.runId) return;
-            if (S.core.zone.id() !== r.zoneId) return;
-            round.results[key] = { status: result.status, reason: result.reason || '' };
-            if (after) after(result, r);
-        };
-    }
-
-    function attempt(round, key, def, after) {
-        round.expected[key] = true;
-        if (!S.core.actions.attempt(def, record(round, key, after))) {
-            round.results[key] = { status: S.ActionResult.Failed, reason: 'attempt not started' };
-        }
-    }
-
     // ---- Pause helpers --------------------------------------------------------
 
     function pause(reason, message, line, inv) {
         st().pause(reason, message, line ? { general: who(line, inv), target: line.target !== null ? line.target : line.grid } : null);
-    }
-
-    // A round finished without any Refused/Failed result but the effect is
-    // still not seen: counts the round and pauses after MAX_ROUNDS. Returns
-    // true when it paused.
-    function roundsExhausted(r, what) {
-        if (r.rounds < MAX_ROUNDS) return false;
-        st().pause(S.RunPause.NotObserved, what + ' verified but not observed after ' + r.rounds + ' rounds');
-        return true;
-    }
-
-    // Shared round handling of an acting step. Returns 'new' when the caller
-    // should start a new round, 'paused' when it paused.
-    function settleRound(r, step, onFailure, what) {
-        var round = currentRound(r, step);
-        if (!round || !complete(round)) return 'new';     // none yet, or dropped by a reset
-        r.rounds++;
-        st().save();
-        var f = firstFailure(round);
-        if (f) {
-            onFailure(f);
-            return 'paused';
-        }
-        if (roundsExhausted(r, what)) return 'paused';
-        return 'new';
     }
 
     // ---- Steps ----------------------------------------------------------------
@@ -347,7 +251,7 @@
             }
             return;
         }
-        var next = settleRound(r, S.WaveStep.Position, function (f) {
+        var next = ld().settleRound(r, S.WaveStep.Position, function (f) {
             st().pause(S.RunPause.PositionFailed, 'order for ' + f.key + ' failed: ' + f.reason, { general: f.key });
         }, 'positioning');
         if (next !== 'new') return;
@@ -359,128 +263,38 @@
             st().go(S.WaveStep.Settle, blocked.general + ' ' + blocked.reason);
             return;
         }
-        var round = startRound(r, S.WaveStep.Position, []);
+        var round = ld().startRound(r, S.WaveStep.Position, []);
         for (i = 0; i < moves.length; i++) {
-            attempt(round, moves[i].key, S.core.specialists.orders.move(moves[i].key, moves[i].grid));
+            ld().attempt(round, moves[i].key, S.core.specialists.orders.move(moves[i].key, moves[i].grid));
         }
         for (i = 0; i < stars.length; i++) {
-            attempt(round, stars[i].key, S.core.specialists.orders.star(stars[i].key));
+            ld().attempt(round, stars[i].key, S.core.specialists.orders.star(stars[i].key));
         }
         S.kernel.log(CATEGORY, st().waveLabel() + ': positioning, ' + moves.length + ' move(s), ' +
             stars.length + ' star(s)');
     }
 
+    // Wave step values for the shared load flow, built at call time:
+    // state.js fills S.WaveStep after this file loads.
+    function waveSteps() {
+        var W = S.WaveStep;
+        return { supply: W.Supply, unload: W.Unload, load: W.Load, verify: W.Verify, done: W.Reach };
+    }
+
     function supply(r, w, inv) {
-        var p = S.core.army.planSupply(w.supply, inv);
-        if (p.missing.length) {
-            st().pause(S.RunPause.GeneralMissing, p.missing[0] + ' is not on the island', { general: p.missing[0] });
-            return;
-        }
-        if (!p.covered) {
-            st().pause(S.RunPause.TroopsShort, 'troops short: ' + S.core.army.text(p.shortAfter));
-            return;
-        }
-        if (p.donors.length) {
-            var keys = [];
-            for (var i = 0; i < p.donors.length; i++) keys.push(p.donors[i].key);
-            r.donors = keys;
-            r.cycles++;
-            if (r.cycles > MAX_UNLOAD_CYCLES) {
-                st().pause(S.RunPause.TroopsShort, 'donors unloaded but the free pool is still short: ' +
-                    S.core.army.text(p.shortBefore));
-                return;
-            }
-            st().go(S.WaveStep.Unload, 'unload ' + keys.join(', '));
-            return;
-        }
-        st().go(S.WaveStep.Load, 'troops covered');
+        ld().supply(r, w.supply, inv, waveSteps());
     }
 
     function unload(r, w, inv) {
-        var pending = [];
-        var donors = r.donors || [];
-        for (var i = 0; i < donors.length; i++) {
-            var g = gen(inv, donors[i]);
-            if (!g) {
-                st().pause(S.RunPause.GeneralMissing, 'donor ' + donors[i] + ' is not on the island', { general: donors[i] });
-                return;
-            }
-            if (S.core.army.total(g.army) > 0) pending.push(donors[i]);
-        }
-        if (!pending.length) {
-            st().go(S.WaveStep.Supply, 'donors unloaded');
-            return;
-        }
-        var next = settleRound(r, S.WaveStep.Unload, function (f) {
-            st().pause(S.RunPause.UnloadFailed, 'unload of ' + f.key + ' failed: ' + f.reason, { general: f.key });
-        }, 'unload');
-        if (next !== 'new') return;
-        var round = startRound(r, S.WaveStep.Unload, []);
-        for (i = 0; i < pending.length; i++) attempt(round, pending[i], S.core.army.unload(pending[i]));
+        ld().unload(r, inv, waveSteps());
     }
 
-    // First supply line whose general's army differs or whose general is
-    // gone (missing: true), or null.
-    function firstMismatch(w, inv) {
-        for (var i = 0; i < w.supply.length; i++) {
-            var g = gen(inv, w.supply[i].key);
-            if (!g) return { key: w.supply[i].key, missing: true };
-            if (!S.core.army.matches(g.army, w.supply[i].army)) return { key: w.supply[i].key, missing: false };
-        }
-        return null;
-    }
-
-    // Only supply lines (Attack and Move) are loaded; a Star line holds no
-    // troops. Unloads go first so the troops they free are in the pool before
-    // a raise checks it.
     function load(r, w, inv) {
-        var empties = [];
-        var raises = [];
-        for (var i = 0; i < w.supply.length; i++) {
-            var s = w.supply[i];
-            var g = gen(inv, s.key);
-            if (!g) {
-                st().pause(S.RunPause.GeneralMissing, s.key + ' is not on the island', { general: s.key });
-                return;
-            }
-            if (S.core.army.matches(g.army, s.army)) continue;
-            if (S.core.army.total(s.army) === 0) empties.push(s);
-            else raises.push(s);
-        }
-        if (!empties.length && !raises.length) {
-            st().go(S.WaveStep.Reach, 'all armies match');
-            return;
-        }
-        var round = startRound(r, S.WaveStep.Load, []);
-        for (i = 0; i < empties.length; i++) attempt(round, empties[i].key, S.core.army.unload(empties[i].key));
-        for (i = 0; i < raises.length; i++) attempt(round, raises[i].key, S.core.army.raise(raises[i].key, raises[i].army));
-        st().go(S.WaveStep.Verify, 'loading ' + (empties.length + raises.length) + ' general(s)', { keepRounds: true });
+        ld().load(r, w.supply, inv, waveSteps());
     }
 
     function verify(r, w, inv) {
-        var m = firstMismatch(w, inv);
-        if (!m) {
-            st().go(S.WaveStep.Reach, 'all armies match');
-            return;
-        }
-        if (m.missing) {
-            st().pause(S.RunPause.GeneralMissing, m.key + ' is not on the island', { general: m.key });
-            return;
-        }
-        var round = currentRound(r, S.WaveStep.Load);
-        if (!round || !complete(round)) {
-            st().go(S.WaveStep.Load, 'load round dropped, load again', { keepRounds: true });
-            return;
-        }
-        r.rounds++;
-        if (r.rounds < MAX_ROUNDS) {
-            st().go(S.WaveStep.Load, 'mismatch, retry once', { keepRounds: true });
-            return;
-        }
-        var f = firstFailure(round);
-        var g = gen(inv, m.key);
-        st().pause(S.RunPause.LoadMismatch, ((g && g.name) ? g.name + ' ' : '') + '(' + m.key +
-            ') army does not match the wave' + (f ? ': ' + f.key + ' ' + f.reason : ''), { general: m.key });
+        ld().verify(r, w.supply, inv, waveSteps());
     }
 
     // First open Attack or Buff line that cannot be attacked now, as a
@@ -527,10 +341,7 @@
     // No own fighter in battle and no claimable quest waiting. An unreadable
     // quest list (null) or a missing watcher is not settled.
     function islandSettled() {
-        var fighters = S.core.army.fighters();
-        for (var i = 0; i < fighters.length; i++) {
-            if (S.core.specialists.orders.taskKind(fighters[i]) === S.GeneralTask.Attack) return false;
-        }
+        if (ld().anyAttacking()) return false;
         var watcher = S.modules.adventures.watcher;
         var pending = watcher && watcher.pending ? watcher.pending() : null;
         return !!pending && pending.length === 0;
@@ -567,7 +378,7 @@
     // callback was dropped by a reload, or it ended without seeing the
     // effect). Never re-sent automatically. Returns true when it paused.
     function resolveSent(r, w, inv) {
-        var round = currentRound(r, S.WaveStep.Attack);
+        var round = ld().currentRound(r, S.WaveStep.Attack);
         for (var i = 0; i < w.seq.length; i++) {
             var l = w.seq[i];
             if (!r.lines || !has(r.lines, l.key)) continue;
@@ -579,7 +390,7 @@
                 goneAfterSend(r, l, inv);
                 continue;
             }
-            var res = resultOf(round, l.key);
+            var res = ld().resultOf(round, l.key);
             var isAttack = l.kind === S.BattleLine.Attack;
             if (isAttack && attacking(l.key)) {
                 rec.seen = true;
@@ -614,13 +425,13 @@
 
     function attackStep(r, w, inv) {
         if (resolveSent(r, w, inv)) return;
-        var round = currentRound(r, S.WaveStep.Attack);
+        var round = ld().currentRound(r, S.WaveStep.Attack);
         var all = true;
         for (var i = 0; i < w.seq.length; i++) {
             var l = w.seq[i];
             if (isSent(r, l.key)) continue;
             all = false;
-            var res = resultOf(round, l.key);
+            var res = ld().resultOf(round, l.key);
             if (res) {
                 if (l.kind === S.BattleLine.Attack) {
                     pause(S.RunPause.AttackRefused, 'attack of ' + who(l, inv) + ' on ' + targetText(l) +
@@ -643,7 +454,7 @@
         // sent marker and is not sent again; a line that never went out is
         // sent by the pacer in a fresh round. Dropped only here, after the
         // round's recorded refusals were read.
-        if (round && !complete(round)) st().dropRound('attempt no longer queued');
+        if (round && !ld().complete(round)) st().dropRound('attempt no longer queued');
         // Added inside plan(), so the entry carries the module tag.
         S.kernel.queue.add(PACE_ACTION, [r.id, r.waveIndex], PACE_MS);
     }
@@ -663,7 +474,7 @@
         r.cycles = 0;
         r.donors = [];
         if (r.waveIndex >= r.paths.length) {
-            st().done();
+            st().go(S.RunStep.Clear, 'last wave confirmed');
             return;
         }
         st().go(S.WaveStep.Gate, 'next wave');
@@ -691,16 +502,18 @@
     function plan() {
         var r = st().run();
         if (!r || r.status !== S.RunStatus.Running) return;
+        // Series steps before and after the waves are run by their own part.
+        if (!st().isWaveStep(r.step)) return;
         if (S.core.zone.id() !== r.zoneId) return;
         if (r.waveIndex >= r.paths.length) {
-            st().done();
+            st().go(S.RunStep.Clear, 'last wave confirmed');
             return;
         }
         var step = r.step;
         try {
-            var ld = linesFor(r);
-            if (!ld.ok) {
-                st().pause(S.RunPause.WaveFile, ld.message);
+            var file = linesFor(r);
+            if (!file.ok) {
+                st().pause(S.RunPause.WaveFile, file.message);
                 return;
             }
             var fn = stepFn(step);
@@ -708,7 +521,7 @@
                 st().go(S.WaveStep.Gate, 'unknown step ' + step);
                 return;
             }
-            fn(r, view(r, ld.lines), S.core.army.inventory());
+            fn(r, view(r, file.lines), S.core.army.inventory());
         } catch (e) {
             S.kernel.error(CATEGORY, st().waveLabel() + ': step ' + stepName(step) + ' threw:', e);
         }
@@ -742,7 +555,7 @@
         if (r.status !== S.RunStatus.Running || r.step !== S.WaveStep.Attack) return;
         if (S.core.zone.id() !== r.zoneId) return;
         var c = rs.cache;
-        if (!c || c.runId !== r.id || c.waveIndex !== r.waveIndex || !c.lines) return;
+        if (!c || c.runId !== r.id || c.waveIndex !== r.waveIndex || c.path !== r.paths[r.waveIndex] || !c.lines) return;
 
         var seq = view(r, c.lines).seq;
         var i;
@@ -752,7 +565,7 @@
         if (i >= seq.length) return;
         var line = seq[i];
 
-        var round = currentRound(r, S.WaveStep.Attack);
+        var round = ld().currentRound(r, S.WaveStep.Attack);
         if (round && has(round.expected, line.key)) {
             // Refused or failed before its send: the Attack step pauses.
             if (has(round.results, line.key)) return;
@@ -772,7 +585,7 @@
             return;
         }
 
-        if (!round) round = startRound(r, S.WaveStep.Attack, []);
+        if (!round) round = ld().startRound(r, S.WaveStep.Attack, []);
         var def = lineDef(line);
         var send = def.send;
         var runId = r.id;
@@ -794,7 +607,7 @@
             }
             return send(b);
         };
-        attempt(round, key, def, function (result, cur) {
+        ld().attempt(round, key, def, function (result, cur) {
             if (result.status !== S.ActionResult.Verified) return;
             lineRec(cur, key).seen = true;
             st().save();
@@ -804,7 +617,10 @@
 
     // ---- Start check ----------------------------------------------------------
 
-    function fighterCtx(inv) {
+    // withCamps: camps are looked up on the viewed zone, which is right only
+    // while the template's map is viewed; without them validate skips the
+    // camp checks.
+    function fighterCtx(inv, withCamps) {
         var fighters = {};
         var byKey = (inv && inv.byKey) || {};
         for (var k in byKey) {
@@ -812,18 +628,19 @@
             var g = byKey[k];
             fighters[k] = { name: g.name, cls: g.cls, capacity: g.capacity, army: g.army };
         }
-        return {
+        var ctx = {
             fighters: fighters,
             isElite:  S.core.army.isElite,
             classOf:  function (a) { return S.core.army.classOf(a); },
-            total:    S.core.army.total,
-            // The caller starts a run only while the template's map is viewed,
-            // so camps are looked up on this zone.
-            camp: function (grid) {
+            total:    S.core.army.total
+        };
+        if (withCamps) {
+            ctx.camp = function (grid) {
                 var b = S.core.buildings.byGrid(grid);
                 return b ? { enemy: S.core.buildings.isEnemy(b) } : null;
-            }
-        };
+            };
+        }
+        return ctx;
     }
 
     function sortProblems(out, label, problems) {
@@ -838,16 +655,22 @@
     // Reads the template's loadout and waves fresh and checks them against
     // the island as it is now. Returns { ok, problems (fatal), warnings,
     // loadoutKeys }; loadoutKeys is null when the loadout cannot be read.
-    function check(rec) {
+    // opts (optional): camps === false leaves out the camp checks (the map
+    // is not viewed); fighters === false also skips the general checks (the
+    // generals may be away), so only the files and the loadout keys count.
+    function check(rec, opts) {
+        var o = opts || {};
+        var fighters = o.fighters !== false;
+        var camps = fighters && o.camps !== false;
         var out = { ok: false, problems: [], warnings: [], loadoutKeys: null };
         var inv = S.core.army.inventory();
-        S.core.buildings.invalidate();
-        var ctx = fighterCtx(inv);
+        if (camps) S.core.buildings.invalidate();
+        var ctx = fighterCtx(inv, camps);
 
         var lo = S.core.battles.load(rec.loadout);
         sortProblems(out, 'loadout', lo.problems);
         if (lo.ok) {
-            sortProblems(out, 'loadout', S.core.battles.validate(lo.lines, ctx));
+            if (fighters) sortProblems(out, 'loadout', S.core.battles.validate(lo.lines, ctx));
             out.loadoutKeys = S.core.battles.loadoutKeys(lo.lines);
         }
 
@@ -858,16 +681,17 @@
         }
         for (var w = 0; w < waves.length; w++) {
             var label = 'wave ' + (w + 1);
-            var ld = S.core.battles.load(waves[w]);
-            sortProblems(out, label, ld.problems);
-            if (!ld.ok) continue;
-            sortProblems(out, label, S.core.battles.validate(ld.lines, ctx));
-            if (out.loadoutKeys) sortProblems(out, label, S.core.battles.notInLoadout(ld.lines, out.loadoutKeys));
+            var file = S.core.battles.load(waves[w]);
+            sortProblems(out, label, file.problems);
+            if (!file.ok) continue;
+            if (fighters) sortProblems(out, label, S.core.battles.validate(file.lines, ctx));
+            if (out.loadoutKeys) sortProblems(out, label, S.core.battles.notInLoadout(file.lines, out.loadoutKeys));
         }
 
         out.ok = out.problems.length === 0 && out.loadoutKeys !== null;
-        S.kernel.log(CATEGORY, 'start check "' + rec.label + '": ' + (waves.length + 1) + ' files, ' +
-            out.problems.length + ' fatal, ' + out.warnings.length + ' warnings');
+        var mode = !fighters ? 'files only' : (camps ? 'generals and camps' : 'generals, no camps');
+        S.kernel.log(CATEGORY, 'start check "' + rec.label + '" (' + mode + '): ' + (waves.length + 1) +
+            ' files, ' + out.problems.length + ' fatal, ' + out.warnings.length + ' warnings');
         return out;
     }
 
@@ -877,8 +701,6 @@
         GATE_BUSY_MS:      GATE_BUSY_MS,
         SETTLE_TICKS:      SETTLE_TICKS,
         SETTLE_MAX_MS:     SETTLE_MAX_MS,
-        MAX_ROUNDS:        MAX_ROUNDS,
-        MAX_UNLOAD_CYCLES: MAX_UNLOAD_CYCLES,
         PACE_MS:           PACE_MS,
         check:             check,
         plan:              plan,

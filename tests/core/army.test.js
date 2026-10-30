@@ -483,3 +483,97 @@ t.test('unload verified when the army is empty', function () {
     assert.strictEqual(already.status, s2.S.ActionResult.Verified);
     assert.strictEqual(already.sends, 0);
 });
+
+// ---- inventory().ok ------------------------------------------------------------
+
+t.test('inventory: ok is true when the free pool, the list and every army are readable', function () {
+    var s = setup({ free: { Rifle: 1 }, fighters: [A.fighter({ uid: 'g1', army: { Rifle: 2 } })] });
+    var inv = s.army.inventory();
+    assert.strictEqual(inv.ok, true);
+    assert.strictEqual(inv.freeOk, true);
+});
+
+t.test('inventory: ok is false when the free pool is unreadable', function () {
+    var s = setup({ fighters: [A.fighter({ uid: 'g1', army: { Rifle: 2 } })] });
+    var inv = s.army.inventory();
+    assert.strictEqual(inv.freeOk, false);
+    assert.strictEqual(inv.ok, false);
+});
+
+t.test('inventory: ok is false when a general army is unreadable', function () {
+    var g = AC.general({ uid: 'g1', army: { Rifle: 5 }, throwOn: 'GetArmy' });
+    var s = setup({ free: { Rifle: 1 }, fighters: [g] });
+    var inv = s.army.inventory();
+    assert.strictEqual(inv.byKey.g1.armyOk, false);
+    assert.strictEqual(inv.ok, false);
+});
+
+t.test('inventory: ok is false when the specialist list is unreadable', function () {
+    var s = setup({ free: { Rifle: 1 }, fighters: [] });
+    s.H.host.game.gi.mCurrentPlayerZone.GetSpecialists_vector = function () { throw new Error('list'); };
+    assert.strictEqual(s.army.inventory().ok, false);
+});
+
+// ---- planPack -------------------------------------------------------------------
+
+function eliteName(name) {
+    if (name === 'Mystery') return null;
+    return name.indexOf('Elite') === 0;
+}
+
+function pack(free, holders) {
+    var s = setup({});
+    return plain(s.army.planPack(free, holders, eliteName));
+}
+
+t.test('planPack: one class per holder, never both in one raise', function () {
+    var r = pack({ Rifle: 10, EliteRifle: 4 }, [{ key: 'a', army: {}, capacity: 100 }]);
+    assert.strictEqual(r.raises.length, 1);
+    assert.strictEqual(Object.keys(r.raises[0].added).length, 1);
+});
+
+t.test('planPack: an Empty holder takes the larger class', function () {
+    var base = pack({ Rifle: 10, EliteRifle: 4 }, [{ key: 'a', army: {}, capacity: 100 }]);
+    assert.deepStrictEqual(base.raises[0].added, { Rifle: 10 });
+    var elite = pack({ Rifle: 3, EliteRifle: 8 }, [{ key: 'a', army: {}, capacity: 100 }]);
+    assert.deepStrictEqual(elite.raises[0].added, { EliteRifle: 8 });
+});
+
+t.test('planPack: a holder already holding Elite takes only Elite', function () {
+    var r = pack({ Rifle: 50, EliteRifle: 4 }, [{ key: 'a', army: { EliteRifle: 2 }, capacity: 100 }]);
+    assert.deepStrictEqual(r.raises[0].added, { EliteRifle: 4 });
+    assert.deepStrictEqual(r.raises[0].target, { EliteRifle: 6 });
+    assert.strictEqual(r.remainder.Rifle, 50);
+    assert.strictEqual(r.remainder.EliteRifle || 0, 0);
+});
+
+t.test('planPack: capacity is respected and capacity 0 is skipped', function () {
+    var r = pack({ Rifle: 50 }, [
+        { key: 'zero', army: {}, capacity: 0 },
+        { key: 'a', army: { Rifle: 5 }, capacity: 12 }
+    ]);
+    assert.strictEqual(r.raises.length, 1);
+    assert.strictEqual(r.raises[0].key, 'a');
+    assert.deepStrictEqual(r.raises[0].added, { Rifle: 7 });
+});
+
+t.test('planPack: holders are filled in the given order and the remainder is exact', function () {
+    var r = pack({ Rifle: 15 }, [
+        { key: 'first', army: {}, capacity: 10 },
+        { key: 'second', army: {}, capacity: 10 }
+    ]);
+    assert.strictEqual(r.raises[0].key, 'first');
+    assert.deepStrictEqual(r.raises[0].added, { Rifle: 10 });
+    assert.strictEqual(r.raises[1].key, 'second');
+    assert.deepStrictEqual(r.raises[1].added, { Rifle: 5 });
+    assert.strictEqual(r.remainder.Rifle || 0, 0);
+});
+
+t.test('planPack: Mixed and Unknown holders are skipped', function () {
+    var r = pack({ Rifle: 10 }, [
+        { key: 'mixed', army: { Rifle: 1, EliteRifle: 1 }, capacity: 100 },
+        { key: 'unknown', army: { Mystery: 1 }, capacity: 100 }
+    ]);
+    assert.strictEqual(r.raises.length, 0);
+    assert.deepStrictEqual(r.remainder, { Rifle: 10 });
+});

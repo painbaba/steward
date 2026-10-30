@@ -75,6 +75,27 @@
         return null;
     }
 
+    // Zone id of the player's home island, or null when neither player object
+    // answers. The viewed player is the fallback because it is the home player
+    // while the home island is shown.
+    function homeId() {
+        try {
+            if (typeof game !== 'undefined' && game && game.player &&
+                typeof game.player.GetHomeZoneId === 'function') {
+                var a = game.player.GetHomeZoneId();
+                if (typeof a === 'number') return a;
+            }
+        } catch (e) { /* fall through to the viewed player */ }
+        try {
+            var p = gi() ? gi().mCurrentPlayer : null;
+            if (p && typeof p.GetHomeZoneId === 'function') {
+                var b = p.GetHomeZoneId();
+                if (typeof b === 'number') return b;
+            }
+        } catch (e2) { /* swallow */ }
+        return null;
+    }
+
     function adventureName() {
         if (!isAdventure()) return null;
         try {
@@ -119,6 +140,7 @@
         isAdventure:  isAdventure,
         homePlayer:   homePlayer,
         playerId:     playerId,
+        homeId:       homeId,
         adventureName: adventureName,
         viewedPlayer: viewedPlayer,
         visit:        visit,
