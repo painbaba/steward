@@ -229,7 +229,7 @@ function reload(w) {
 var SHARED = ['orders', 'raises', 'unloads', 'buffs', 'claims', 'zoneSends', 'buffActions', 'productionOrders',
     'closes', 'visits'];
 var CARRIED = ['t', 'adventures', 'stock', 'queues', 'pop', 'popNoEffect', 'quests', 'camps', 'auto',
-    'travelMs', 'resources', 'costs'];
+    'travelMs', 'resources', 'costs', 'blocked'];
 
 function restart(w) {
     var viewed = w.gi.mCurrentViewedZoneID;
@@ -281,7 +281,7 @@ t.test('series: x2 from home runs every step once, in order, with no pause; map 
     assert.ok(runs, 'run 2 starts at Muster');
     assert.ok(!all.some(function (x) { return x.from === 'Next'; }), 'no transition leaves Next');
     var order = ['Muster', 'Validate', 'Snapshot', 'Supply', 'Load', 'StartMap', 'Depart', 'Jump', 'Arrive',
-        'StarAll', 'wave Horseshoe', 'wave Gate', 'wave Confirm', 'Clear', 'PackStar', 'Pack', 'LastQuest',
+        'StarAll', 'wave Horseshoe', 'wave Gate', 'wave Confirm', 'PackStar', 'Pack', 'Clear', 'LastQuest',
         'Close', 'Recall',
         'JumpHome', 'ArriveHome', 'Account', 'Population'];
     runs.forEach(function (list, n) {
@@ -652,7 +652,7 @@ t.test('Horseshoe: a reload after the send sends it at most once', function () {
 
 // ---- 11. Waves and the watcher ---------------------------------------------------
 
-t.test('waves: hand over to Clear; the watcher claims a non-last quest and never the last', function () {
+t.test('waves: hand over to PackStar and reach Clear; the watcher claims a non-last quest and never the last', function () {
     var w = homeWorld();
     w.g1.state.grid = 0;
     w.g2.state.grid = 0;
@@ -666,6 +666,9 @@ t.test('waves: hand over to Clear; the watcher claims a non-last quest and never
         if (name === 'Confirm') help(w2, name);
     } });
     assertStep(w, 'Clear');
+    var names = transitions(w).map(function (x) { return (x.wave ? 'wave ' : '') + x.from + '->' + x.to; });
+    assert.ok(names.indexOf('wave Confirm->PackStar') >= 0, names.join(', '));
+    assert.ok(names.indexOf('Pack->Clear') >= 0, names.join(', '));
     assert.strictEqual(claimsOf(w, 'q1').length, 1);
     assert.ok(!(claimsOf(w, 'q1')[0].opts && claimsOf(w, 'q1')[0].opts.allowLast), 'the watcher never allows the last');
     assert.strictEqual(claimsOf(w, 'q9').length, 0);
@@ -688,7 +691,8 @@ t.test('watcher: claims nothing while home is viewed', function () {
 
 t.test('Clear: waits for the last quest and idle generals; a camp still standing only warns', function () {
     var w = homeWorld();
-    onIsland(w);
+    // Nothing left to pack, so the clear map goes on to the last quest.
+    onIsland(w, null, {});
     series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
     tick(w);
     assertStep(w, 'Clear');
@@ -698,7 +702,7 @@ t.test('Clear: waits for the last quest and idle generals; a camp still standing
     assertStep(w, 'Clear');
     w.g1.state.task = null;
     tick(w);
-    assertStep(w, 'PackStar');
+    assertStep(w, 'LastQuest');
     assert.ok(logged(w, /camps still standing after the last quest: 100, 200/, 'warn'));
 });
 
@@ -743,12 +747,48 @@ function packWorld(free) {
 
 var PACK_KEYS = { '1.1': true, '1.2': true, '1.5': true };
 
+// Records the grid each raise's holder stands on when the raise goes out.
+function watchRaises(w) {
+    var cm = w.gi.mClientMessages;
+    var send = cm.SendMessagetoServer;
+    w.raiseAt = [];
+    cm.SendMessagetoServer = function (id, zone, data) {
+        if (id === 1031) {
+            var g = w.byKey(data.armyHolderSpecialistVO.uid);
+            w.raiseAt.push({ key: data.armyHolderSpecialistVO.uid, grid: g ? g.state.grid : null, t: w.t });
+        }
+        return send.apply(this, arguments);
+    };
+}
+
+function movesOf(w) {
+    return w.orders.filter(function (o) { return o.code === w.code.move; });
+}
+
+function moveText(w) {
+    return movesOf(w).map(function (o) { return o.key + '->' + o.grid; });
+}
+
+// How often each series transition from -> to was logged.
+function countOf(w, from, to) {
+    return transitions(w).filter(function (x) { return !x.wave && x.from === from && x.to === to; }).length;
+}
+
 t.test('Pack: carriers first, then generals; one class each within capacity; the remainder is logged', function () {
     var w = packWorld();
+    watchRaises(w);
     series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: PACK_KEYS });
     drive(w, { until: at('LastQuest') });
     assertStep(w, 'LastQuest');
-    assert.strictEqual(w.c.state.grid, 0, 'the carrier went to the star');
+    assert.strictEqual(w.orders.filter(function (o) { return o.code === w.code.star; }).length, 0, 'no star order');
+    assert.strictEqual(w.c.state.grid, 30, 'the carrier stays on its grid');
+    // The wave file's grids, last wave first; the carrier's grid is never offered.
+    assert.deepStrictEqual(moveText(w), ['1.1->10', '1.2->20']);
+    movesOf(w).forEach(function (m) {
+        var r = w.raiseAt.filter(function (x) { return x.key === m.key; })[0];
+        assert.ok(r && r.t >= m.t, m.key + ' moved before its raise');
+    });
+    w.raiseAt.forEach(function (x) { assert.ok(x.grid > 0, 'raise ' + x.key + ' at grid ' + x.grid); });
     assert.deepStrictEqual(w.raises, ['1.5', '1.1', '1.2']);
     assert.deepStrictEqual(plain(w.c.state.army), { Rifle: 10 });
     assert.deepStrictEqual(plain(w.g1.state.army), { Knight: 4 });
@@ -756,16 +796,172 @@ t.test('Pack: carriers first, then generals; one class each within capacity; the
     assert.ok(logged(w, /left in the free pool: /, 'warn'));
     assert.deepStrictEqual(plain(w.frees[ZONE]), { Rifle: 1, Knight: 1 });
     assert.strictEqual(claimsOf(w, 'q9').length, 0, 'the last quest waits for the pack');
+    assert.ok(logged(w, /placing 2 holder\(s\): 1\.1 -> 10, 1\.2 -> 20/));
+    assert.strictEqual(countOf(w, 'PackStar', 'Pack'), 1);
+    assert.strictEqual(countOf(w, 'Pack', 'Clear'), 1);
+    assert.strictEqual(countOf(w, 'Clear', 'LastQuest'), 1);
 });
 
-t.test('Pack: a raise refused at the star pauses PackFailed with the precheck reason', function () {
+t.test('Pack: a raise refused by the client precheck pauses PackFailed with the reason', function () {
     var w = packWorld();
-    w.c.state.grid = 0;
+    w.g1.state.grid = 10;
+    w.g2.state.grid = 20;
     w.c.GetGarrison = function () { return null; };
     series(w, { step: w.S.RunStep.Pack, zoneId: ZONE, keys: PACK_KEYS });
     drive(w, { max: 20 });
     assertPaused(w, w.S.RunPause.PackFailed, /pack 1\.5 refused: no garrison/);
+    assert.strictEqual(w.c.state.grid, 30);
     assert.strictEqual(w.raises.indexOf('1.5'), -1);
+});
+
+t.test('Pack: a planned holder at the star goes back to PackStar before any raise', function () {
+    var w = packWorld();
+    series(w, { step: w.S.RunStep.Pack, zoneId: ZONE, keys: PACK_KEYS });
+    tick(w);
+    play(w);
+    assertStep(w, 'PackStar');
+    assert.deepStrictEqual(w.raises, []);
+    assert.ok(logged(w, /Pack -> PackStar.*Anna \(1\.1\) is not on the map/), 'reason logged');
+});
+
+t.test('PackStar: landing fields come before the battle grids', function () {
+    var w = packWorld();
+    w.landing([500, 501]);
+    series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: PACK_KEYS });
+    drive(w, { until: at('LastQuest') });
+    assertStep(w, 'LastQuest');
+    assert.deepStrictEqual(moveText(w), ['1.1->500', '1.2->501']);
+    assert.deepStrictEqual(w.raises, ['1.5', '1.1', '1.2']);
+});
+
+t.test('PackStar: an occupied grid and a grid the client refuses are skipped', function () {
+    var w = packWorld();
+    w.landing([30, 500, 501]);
+    w.blocked[500] = true;
+    series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: PACK_KEYS });
+    drive(w, { until: at('LastQuest') });
+    assertStep(w, 'LastQuest');
+    // Candidates 30, 500, 501, 10, 20: Cara stands on 30, 500 is refused.
+    assert.deepStrictEqual(moveText(w), ['1.1->501', '1.2->10']);
+});
+
+t.test('PackStar: no placeable grid pauses NotPlaceable; no move and no raise', function () {
+    var w = packWorld();
+    w.sent.placeable = 1;
+    series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: PACK_KEYS });
+    drive(w, { max: 20 });
+    assertPaused(w, w.S.RunPause.NotPlaceable, /Anna \(1\.1\) has no placeable grid/);
+    assert.strictEqual(movesOf(w).length, 0);
+    assert.deepStrictEqual(w.raises, []);
+});
+
+t.test('PackStar: a move the client never shows pauses PackFailed; no raise', function () {
+    var w = packWorld();
+    w.auto.move = false;
+    series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: PACK_KEYS });
+    drive(w, { max: 200 });
+    assertPaused(w, w.S.RunPause.PackFailed, /place 1\.1 failed/);
+    assert.strictEqual(w.g1.state.grid, 0, 'the holder stayed at the star');
+    assert.deepStrictEqual(w.raises, []);
+});
+
+t.test('PackStar: a walking holder is waited on without a second move, then packed', function () {
+    var w = packWorld();
+    w.auto.walk = true;
+    series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: PACK_KEYS });
+    for (var i = 0; i < 6; i++) { tick(w); play(w); w.t += 1000; }
+    assertStep(w, 'PackStar');
+    assert.deepStrictEqual(moveText(w), ['1.1->10', '1.2->20']);
+    assert.deepStrictEqual(w.raises, []);
+    w.endWalks();
+    drive(w, { until: at('LastQuest') });
+    assertStep(w, 'LastQuest');
+    assert.strictEqual(movesOf(w).length, 2);
+    assert.deepStrictEqual(w.raises, ['1.5', '1.1', '1.2']);
+});
+
+t.test('PackStar: a walk longer than PLACE_MAX_MS pauses GeneralBusy', function () {
+    var w = packWorld();
+    w.auto.walk = true;
+    series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: PACK_KEYS });
+    for (var i = 0; i < 3; i++) { tick(w); play(w); w.t += 1000; }
+    assertStep(w, 'PackStar');
+    var r = w.st.run();
+    w.t = r.since + w.S.modules.adventures.away.PLACE_MAX_MS;
+    tick(w);
+    assertStep(w, 'PackStar');
+    w.t += 1;
+    tick(w);
+    assertPaused(w, w.S.RunPause.GeneralBusy, /did not reach its grid after 5 min/);
+    assert.deepStrictEqual(w.raises, []);
+});
+
+t.test('Restart: in PackStar while walking sends no second move', function () {
+    var w = packWorld();
+    w.auto.walk = true;
+    series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: PACK_KEYS });
+    tick(w);
+    play(w);
+    assert.strictEqual(movesOf(w).length, 2);
+    w = restart(w);
+    addElite(w, 'Knight');
+    for (var i = 0; i < 3; i++) { tick(w); play(w); w.t += 1000; }
+    assertStep(w, 'PackStar');
+    assert.strictEqual(movesOf(w).length, 2);
+    drive(w, { until: at('LastQuest'), on: function (w2, name) { if (name === 'PackStar') w2.endWalks(); } });
+    assertStep(w, 'LastQuest');
+    assert.deepStrictEqual(moveText(w), ['1.1->10', '1.2->20']);
+    assert.deepStrictEqual(w.raises, ['1.5', '1.1', '1.2']);
+});
+
+t.test('Kernel pause: PackStar after a move send places each holder once', function () {
+    var w = packWorld();
+    series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: PACK_KEYS });
+    tick(w);
+    play(w, function () { return movesOf(w).length === 1; });
+    inFlight(w);
+    w.kernelPause();
+    drive(w, { until: at('LastQuest') });
+    assertStep(w, 'LastQuest');
+    assert.deepStrictEqual(moveText(w), ['1.1->10', '1.2->20']);
+    assert.deepStrictEqual(w.raises, ['1.5', '1.1', '1.2']);
+});
+
+t.test('Clear: troops left after the first pack go back to PackStar once; a general on the map is raised where it stands', function () {
+    var w = packWorld();
+    var d = gen('1.6', 'Dora', 40, {}, { maxUnits: 5 });
+    w.place(d, ZONE);
+    d.state.task = { type: w.code.attack };
+    var keys = { '1.1': true, '1.2': true, '1.5': true, '1.6': true };
+    series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: keys });
+    drive(w, { until: at('Clear') });
+    assertStep(w, 'Clear');
+    assert.deepStrictEqual(w.raises, ['1.5', '1.1', '1.2']);
+    assert.deepStrictEqual(plain(w.frees[ZONE]), { Rifle: 1, Knight: 1 });
+    // The attack ends at Clear (drive's help), so Dora has room now.
+    drive(w, { until: at('LastQuest') });
+    assertStep(w, 'LastQuest');
+    assert.deepStrictEqual(w.raises, ['1.5', '1.1', '1.2', '1.6']);
+    assert.deepStrictEqual(plain(d.state.army), { Rifle: 1 });
+    assert.strictEqual(d.state.grid, 40);
+    assert.strictEqual(movesOf(w).filter(function (o) { return o.key === '1.6'; }).length, 0, 'no move for Dora');
+    assert.strictEqual(countOf(w, 'Clear', 'PackStar'), 1);
+    assert.ok(logged(w, /Clear -> PackStar.*free troops left to pack/));
+    assert.strictEqual(countOf(w, 'Clear', 'LastQuest'), 1);
+});
+
+t.test('Clear: an unreadable free pool holds READ_MAX_MS, then pauses NotObserved', function () {
+    var w = packWorld();
+    w.H.host.game.zone.GetArmy = function () { return null; };
+    series(w, { step: w.S.RunStep.Clear, zoneId: ZONE, keys: PACK_KEYS });
+    tick(w);
+    assertStep(w, 'Clear');
+    w.t += w.S.modules.adventures.loader.READ_MAX_MS;
+    tick(w);
+    assertStep(w, 'Clear');
+    w.t += 1;
+    tick(w);
+    assertPaused(w, w.S.RunPause.NotObserved, /free troops and armies not readable/);
 });
 
 t.test('LastQuest: claimed after Pack with allowLast, once across a reload', function () {
@@ -1131,7 +1327,8 @@ t.test('Restart: in Arrive resumes and goes on once every general is there', fun
 t.test('Restart: in Pack resumes without raising a holder twice', function () {
     var w = packWorld();
     var c = w.c;
-    w.c.state.grid = 0;
+    w.g1.state.grid = 10;
+    w.g2.state.grid = 20;
     series(w, { step: w.S.RunStep.Pack, zoneId: ZONE, keys: PACK_KEYS });
     tick(w);
     play(w, function () { return w.raises.length === 1; });

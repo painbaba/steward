@@ -3,8 +3,11 @@
  *
  * Jump -> Arrive -> StarAll -> Horseshoe hand the run to the wave executor
  * at Gate of wave 1; after the last wave the executor hands it back at
- * Clear -> PackStar -> Pack -> LastQuest -> Close -> Recall -> JumpHome,
- * and the home steps take over at ArriveHome. plan() does one step per
+ * PackStar -> Pack -> Clear -> LastQuest -> Close -> Recall -> JumpHome,
+ * and the home steps take over at ArriveHome. A holder of free troops is
+ * placed on a map grid before its raise, because the client has no
+ * garrison for a general at the star; Clear goes back to PackStar while
+ * free troops are left to pack. plan() does one step per
  * call. The scheduler only calls it while no adventures queue entry is
  * pending, so every step observes the game first and never relies on a
  * callback having fired.
@@ -37,6 +40,7 @@
     // Starting values, to be tuned in game.
     var JUMP_MS      = 60000;      // a visited zone that has not loaded is visited once more
     var CLEAR_MAX_MS = 1800000;    // the last quest and the generals get this long after the last wave
+    var PLACE_MAX_MS = 300000;     // a holder walking from the star to its grid gets this long
 
     var CATEGORY = 'adventures';
 
@@ -304,6 +308,118 @@
         return standing.length ? standing.join(', ') : '';
     }
 
+    function isCarrier(g) {
+        return !!g && (g.cls === S.SpecialistType.Carrier || g.cls === S.SpecialistType.AdmiralCarrier);
+    }
+
+    // A raise needs the general's garrison, which only a general on a map
+    // grid has.
+    function onMap(g) {
+        return !!g && typeof g.grid === 'number' && g.grid > 0;
+    }
+
+    // The first loadout key whose general is walking to a grid, or null. A
+    // key that cannot be looked up does not count as walking.
+    function movingKey(r) {
+        var keys = ld().keysOf(r);
+        for (var i = 0; i < keys.length; i++) {
+            var spec = S.core.specialists.lookup(keys[i]).spec;
+            if (spec && S.core.specialists.orders.taskKind(spec) === S.GeneralTask.Move) return keys[i];
+        }
+        return null;
+    }
+
+    // The one pack plan of PackStar, Pack and Clear: carriers first, then the
+    // idle loadout generals, each holding one troop class within its
+    // capacity. Sharing it keeps the three steps from disagreeing on what is
+    // left to pack, so the Pack -> Clear -> PackStar cycle ends.
+    function packPlan(r, inv) {
+        var keys = ld().keysOf(r);
+        var carriers = [];
+        var generals = [];
+        for (var i = 0; i < keys.length; i++) {
+            var g = ld().gen(inv, keys[i]);
+            if (!g) continue;
+            var h = { key: g.key, capacity: g.capacity, army: g.army };
+            if (isCarrier(g)) carriers.push(h);
+            else if (g.cls === S.SpecialistType.General && ready(g)) generals.push(h);
+        }
+        return S.core.army.planPack(inv.free, carriers.concat(generals));
+    }
+
+    // Keys of the planned raises whose holder is not on a map grid, in plan
+    // order. PackStar's exit and Pack's way back both test this, so the two
+    // steps never disagree on the same inventory.
+    function offMap(p, inv) {
+        var out = [];
+        for (var i = 0; i < p.raises.length; i++) {
+            if (!onMap(ld().gen(inv, p.raises[i].key))) out.push(p.raises[i].key);
+        }
+        return out;
+    }
+
+    // Candidate grids for a holder: the island's landing fields, where the
+    // client places generals, then the grids the run's battle files stand
+    // generals on, last wave first, deduped.
+    function placeGrids(r) {
+        var out = [];
+        var seen = {};
+        function add(grid) {
+            if (has(seen, String(grid))) return;
+            seen[String(grid)] = true;
+            out.push(grid);
+        }
+        var landing = S.core.zone.landingGrids();
+        for (var i = 0; i < landing.length; i++) add(landing[i]);
+        for (i = r.paths.length - 1; i >= 0; i--) {
+            var f = S.core.battles.load(r.paths[i]);
+            if (!f || !f.ok) continue;
+            for (var j = 0; j < f.lines.length; j++) {
+                var l = f.lines[j];
+                if (typeof l.grid === 'number' && l.grid > 0) add(l.grid);
+            }
+        }
+        return out;
+    }
+
+    // A free placeable grid for each key: never one an own fighter stands on
+    // or one already chosen. The client's own placeable test decides, and
+    // the move's precheck runs it again before the packet. Returns { moves,
+    // missing, blocked, tried }; missing or blocked names the first key
+    // without a spec or without a grid, and then no move may go out.
+    function chooseGrids(r, inv, keys) {
+        var cands = placeGrids(r);
+        var taken = {};
+        for (var k in inv.byKey) {
+            if (!has(inv.byKey, k) || !inv.byKey[k]) continue;
+            var at = inv.byKey[k].grid;
+            if (typeof at === 'number' && at > 0) taken[String(at)] = true;
+        }
+        var out = { moves: [], missing: null, blocked: null, tried: cands.length };
+        for (var i = 0; i < keys.length; i++) {
+            var spec = S.core.specialists.lookup(keys[i]).spec;
+            if (!spec) {
+                out.missing = keys[i];
+                return out;
+            }
+            var chosen = null;
+            for (var j = 0; j < cands.length; j++) {
+                if (has(taken, String(cands[j]))) continue;
+                if (S.core.specialists.orders.isPlaceable(spec, cands[j])) {
+                    chosen = cands[j];
+                    break;
+                }
+            }
+            if (chosen === null) {
+                out.blocked = keys[i];
+                return out;
+            }
+            taken[String(chosen)] = true;
+            out.moves.push({ key: keys[i], grid: chosen });
+        }
+        return out;
+    }
+
     // The map is clear when its last quest is finished and no loadout general
     // is still fighting. A camp still standing only warns: it may belong to
     // a side quest or have been beaten in a way the map does not show.
@@ -318,9 +434,22 @@
             if (g && !ready(g)) { idle = false; break; }
         }
         if (questDone && idle && !ld().anyAttacking()) {
+            // r.since is old here, so waitRead would pause at once; the hold
+            // gives the read its own window from the first unreadable pass.
+            if (!inv.ok) {
+                hold(r, 'free troops and armies not readable at the end of the map');
+                return;
+            }
+            clearHold(r);
+            // Troops freed by the last battles, or generals that were still
+            // fighting during the first pack, are packed before the claim.
+            if (packPlan(r, inv).raises.length) {
+                st().go(S.RunStep.PackStar, 'free troops left to pack');
+                return;
+            }
             var standing = standingText(r);
             if (standing) warn('camps still standing after the last quest: ' + standing);
-            st().go(S.RunStep.PackStar, 'last quest finished');
+            st().go(S.RunStep.LastQuest, 'last quest finished');
             return;
         }
         if (now() - r.since <= CLEAR_MAX_MS) return;
@@ -330,50 +459,67 @@
             : 'last quest not finished after ' + min + ' min') + '; camps standing: ' + camps);
     }
 
-    function isCarrier(g) {
-        return !!g && (g.cls === S.SpecialistType.Carrier || g.cls === S.SpecialistType.AdmiralCarrier);
-    }
-
-    // Carriers go to the star, where free troops are packed into them.
+    // Places the planned holders that wait at the star on map grids: a raise
+    // needs a garrison, which a general has only on the map. A holder already
+    // walking is waited on first, because it may show its new grid while not
+    // yet idle, and so a restart or a kernel Pause never orders it twice.
     function packStar(r, inv) {
-        var keys = ld().keysOf(r);
-        var todo = [];
-        for (var i = 0; i < keys.length; i++) {
-            var g = ld().gen(inv, keys[i]);
-            if (isCarrier(g) && typeof g.grid === 'number' && g.grid > 0) todo.push(keys[i]);
-        }
-        if (!todo.length) {
-            st().go(S.RunStep.Pack, 'carriers at the star');
+        if (!inv.ok) {
+            ld().waitRead(r, 'free troops and armies');
             return;
         }
-        starRound(r, S.RunStep.PackStar, todo);
+        var walking = movingKey(r);
+        if (walking !== null) {
+            if (now() - r.since > PLACE_MAX_MS) {
+                st().pause(S.RunPause.GeneralBusy, ld().who(inv, walking) + ' did not reach its grid after ' +
+                    Math.round(PLACE_MAX_MS / 60000) + ' min', { general: walking });
+            }
+            return;
+        }
+        var need = offMap(packPlan(r, inv), inv);
+        if (!need.length) {
+            st().go(S.RunStep.Pack, 'holders on the map');
+            return;
+        }
+        var next = ld().settleRound(r, S.RunStep.PackStar, function (f) {
+            st().pause(S.RunPause.PackFailed, 'place ' + f.key + ' failed: ' + f.reason, { general: f.key });
+        }, 'place');
+        if (next !== 'new') return;
+        var c = chooseGrids(r, inv, need);
+        if (c.missing !== null) {
+            st().pause(S.RunPause.GeneralMissing, ld().who(inv, c.missing) + ' is not on the island',
+                { general: c.missing });
+            return;
+        }
+        if (c.blocked !== null) {
+            st().pause(S.RunPause.NotPlaceable, ld().who(inv, c.blocked) + ' has no placeable grid (' +
+                c.tried + ' tried)', { general: c.blocked });
+            return;
+        }
+        var round = ld().startRound(r, S.RunStep.PackStar, []);
+        var text = [];
+        for (var i = 0; i < c.moves.length; i++) {
+            ld().attempt(round, c.moves[i].key, S.core.specialists.orders.move(c.moves[i].key, c.moves[i].grid));
+            text.push(c.moves[i].key + ' -> ' + c.moves[i].grid);
+        }
+        log('placing ' + c.moves.length + ' holder(s): ' + text.join(', '));
     }
 
-    // Free troops are packed so they travel home: carriers first, then the
-    // idle loadout generals, each holding one troop class within its
-    // capacity. Each verified round re-enters the step to plan again from the
-    // game; every verified raise shrinks the free pool or the room, so this
-    // ends.
+    // Free troops are packed so they travel home, by the shared pack plan.
+    // Each verified round re-enters the step to plan again from the game;
+    // every verified raise shrinks the free pool or the room, so this ends.
+    // A planned holder off the map goes back to PackStar, so no raise is
+    // ever sent to a general at the star.
     function pack(r, inv) {
         if (!inv.ok) {
             ld().waitRead(r, 'free troops and armies');
             return;
         }
-        var keys = ld().keysOf(r);
-        var carriers = [];
-        var generals = [];
-        for (var i = 0; i < keys.length; i++) {
-            var g = ld().gen(inv, keys[i]);
-            if (!g) continue;
-            var h = { key: g.key, capacity: g.capacity, army: g.army };
-            if (isCarrier(g)) carriers.push(h);
-            else if (g.cls === S.SpecialistType.General && ready(g)) generals.push(h);
-        }
-        var p = S.core.army.planPack(inv.free, carriers.concat(generals));
+        var p = packPlan(r, inv);
         if (!p.raises.length) {
             if (S.core.army.total(p.remainder) > 0) warn('left in the free pool: ' + S.core.army.text(p.remainder));
             else log('free troops packed');
-            st().go(S.RunStep.LastQuest, 'troops packed');
+            st().go(S.RunStep.Clear, 'troops packed');
             return;
         }
         var round = ld().currentRound(r, S.RunStep.Pack);
@@ -383,12 +529,17 @@
             st().go(S.RunStep.Pack, 'packed ' + n + ' holder(s)');
             return;
         }
+        var away = offMap(p, inv);
+        if (away.length) {
+            st().go(S.RunStep.PackStar, ld().who(inv, away[0]) + ' is not on the map');
+            return;
+        }
         var next = ld().settleRound(r, S.RunStep.Pack, function (f) {
             st().pause(S.RunPause.PackFailed, 'pack ' + f.key + ' refused: ' + f.reason, { general: f.key });
         }, 'pack');
         if (next !== 'new') return;
         round = ld().startRound(r, S.RunStep.Pack, []);
-        for (i = 0; i < p.raises.length; i++) {
+        for (var i = 0; i < p.raises.length; i++) {
             ld().attempt(round, p.raises[i].key, S.core.army.raise(p.raises[i].key, p.raises[i].target));
         }
     }
@@ -605,6 +756,7 @@
     S.modules.adventures.away = {
         JUMP_MS:      JUMP_MS,
         CLEAR_MAX_MS: CLEAR_MAX_MS,
+        PLACE_MAX_MS: PLACE_MAX_MS,
         plan:         plan
     };
 

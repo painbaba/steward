@@ -97,7 +97,7 @@ Host calls behind the core write actions (each is wrapped by `Steward.core.packe
 
 | Call | Used by |
 |------|---------|
-| `SendMessagetoServer(1031, dRaiseArmyVO)` with `armyHolderSpecialistVO` and one `dResourceVO` per unit | `army.raise` |
+| `SendMessagetoServer(1031, dRaiseArmyVO)` with `armyHolderSpecialistVO` and one `dResourceVO` per unit | `army.raise` (the general must stand on a map grid: `GetGarrison()` is null at the star and the server refuses the raise) |
 | `cMilitaryUtil.SendRaiseArmyToServer(game.gi, spec, null)` | `army.unload` |
 | `SendMessagetoServer(91, dTimedProductionVO)`, one per stack shape; queue 0 is the barracks, 8 the elite barracks | `production.order` |
 | `quest.SetQuestMode(1)`, then `SendMessagetoServer(100, dServerAction)` with `type = 1` and `data = quest.GetUniqueId()` | `quests.claim` |
@@ -105,6 +105,7 @@ Host calls behind the core write actions (each is wrapped by `Steward.core.packe
 | `game.getResources().GetResourceAmount(name)` and `.GetFree()` | `resources.amount`, `resources.freePopulation` |
 | `unitBase.GetCosts_vector()` | `production.costs` |
 | `SendServerAction(95, code, grid, 0, dStartSpecialistTaskVO)` after `mCurrentCursor.mCurrentSpecialist = general`; codes 4 move, 5 attack, 7 travel to zone, 12 to star menu (not yet confirmed in steward logs) | `specialists.orders.move`, `.attack`, `.star` (via `sendTask`) |
+| `game.zone.mStreetDataMap.mLandingFields_vector[i].GetGrid()` (not yet confirmed in steward logs) | `zone.landingGrids` (returns an array of grid numbers, empty when unreadable) |
 | `ServiceManager.getInstance().specialist.sendToZone(general, zoneId)`, home to an adventure and back home from one (the client's battle window uses the same call for Return home) | `specialists.orders.sendToZone` |
 | `game.player.GetHomeZoneId()`, else `game.gi.mCurrentPlayer.GetHomeZoneId()` | `zone.homeId` (returns a number or null) |
 | `mMouseCursor.CheckIfGarrisonIsPlacableInGame(grid, true)` in cursor edit mode 86; `mPathFinder.CalculatePath` | `orders.isPlaceable`, `orders.hasPath` (prechecks) |

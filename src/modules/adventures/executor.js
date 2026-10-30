@@ -26,7 +26,7 @@
  * A wave is never skipped. Every failed check or timeout pauses with the
  * wave, general, target and reason; Resume re-enters Gate of the same wave.
  * After the last wave is confirmed the run hands over to the end of the
- * map (RunStep.Clear); the series steps run elsewhere.
+ * map (RunStep.PackStar); the series steps run elsewhere.
  *
  * Bundle slot: module file; top level assigns S.modules.adventures.executor
  * and registers the pacer queue action; state, loader, watcher and every
@@ -474,7 +474,7 @@
         r.cycles = 0;
         r.donors = [];
         if (r.waveIndex >= r.paths.length) {
-            st().go(S.RunStep.Clear, 'last wave confirmed');
+            st().go(S.RunStep.PackStar, 'last wave confirmed');
             return;
         }
         st().go(S.WaveStep.Gate, 'next wave');
@@ -506,7 +506,7 @@
         if (!st().isWaveStep(r.step)) return;
         if (S.core.zone.id() !== r.zoneId) return;
         if (r.waveIndex >= r.paths.length) {
-            st().go(S.RunStep.Clear, 'last wave confirmed');
+            st().go(S.RunStep.PackStar, 'last wave confirmed');
             return;
         }
         var step = r.step;

@@ -96,9 +96,9 @@
         ['Arrive',     'RunArrive',     ADVENTURE],
         ['StarAll',    'RunStarAll',    ADVENTURE],
         ['Horseshoe',  'RunHorseshoe',  ADVENTURE],
-        ['Clear',      'RunClear',      ADVENTURE],
         ['PackStar',   'RunPackStar',   ADVENTURE],
         ['Pack',       'RunPack',       ADVENTURE],
+        ['Clear',      'RunClear',      ADVENTURE],
         ['LastQuest',  'RunLastQuest',  ANY],
         ['Close',      'RunClose',      ANY],
         ['Recall',     'RunRecall',     ANY],
@@ -640,7 +640,7 @@
         }
         var from = r.step;
         // Leaving a wave keeps the wave in the log line (wave 3/3: Confirm ->
-        // Clear); otherwise the line names where the run now is.
+        // PackStar); otherwise the line names where the run now is.
         var where = isWaveStep(from) ? labelOf(from) : labelOf(step);
         r.step = step;
         r.since = clock();

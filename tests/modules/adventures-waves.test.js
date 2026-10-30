@@ -4,7 +4,7 @@
 // attack pacer, quest watcher, start command and scheduler wiring. The world
 // (tests/stubs/adventures.js) applies the effect of each order the way the
 // client would, and play() runs the queued entries with a test clock. After
-// the last wave the run hands over to the end of the map (RunStep.Clear),
+// the last wave the run hands over to the end of the map (RunStep.PackStar),
 // which these tests stop at.
 
 var t = require('../runner');
@@ -34,7 +34,7 @@ var stepName = W.stepName;
 function assertHandedOver(w) {
     var r = w.st.run();
     assert.strictEqual(r.status, w.S.RunStatus.Running, 'status ' + r.status);
-    assert.strictEqual(r.step, w.S.RunStep.Clear, 'step ' + stepName(w));
+    assert.strictEqual(r.step, w.S.RunStep.PackStar, 'step ' + stepName(w));
 }
 
 function attacksOf(w, key) {
@@ -540,7 +540,7 @@ t.test('Attack: a pacer run while line 2 is in flight starts no second attempt',
 
 // ---- Confirm ----------------------------------------------------------------
 
-t.test('Confirm: every line seen moves to Gate of the next wave; the last wave hands over to Clear', function () {
+t.test('Confirm: every line seen moves to Gate of the next wave; the last wave hands over to PackStar', function () {
     var w = attackWorld();
     startRun(w, ['C:/b/w1.txt', 'C:/b/w2.txt'], { step: w.S.WaveStep.Attack });
     tick(w);

@@ -152,7 +152,9 @@ function general(opts) {
     });
     getter('IsInUse', function () { return state.inUse || !!state.task; });
     getter('isTravellingAway', function () { return state.travelling; });
-    getter('GetGarrison', function () { return { garrison: true }; });
+    // The client has no garrison for a general at the star (grid <= 0), so
+    // such a general cannot be raised there.
+    getter('GetGarrison', function () { return state.grid > 0 ? { garrison: true } : null; });
     getter('CreateSpecialistVOFromSpecialist', function () {
         return { voName: 'SpecialistVO', uid: s.GetUniqueID().toKeyString() };
     });

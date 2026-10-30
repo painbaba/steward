@@ -387,6 +387,24 @@ t.test('raise refuses an empty target', function () {
     assert.strictEqual(s.sent.messages.length, 0);
 });
 
+// The client has no garrison for a general at the star, so a raise there is
+// refused before the packet; the same general on a map grid passes.
+t.test('raise refuses a general at the star with no garrison; on a grid it passes the precheck', function () {
+    var g = AC.general({ uid: 'g1', grid: 0, army: {}, maxUnits: 10 });
+    var s = actionSetup({ free: { Rifle: 5 }, generals: [g] });
+    var r = runDef(s, s.army.raise('g1', { Rifle: 5 }));
+    assert.strictEqual(r.status, s.S.ActionResult.Refused);
+    assert.strictEqual(r.reason, 'no garrison');
+    assert.strictEqual(r.sends, 0);
+    assert.strictEqual(s.sent.messages.length, 0);
+    g.state.grid = 5;
+    r = runDef(s, s.army.raise('g1', { Rifle: 5 }), function (n) {
+        if (n === 1) g.state.army = { Rifle: 5 };
+    });
+    assert.strictEqual(r.status, s.S.ActionResult.Verified);
+    assert.strictEqual(s.sent.messages.length, 1);
+});
+
 t.test('raise verified when the army matches', function () {
     var done = AC.general({ uid: 'g1', army: { Rifle: 5 } });
     var s = actionSetup({ free: {}, generals: [done] });

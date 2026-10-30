@@ -146,6 +146,13 @@ function homeStock(o, popName) {
 //   - unit costs are w.costs (o.costs, default one Population per unit) and
 //     other resources w.resources (o.resources);
 //   - the quest pool has a last quest that is not finished.
+//
+// On either world:
+//   - w.landing(grids) fills the map's landing fields (none by default);
+//   - w.blocked[grid] = true makes the client refuse that grid for a placement;
+//   - w.auto.walk makes a move a walk: a Move task that holds until
+//     w.endWalks() puts each walker on its grid (default: instant move);
+//   - a general at the star (grid <= 0) has no garrison, so a raise is refused.
 function world(o) {
     o = o || {};
     var fs = o.fs || airfs.make();
@@ -168,7 +175,8 @@ function world(o) {
         camps: o.camps || { 100: true, 200: true, 300: true },
         quests: o.quests === undefined ? defaultQuests : o.quests,
         auto: { move: true, attack: true, star: true, raise: true, unload: true,
-            map: true, visit: true, travel: true, close: true },
+            map: true, visit: true, travel: true, close: true, walk: false },
+        blocked: {},
         orders: [], raises: [], unloads: [], buffs: [], claims: [],
         zoneSends: [], buffActions: [], productionOrders: [], closes: [],
         pending: [], entries: [],
@@ -188,6 +196,31 @@ function world(o) {
     gi.isOnHomzone = function () { return gi.mCurrentViewedZoneID === HOME; };
     H.host.game.zone.GetArmy = function () { return A.armyOf(w.free); };
     gi.mCurrentPlayer.getAvailableBuffs_vector = function () { return buffVector(w.stock); };
+    gi.mMouseCursor.CheckIfGarrisonIsPlacableInGame = function (grid) {
+        return w.blocked[grid] ? 1 : sent.placeable;
+    };
+
+    // Landing fields of the map: the grids the client lets a general be
+    // placed on. Without a call there is no vector to read.
+    w.landing = function (grids) {
+        var zone = H.host.game.zone;
+        if (!zone.mStreetDataMap) zone.mStreetDataMap = {};
+        zone.mStreetDataMap.mLandingFields_vector = grids.map(function (g) {
+            return { GetGrid: function () { return g; } };
+        });
+    };
+
+    // Ends every walk: a general with a Move task stands on its target grid.
+    w.endWalks = function () {
+        Object.keys(w.lists).forEach(function (id) {
+            w.lists[id].forEach(function (g) {
+                var t = g.state.task;
+                if (!t || t.type !== w.code.move) return;
+                g.state.grid = t.newGrid;
+                g.state.task = null;
+            });
+        });
+    };
 
     // The general with this key on any zone.
     w.byKey = function (key) {
@@ -245,7 +278,8 @@ function world(o) {
         w.orders.push({ key: key, code: p1, grid: p2, t: w.t });
         var g = w.byKey(key);
         if (!g) return;
-        if (p1 === w.code.move && w.auto.move) g.state.grid = p2;
+        if (p1 === w.code.move && w.auto.walk) g.state.task = { type: w.code.move, newGrid: p2 };
+        else if (p1 === w.code.move && w.auto.move) g.state.grid = p2;
         if (p1 === w.code.attack && w.auto.attack) g.state.task = { type: w.code.attack };
         if (p1 === w.code.star && w.auto.star) {
             if (!home) {

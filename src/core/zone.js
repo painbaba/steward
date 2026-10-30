@@ -133,6 +133,29 @@
         return false;
     }
 
+    // Grids of the landing fields: where the client lets a general be placed on
+    // an adventure map. An unreadable vector yields an empty list so callers
+    // fall back to other candidate grids.
+    function landingGrids() {
+        var out = [];
+        try {
+            if (typeof game === 'undefined' || !game || !game.zone) return out;
+            var sdm = game.zone.mStreetDataMap;
+            var vec = sdm ? sdm.mLandingFields_vector : null;
+            if (!vec || typeof vec.length !== 'number') return out;
+            for (var i = 0; i < vec.length; i++) {
+                var f = vec[i];
+                if (!f || typeof f.GetGrid !== 'function') continue;
+                var g = f.GetGrid();
+                if (typeof g === 'number' && g > 0 && out.indexOf(g) < 0) out.push(g);
+            }
+        } catch (e) {
+            S.kernel.warn('zone', 'landingGrids threw:', e);
+            return [];
+        }
+        return out;
+    }
+
     S.core.zone = {
         current:      current,
         id:           id,
@@ -144,7 +167,8 @@
         adventureName: adventureName,
         viewedPlayer: viewedPlayer,
         visit:        visit,
-        scrollTo:     scrollTo
+        scrollTo:     scrollTo,
+        landingGrids: landingGrids
     };
 
 }(Steward));
