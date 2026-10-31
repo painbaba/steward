@@ -9,6 +9,10 @@
  * queue reset) when the next step runs. Each step therefore observes the game
  * first and never relies on a callback having fired.
  *
+ * A general at the star can only be placed on a free landing field, so
+ * Position reaches a line grid off the landing fields in two steps, through
+ * a landing field.
+ *
  * Every order runs through S.core.actions.attempt with the existing core
  * defs. The round handling (results kept in memory on runState.round, late
  * callbacks dropped) and the Supply -> Unload -> Load -> Verify flow are
@@ -41,7 +45,6 @@
 
     // Starting values, to be tuned in game.
     var GATE_MISSING_MS   = 60000;     // a field general absent this long pauses
-    var GATE_BUSY_MS      = 1800000;   // a field general busy this long pauses
     var SETTLE_QUIET_MS   = 20000;     // island quiet this long before a blocker pauses
     var SETTLE_MAX_MS     = 900000;    // Settle gives up after this long
     var PACE_MS           = 500;       // pacer poll gap
@@ -168,8 +171,15 @@
     // inventory lists only the viewed map's generals, so absence after a star
     // is the expected end state.
     function starDone(line, inv) {
-        var g = gen(inv, line.key);
-        return !g || !(typeof g.grid === 'number' && g.grid > 0);
+        return !ld().onMap(gen(inv, line.key));
+    }
+
+    function openStars(w, inv) {
+        var out = [];
+        for (var i = 0; i < w.stars.length; i++) {
+            if (!starDone(w.stars[i], inv)) out.push(w.stars[i]);
+        }
+        return out;
     }
 
     function spec(key) {
@@ -208,33 +218,102 @@
             return;
         }
         if (busy) {
-            if (waited > GATE_BUSY_MS) {
-                pause(S.RunPause.GeneralBusy, who(busy, inv) + ' has been busy for ' +
-                    Math.round(waited / 60000) + ' min', busy, inv);
-            }
+            ld().waitBusy(r, busy.key, who(busy, inv) + ' busy');
             return;
         }
         st().go(S.WaveStep.Position, 'generals ready');
     }
 
-    // Field lines whose general is off its grid but cannot be placed there.
-    function notPlaceable(w, inv) {
-        for (var i = 0; i < w.field.length; i++) {
+    function standsOn(inv, grid) {
+        for (var k in inv.byKey) {
+            if (has(inv.byKey, k) && inv.byKey[k] && inv.byKey[k].grid === grid) return true;
+        }
+        return false;
+    }
+
+    function lineOf(lines, key) {
+        for (var i = 0; i < lines.length; i++) {
+            if (lines[i].key === key) return lines[i];
+        }
+        return null;
+    }
+
+    // How each field line off its grid gets there, and the one judge for
+    // Position and Settle: if the two disagreed, the run would spin between
+    // them with no wait. A general with no garrison (at the star) can only be
+    // placed on a free landing field and a general on the map only off one,
+    // so a line the client refuses takes a detour: from the star it hops to a
+    // landing field first, and on the map a landing line grid no own fighter
+    // holds means a retreat to the star, from where the next pass places him.
+    // Neither state leads back to the other for the same line, so no counter
+    // is needed: what still refuses after the detour is blocked. A hop never
+    // takes a grid another field line of this wave needs. Partial results are
+    // used, those without a grid wait for the next pass; only when nothing at
+    // all can act is the lack of a landing field a blocker. No spec: the line
+    // is direct as before, and the move's precheck reports it.
+    function placePlan(w, inv) {
+        var o = S.core.specialists.orders;
+        var landing = S.core.zone.landingGrids();
+        var out = { direct: [], hops: [], retreats: [], blocked: null, missing: null, landing: landing };
+        var hop = [];
+        var grids = [];
+        var i;
+        for (i = 0; i < w.field.length; i++) grids.push(w.field[i].grid);
+        for (i = 0; i < w.field.length; i++) {
             var l = w.field[i];
             var g = gen(inv, l.key);
             if (!g || g.grid === l.grid) continue;
             var s = spec(l.key);
-            if (s && !S.core.specialists.orders.isPlaceable(s, l.grid)) {
-                return { key: l.key, general: who(l, inv), target: l.grid, reason: 'not placeable at ' + l.grid };
+            if (!s || o.isPlaceable(s, l.grid)) {
+                out.direct.push(l);
+                continue;
+            }
+            var isLanding = landing.indexOf(l.grid) >= 0;
+            var mapped = ld().onMap(g);
+            if (!mapped && !isLanding) hop.push(l);
+            else if (mapped && isLanding && !standsOn(inv, l.grid)) out.retreats.push(l);
+            else if (!out.blocked) {
+                out.blocked = { key: l.key, general: who(l, inv), target: l.grid,
+                    reason: 'not placeable at ' + l.grid + ' (code ' + o.placeCode(s, l.grid) + ')' };
             }
         }
-        return null;
+        if (!hop.length) return out;
+        var keys = [];
+        for (i = 0; i < hop.length; i++) keys.push(hop[i].key);
+        var c = ld().chooseGrids(inv, keys, grids);
+        out.hops = c.moves;
+        out.missing = c.missing;
+        if (c.missing === null && !out.blocked && !c.moves.length && !out.direct.length &&
+                !out.retreats.length && !openStars(w, inv).length) {
+            out.blocked = { key: hop[0].key, general: who(hop[0], inv), target: hop[0].grid,
+                reason: 'no free landing field' };
+        }
+        return out;
+    }
+
+    // Whether every general of a hop or retreat round reads where that round
+    // put him: true means on the map, false off it.
+    function viaShown(round, inv) {
+        for (var k in round.via) {
+            if (!has(round.via, k)) continue;
+            var g = gen(inv, k);
+            if (!g || ld().onMap(g) !== round.via[k]) return false;
+        }
+        return true;
+    }
+
+    function hopText(p) {
+        if (!p.hops.length) return '';
+        var parts = [];
+        for (var i = 0; i < p.hops.length; i++) parts.push(p.hops[i].key + ' -> ' + p.hops[i].grid);
+        return ', ' + p.hops.length + ' hop(s): ' + parts.join(', ') +
+            ' (landing fields ' + p.landing.join(', ') + ')';
     }
 
     function position(r, w, inv) {
         var i, l, g;
         var moves = [];
-        var stars = [];
+        var stars = openStars(w, inv);
         var moving = null;
         for (i = 0; i < w.field.length; i++) {
             l = w.field[i];
@@ -251,10 +330,8 @@
             if (g.grid === l.grid) continue;
             moves.push(l);
         }
-        for (i = 0; i < w.stars.length; i++) {
-            l = w.stars[i];
-            if (starDone(l, inv)) continue;
-            stars.push(l);
+        for (i = 0; i < stars.length; i++) {
+            l = stars[i];
             g = gen(inv, l.key);
             if (!(g.idle && !g.travelling) && !moving) moving = l;
         }
@@ -265,9 +342,23 @@
         // A verified move only means the walk began; wait for it to end
         // rather than order a busy general again.
         if (moving) {
-            if (now() - r.since > GATE_BUSY_MS) {
-                pause(S.RunPause.GeneralBusy, who(moving, inv) + ' did not reach its grid', moving, inv);
-            }
+            ld().waitBusy(r, moving.key, who(moving, inv) + ' walking to its grid');
+            return;
+        }
+        // A detour belongs to the way to the grid, so once it shows it never
+        // counts against the real move and needs no settling time. It has to
+        // read as done: one that does not show falls through to the round
+        // count and stays bounded.
+        var last = ld().currentRound(r, S.WaveStep.Position);
+        if (last && last.via && ld().complete(last) && !ld().firstFailure(last) && viaShown(last, inv)) {
+            st().go(S.WaveStep.Position, 'on the landing field');
+            return;
+        }
+        var p = placePlan(w, inv);
+        if (p.missing !== null) {
+            if (!ld().missingLong(r, p.missing)) return;
+            l = lineOf(w.field, p.missing);
+            pause(S.RunPause.GeneralMissing, who(l, inv) + ' is not on the island', l, inv);
             return;
         }
         var next = ld().settleRound(r, S.WaveStep.Position, function (f) {
@@ -275,22 +366,33 @@
         }, 'positioning');
         if (next !== 'new') return;
 
-        var blocked = notPlaceable(w, inv);
-        if (blocked) {
+        if (p.blocked) {
             r.settleFrom = S.WaveStep.Position;
-            r.blocker = blocked;
-            st().go(S.WaveStep.Settle, blocked.general + ' ' + blocked.reason);
+            r.blocker = p.blocked;
+            st().go(S.WaveStep.Settle, p.blocked.general + ' ' + p.blocked.reason);
             return;
         }
+        var o = S.core.specialists.orders;
         var round = ld().startRound(r, S.WaveStep.Position, []);
-        for (i = 0; i < moves.length; i++) {
-            ld().attempt(round, moves[i].key, S.core.specialists.orders.move(moves[i].key, moves[i].grid));
+        // Memory only, like the round: the keys of this round that take a detour.
+        var via = {};
+        for (i = 0; i < p.hops.length; i++) via[p.hops[i].key] = true;
+        for (i = 0; i < p.retreats.length; i++) via[p.retreats[i].key] = false;
+        if (p.hops.length || p.retreats.length) round.via = via;
+        for (i = 0; i < p.direct.length; i++) {
+            ld().attempt(round, p.direct[i].key, o.move(p.direct[i].key, p.direct[i].grid));
+        }
+        for (i = 0; i < p.hops.length; i++) {
+            ld().attempt(round, p.hops[i].key, o.move(p.hops[i].key, p.hops[i].grid));
+        }
+        for (i = 0; i < p.retreats.length; i++) {
+            ld().attempt(round, p.retreats[i].key, o.star(p.retreats[i].key));
         }
         for (i = 0; i < stars.length; i++) {
-            ld().attempt(round, stars[i].key, S.core.specialists.orders.star(stars[i].key));
+            ld().attempt(round, stars[i].key, o.star(stars[i].key));
         }
-        S.kernel.log(CATEGORY, st().waveLabel() + ': positioning, ' + moves.length + ' move(s), ' +
-            stars.length + ' star(s)');
+        S.kernel.log(CATEGORY, st().waveLabel() + ': positioning, ' + p.direct.length + ' move(s), ' +
+            (stars.length + p.retreats.length) + ' star(s)' + hopText(p));
     }
 
     // Wave step values for the shared load flow, built at call time:
@@ -370,7 +472,7 @@
         var fromPosition = r.settleFrom === S.WaveStep.Position;
         var back = fromPosition ? S.WaveStep.Position : S.WaveStep.Reach;
         var was = r.blocker;
-        var blocked = fromPosition ? notPlaceable(w, inv) : reachBlock(r, w, inv);
+        var blocked = fromPosition ? placePlan(w, inv).blocked : reachBlock(r, w, inv);
         if (!blocked) {
             r.settleFrom = null;
             r.blocker = null;
@@ -733,7 +835,6 @@
     S.modules.adventures.executor = {
         PACE_ACTION:       PACE_ACTION,
         GATE_MISSING_MS:   GATE_MISSING_MS,
-        GATE_BUSY_MS:      GATE_BUSY_MS,
         SETTLE_QUIET_MS:   SETTLE_QUIET_MS,
         SETTLE_MAX_MS:     SETTLE_MAX_MS,
         PACE_MS:           PACE_MS,

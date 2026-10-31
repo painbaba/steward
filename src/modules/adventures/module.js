@@ -85,7 +85,10 @@
         var name = a.state.partOf(step);
         var part = name ? a[name] : null;
         if (part && part.plan) {
+            // A pass that did not wait any more ended the wait.
+            a.state.passBegins();
             part.plan();
+            a.state.passEnds();
             nextPass(run, step, since);
         }
     }

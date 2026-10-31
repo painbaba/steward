@@ -87,6 +87,7 @@ function packWorld(grid1, grid2) {
     w.c = AC.general({ uid: '1.5', name: 'Cara', grid: 30, carrier: true, maxUnits: 10 });
     onIsland(w, [w.g1, w.g2, w.c], { Rifle: 16 });
     w.quests = [{ key: 'q9', name: 'Final', finished: true, last: true }];
+    w.landing([500, 501]);
     return w;
 }
 
@@ -180,6 +181,41 @@ t.test('cadence: Position with a general on the way is a short wait', function (
     w.wakes.length = 0;
     tick(w);
     assert.deepStrictEqual(w.wakes, [['adventures', 2000]]);
+});
+
+['Gate', 'Position'].forEach(function (name) {
+    t.test('cadence: a busy wait polls at 2 s for a minute, then stays on the tick, and never wakes at 0: ' + name, function () {
+        var w = islandWorld();
+        w.g1.state.task = { type: w.code.attack };
+        startRun(w, [WAVE], { step: w.S.WaveStep[name] });
+        w.wakes.length = 0;
+        tick(w);
+        assertStep(w, name);
+        assert.deepStrictEqual(w.wakes, [['adventures', 2000]]);
+        w.wakes.length = 0;
+        w.t += w.st.BUSY_FAST_MS - 1;
+        tick(w);
+        assert.deepStrictEqual(w.wakes, [['adventures', 2000]]);
+        w.wakes.length = 0;
+        w.t += 1;
+        tick(w);
+        assertStep(w, name);
+        assert.deepStrictEqual(w.wakes, []);
+        w.t += 600000;
+        tick(w);
+        assert.deepStrictEqual(w.wakes, []);
+    });
+});
+
+t.test('cadence: Arrive with a busy general stays on the tick', function () {
+    var w = homeWorld();
+    onIsland(w, [w.g1, w.g2]);
+    w.g1.state.task = { type: w.code.move };
+    startRun(w, [WAVE], { step: w.S.RunStep.Arrive });
+    w.wakes.length = 0;
+    tick(w);
+    assertStep(w, 'Arrive');
+    assert.deepStrictEqual(w.wakes, []);
 });
 
 t.test('cadence: Muster, Arrive, Clear and ArriveHome wait long, a short step does not', function () {

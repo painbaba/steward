@@ -259,6 +259,20 @@ t.test('Gate: a Star line whose general is absent does not block Gate', function
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
 });
 
+t.test('Gate: a busy field general waits with no limit', function () {
+    var w = attackWorld();
+    w.g1.state.task = { type: w.code.attack };
+    startRun(w, ['C:/b/w1.txt']);
+    tick(w);
+    w.t += 3600000;
+    tick(w);
+    assert.strictEqual(stepName(w), 'Gate');
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    w.g1.state.task = null;
+    tick(w);
+    assert.strictEqual(stepName(w), 'Position');
+});
+
 // ---- Position ---------------------------------------------------------------
 
 t.test('Position: only off-grid field lines get a move', function () {
@@ -343,6 +357,223 @@ t.test('Position: a star general that leaves the list is done; Resume passes Gat
     assert.strictEqual(stepName(w), 'Supply');
     assert.strictEqual(w.orders.length, sends);
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+});
+
+t.test('Position: a walking general waits with no limit', function () {
+    var w = attackWorld();
+    w.g2.state.grid = 55;
+    w.auto.walk = true;
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    tick(w);
+    play(w);
+    tick(w);
+    w.t += 3600000;
+    tick(w);
+    assert.strictEqual(stepName(w), 'Position');
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    assert.ok(logged(w, /Bert \(1\.2\) walking to its grid/), 'the wait is logged');
+    w.endWalks();
+    tick(w);
+    assert.strictEqual(stepName(w), 'Supply');
+    assert.deepStrictEqual(moveText(w), ['1.2->20']);
+});
+
+// ---- Position from the star -------------------------------------------------
+
+// Anna and Bert at the star. grids: the map's landing fields.
+function starWorld(grids) {
+    var w = attackWorld();
+    w.g1.state.grid = 0;
+    w.g2.state.grid = 0;
+    if (grids) w.landing(grids);
+    return w;
+}
+
+function moveText(w) {
+    return w.orders.filter(function (o) { return o.code === w.code.move; })
+        .map(function (o) { return o.key + '->' + o.grid; });
+}
+
+function starsOf(w) {
+    return w.orders.filter(function (o) { return o.code === w.code.star; }).map(function (o) { return o.key; });
+}
+
+function logged(w, re) {
+    return w.H.logs().some(function (l) { return re.test(l.args.join(' ')); });
+}
+
+function settled(w) {
+    return logged(w, /-> Settle/);
+}
+
+// Passes, with the time a read may lag in between, until the run left
+// Position. between runs after each pass.
+function throughPosition(w, between) {
+    var lag = w.S.modules.adventures.loader.READ_LAG_MS;
+    for (var i = 0; i < 12 && stepName(w) === 'Position' && w.st.run().status === w.S.RunStatus.Running; i++) {
+        tick(w);
+        play(w);
+        if (between) between();
+        w.t += lag;
+    }
+}
+
+function assertSupply(w) {
+    var r = w.st.run();
+    assert.strictEqual(stepName(w), 'Supply', 'step ' + stepName(w) + (r.pause ? ' (' + r.pause.message + ')' : ''));
+    assert.strictEqual(r.status, w.S.RunStatus.Running);
+}
+
+// Pauses once the island has been quiet long enough.
+function assertNotPlaceable(w, re) {
+    W.ticksFor(w, 30000);
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Paused, 'status ' + r.status + ' at ' + stepName(w));
+    assert.strictEqual(r.pause.reason, w.S.RunPause.NotPlaceable, r.pause.reason + ': ' + r.pause.message);
+    assert.ok(re.test(r.pause.message), r.pause.message);
+}
+
+[false, true].forEach(function (walk) {
+    t.test('Position: a star general reaches its line grid through a landing field' + (walk ? ', walking' : ''), function () {
+        var w = starWorld([500, 501]);
+        w.auto.walk = walk;
+        startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+        throughPosition(w, function () {
+            if (!w.g1.state.task) return;
+            tick(w);
+            assert.strictEqual(stepName(w), 'Position');
+            w.endWalks();
+        });
+        assertSupply(w);
+        assert.deepStrictEqual(moveText(w), ['1.1->500', '1.2->501', '1.1->10', '1.2->20']);
+        assert.ok(!settled(w), 'no Settle');
+        assert.ok(logged(w, /2 hop\(s\): 1\.1 -> 500, 1\.2 -> 501 \(landing fields 500, 501\)/), 'the hop names the fields');
+        assert.ok(logged(w, /Position -> Position \(on the landing field\)/));
+    });
+});
+
+t.test('Position: a line grid that is a free landing field moves directly', function () {
+    var w = starWorld([10, 20]);
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    throughPosition(w);
+    assertSupply(w);
+    assert.deepStrictEqual(moveText(w), ['1.1->10', '1.2->20']);
+    assert.ok(!logged(w, /hop\(s\)/), 'no hop');
+});
+
+t.test('Position: a hop never takes a landing field another line needs', function () {
+    var w = starWorld([20, 500]);
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    throughPosition(w);
+    assertSupply(w);
+    assert.deepStrictEqual(moveText(w), ['1.2->20', '1.1->500', '1.1->10']);
+});
+
+t.test('Position: fewer landing fields than star generals ends without a rounds pause', function () {
+    var w = starWorld([500]);
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    throughPosition(w);
+    assertSupply(w);
+    assert.deepStrictEqual(moveText(w), ['1.1->500', '1.1->10', '1.2->500', '1.2->20']);
+    assert.ok(!settled(w), 'no Settle');
+});
+
+t.test('Position: no free landing field at all goes to Settle and pauses NotPlaceable', function () {
+    var w = starWorld();
+    var wakes = [];
+    w.S.kernel.scheduler.wake = function (id, ms) { wakes.push(ms); return true; };
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    tick(w);
+    assert.strictEqual(stepName(w), 'Settle');
+    assert.strictEqual(w.st.run().blocker.reason, 'no free landing field');
+    wakes.length = 0;
+    tick(w);
+    assert.strictEqual(stepName(w), 'Settle');
+    assertNotPlaceable(w, /no free landing field/);
+    assert.ok(wakes.indexOf(0) < 0, 'no wake at 0: ' + wakes.join());
+    assert.strictEqual(w.H.logs().filter(function (l) { return /-> Settle/.test(l.args.join(' ')); }).length, 1, 'no spin');
+    assert.strictEqual(w.orders.length, 0);
+});
+
+t.test('Position: a failed hop pauses PositionFailed', function () {
+    var w = starWorld([500, 501]);
+    w.auto.move = false;
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    runOut(w, 20);
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Paused, 'status ' + r.status);
+    assert.strictEqual(r.pause.reason, w.S.RunPause.PositionFailed, r.pause.reason + ': ' + r.pause.message);
+    assert.ok(!settled(w), 'no Settle');
+});
+
+t.test('Position: a hop not shown on the map stays bounded', function () {
+    var w = starWorld([500, 501]);
+    w.auto.walk = true;
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    for (var i = 0; i < 2; i++) {
+        tick(w);
+        play(w);
+        // The move verified, but both still read at the star, idle.
+        w.g1.state.task = null;
+        w.g2.state.task = null;
+        w.t += w.S.modules.adventures.loader.READ_LAG_MS;
+    }
+    tick(w);
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Paused, 'status ' + r.status);
+    assert.strictEqual(r.pause.reason, w.S.RunPause.NotObserved, r.pause.reason + ': ' + r.pause.message);
+    assert.ok(/positioning verified but not observed after 2 rounds/.test(r.pause.message), r.pause.message);
+    assert.deepStrictEqual(moveText(w), ['1.1->500', '1.2->501', '1.1->500', '1.2->501']);
+    assert.ok(!settled(w), 'no Settle');
+});
+
+t.test('Position: a general on the map whose line is a free landing field is starred, then placed', function () {
+    var w = attackWorld();
+    w.auto.starKeep = true;
+    w.g2.state.grid = 55;
+    w.landing([20]);
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    throughPosition(w);
+    assertSupply(w);
+    assert.deepStrictEqual(starsOf(w), ['1.2']);
+    assert.deepStrictEqual(moveText(w), ['1.2->20']);
+    assert.strictEqual(w.g2.state.grid, 20);
+});
+
+t.test('Position: that retreat onto a field that still refuses pauses NotPlaceable and sends one star only', function () {
+    var w = attackWorld();
+    w.auto.starKeep = true;
+    w.g2.state.grid = 55;
+    w.landing([20]);
+    w.blocked[20] = true;
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    throughPosition(w);
+    assert.strictEqual(stepName(w), 'Settle');
+    assertNotPlaceable(w, /not placeable at 20 \(code 1\)/);
+    assert.deepStrictEqual(starsOf(w), ['1.2']);
+    assert.deepStrictEqual(moveText(w), []);
+});
+
+t.test('Position: a landing line grid an own fighter stands on is blocked, no star', function () {
+    var g3 = AC.general({ uid: '1.3', name: 'Cleo', grid: 20 });
+    var w = attackWorld({ extra: [g3] });
+    w.g2.state.grid = 55;
+    w.landing([20]);
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    tick(w);
+    assert.strictEqual(stepName(w), 'Settle');
+    assert.deepStrictEqual(starsOf(w), []);
+    assert.ok(/not placeable at 20/.test(w.st.run().blocker.reason), w.st.run().blocker.reason);
+});
+
+t.test('Position: a garrisoned general refused off a landing field keeps the code in the reason', function () {
+    var w = attackWorld();
+    w.g2.state.grid = 55;
+    w.sent.placeable = 3;
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    tick(w);
+    assert.strictEqual(stepName(w), 'Settle');
+    assert.ok(/code 3/.test(w.st.run().blocker.reason), w.st.run().blocker.reason);
 });
 
 // ---- Supply / Load ----------------------------------------------------------

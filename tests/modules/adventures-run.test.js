@@ -256,6 +256,7 @@ function restart(w) {
 
 t.test('series: x2 from home runs every step once, in order, with no pause; map 2 waits GAP_MS', function () {
     var w = homeWorld();
+    w.landing([500, 501]);
     series(w, { count: 2 });
     var closed1 = null;
     var ids = [];
@@ -315,7 +316,7 @@ t.test('series: x2 from home runs every step once, in order, with no pause; map 
 
 // ---- 2. Muster ------------------------------------------------------------------
 
-t.test('Muster: a general on another zone waits, then pauses GeneralMissing at GATHER_CAP_MS', function () {
+t.test('Muster: a general on another zone waits, then pauses GeneralMissing past GATHER_CAP_MS and the grace', function () {
     var w = homeWorld();
     w.lists[HOME].splice(w.lists[HOME].indexOf(w.g2), 1);
     w.place(w.g2, 9);
@@ -327,36 +328,54 @@ t.test('Muster: a general on another zone waits, then pauses GeneralMissing at G
     assertStep(w, 'Muster');
     w.t += 1;
     tick(w);
+    assertStep(w, 'Muster');
+    W.ticksFor(w, w.S.modules.adventures.loader.MISSING_GRACE_MS - 1);
+    assertStep(w, 'Muster');
+    w.t += 1;
+    tick(w);
     assertPaused(w, w.S.RunPause.GeneralMissing, /1\.2 is not on the home island/);
     assert.strictEqual(w.st.run().pause.general, '1.2');
 });
 
-t.test('Muster: a busy general with remaining time R pauses only after R + slack', function () {
+t.test('Muster: a busy general never pauses', function () {
     var w = homeWorld();
-    var H = w.S.modules.adventures.home;
-    var R = H.GATHER_CAP_MS + 600000;
     var r = series(w);
-    var t0 = w.t;
-    w.g2.state.task = { type: w.code.move, remaining: R };
-    // The client counts the remaining time down.
-    function pass(time) {
-        w.t = time;
-        w.g2.state.task.remaining = R - (time - t0);
-        tick(w);
-    }
-    pass(t0);
-    assert.ok(logged(w, /1\.2 busy, remaining/), 'the busy general is logged');
-    pass(r.since + H.GATHER_CAP_MS + 1);
+    w.g2.state.task = { type: w.code.move, remaining: 5000 };
+    tick(w);
+    assert.ok(logged(w, /Bert \(1\.2\) busy, waited 0 min, remaining 5000/), 'the busy general is logged');
+    w.t = r.since + w.S.modules.adventures.home.GATHER_CAP_MS * 3;
+    tick(w);
     assertStep(w, 'Muster');
-    pass(t0 + R + H.GATHER_SLACK_MS);
-    assertStep(w, 'Muster');
-    pass(t0 + R + H.GATHER_SLACK_MS + 2000);
-    assertPaused(w, w.S.RunPause.GeneralBusy, /Bert \(1\.2\) has been busy/);
+    w.g2.state.task = null;
+    tick(w);
+    assertStep(w, 'Validate');
 });
 
 t.test('Muster: generals home and idle go on to Validate', function () {
     var w = homeWorld();
     series(w);
+    tick(w);
+    assertStep(w, 'Validate');
+});
+
+t.test('gather: one unreadable list after a long busy wait holds and does not pause', function () {
+    var w = homeWorld();
+    series(w);
+    w.g2.state.task = { type: w.code.move };
+    tick(w);
+    w.t += w.S.modules.adventures.home.GATHER_CAP_MS * 2;
+    tick(w);
+    var zone = w.gi.mCurrentPlayerZone;
+    var list = zone.GetSpecialists_vector;
+    zone.GetSpecialists_vector = function () { return null; };
+    tick(w);
+    assertStep(w, 'Muster');
+    assert.strictEqual(typeof w.st.run().waitUntil, 'number', 'the hold has its own window');
+    zone.GetSpecialists_vector = list;
+    tick(w);
+    assertStep(w, 'Muster');
+    assert.strictEqual(w.st.run().waitUntil, null, 'a clean read ends the hold');
+    w.g2.state.task = null;
     tick(w);
     assertStep(w, 'Validate');
 });
@@ -524,6 +543,104 @@ t.test('Depart: a general gone from home without a mark pauses GeneralMissing', 
     assert.strictEqual(w.zoneSends.length, 0);
 });
 
+t.test('Depart: idle generals leave while one is busy; Jump only once he has gone too', function () {
+    var w = homeWorld({ mapOpen: true });
+    w.g2.state.task = { type: w.code.move };
+    series(w, { step: w.S.RunStep.Depart, zoneId: ZONE });
+    tick(w);
+    play(w);
+    assert.strictEqual(sendsOf(w, '1.1').length, 1);
+    assert.strictEqual(sendsOf(w, '1.2').length, 0);
+    w.t += 3600000;
+    tick(w);
+    play(w);
+    assertStep(w, 'Depart');
+    w.g2.state.task = null;
+    drive(w, { until: at('Jump') });
+    assertStep(w, 'Jump');
+    assert.strictEqual(sendsOf(w, '1.1').length, 1);
+    assert.strictEqual(sendsOf(w, '1.2').length, 1);
+});
+
+var THREE = { '1.1': true, '1.2': true, '1.3': true };
+
+// Anna is ready, Bert and Cora are busy and get ready one pass after the
+// other, with the time a read may lag in between. No finished round may count.
+function oneAtATime(w, g3) {
+    var lag = loaderOf(w).READ_LAG_MS;
+    function pass() {
+        tick(w);
+        play(w);
+        w.t += lag;
+        assert.strictEqual(w.st.run().rounds, 0);
+    }
+    w.g2.state.task = { type: w.code.move };
+    g3.state.task = { type: w.code.move };
+    pass();
+    w.g2.state.task = null;
+    pass();
+    g3.state.task = null;
+    pass();
+    tick(w);
+}
+
+t.test('Depart: three generals ready one at a time never pause', function () {
+    var w = homeWorld({ mapOpen: true });
+    var g3 = w.place(gen('1.3', 'Cora', 30), HOME);
+    series(w, { step: w.S.RunStep.Depart, zoneId: ZONE, keys: THREE });
+    oneAtATime(w, g3);
+    assertStep(w, 'Jump');
+    Object.keys(THREE).forEach(function (k) {
+        assert.strictEqual(sendsOf(w, k).length, 1, k);
+    });
+});
+
+t.test('Depart: a verified send that never shows still pauses after MAX_ROUNDS', function () {
+    var w = homeWorld({ mapOpen: true });
+    series(w, { step: w.S.RunStep.Depart, zoneId: ZONE });
+    // The send verified, then a later read shows him at home and idle.
+    function back(g) {
+        var list = w.lists[ZONE];
+        list.splice(list.indexOf(g), 1);
+        w.lists[HOME].push(g);
+        g.state.task = null;
+        g.state.travelling = false;
+    }
+    for (var i = 0; i < 2; i++) {
+        tick(w);
+        play(w);
+        back(w.g1);
+        back(w.g2);
+        w.t += loaderOf(w).READ_LAG_MS;
+    }
+    tick(w);
+    assertPaused(w, w.S.RunPause.NotObserved, /departure verified but not observed after 2 rounds/);
+    assert.strictEqual(w.st.run().rounds, 2);
+    assert.strictEqual(sendsOf(w, '1.1').length, 2);
+    assert.strictEqual(sendsOf(w, '1.2').length, 2);
+});
+
+t.test('Depart: a failed send still pauses DepartFailed while another general is ready', function () {
+    var w = homeWorld({ mapOpen: true });
+    var orders = w.S.core.specialists.orders;
+    var send = orders.sendToZone;
+    orders.sendToZone = function (key) {
+        var def = send.apply(orders, arguments);
+        if (key !== '1.1') return def;
+        return { label: def.label, timeoutMs: 15000,
+            send: function () { return false; }, check: function () { return false; } };
+    };
+    w.g2.state.task = { type: w.code.move };
+    series(w, { step: w.S.RunStep.Depart, zoneId: ZONE });
+    tick(w);
+    play(w);
+    w.g2.state.task = null;
+    tick(w);
+    play(w);
+    assertPaused(w, w.S.RunPause.DepartFailed, /send 1\.1 failed/);
+    assert.strictEqual(sendsOf(w, '1.2').length, 0);
+});
+
 // ---- 8. Jump and Arrive -----------------------------------------------------------
 
 t.test('Jump: a zone that does not load is visited once more, then JumpFailed after 2 x JUMP_MS', function () {
@@ -570,7 +687,7 @@ t.test('Arrive: waits per general key, not by count', function () {
     assertStep(w, 'StarAll');
 });
 
-t.test('Arrive: a general still missing at the stored deadline pauses GeneralMissing', function () {
+t.test('Arrive: a general still missing past the stored deadline pauses GeneralMissing after the grace', function () {
     var w = homeWorld();
     onIsland(w, [w.g1]);
     var r = series(w, { step: w.S.RunStep.Arrive, zoneId: ZONE });
@@ -579,7 +696,63 @@ t.test('Arrive: a general still missing at the stored deadline pauses GeneralMis
     assertStep(w, 'Arrive');
     w.t += 5001;
     tick(w);
+    assertStep(w, 'Arrive');
+    W.ticksFor(w, w.S.modules.adventures.loader.MISSING_GRACE_MS - 1);
+    assertStep(w, 'Arrive');
+    w.t += 1;
+    tick(w);
     assertPaused(w, w.S.RunPause.GeneralMissing, /1\.2 did not arrive/);
+});
+
+t.test('Arrive: a listed busy general far past the deadline stays Running, then goes to StarAll', function () {
+    var w = homeWorld();
+    onIsland(w);
+    w.g2.state.travelling = true;
+    w.g2.state.task = { type: w.code.travel, remaining: 1000 };
+    var r = series(w, { step: w.S.RunStep.Arrive, zoneId: ZONE });
+    r.marks.arrive = { sentAt: w.t + 5000, seen: false, sentOnce: false };
+    tick(w);
+    w.t += loaderOf(w).TRAVEL_CAP_MS * 2;
+    tick(w);
+    assertStep(w, 'Arrive');
+    w.arrive();
+    tick(w);
+    assertStep(w, 'StarAll');
+});
+
+t.test('Arrive: a missing general next to a busy one still pauses GeneralMissing past the deadline', function () {
+    var w = homeWorld();
+    onIsland(w, [w.g1]);
+    w.g1.state.task = { type: w.code.move };
+    var r = series(w, { step: w.S.RunStep.Arrive, zoneId: ZONE });
+    r.marks.arrive = { sentAt: w.t + 5000, seen: false, sentOnce: false };
+    tick(w);
+    w.t += 5001;
+    tick(w);
+    assertStep(w, 'Arrive');
+    W.ticksFor(w, loaderOf(w).MISSING_GRACE_MS - 1);
+    assertStep(w, 'Arrive');
+    w.t += 1;
+    tick(w);
+    assertPaused(w, w.S.RunPause.GeneralMissing, /1\.2 did not arrive/);
+});
+
+t.test('Arrive: nothing busy, armies unreadable past the deadline holds READ_MAX_MS, then NotObserved', function () {
+    var w = homeWorld();
+    onIsland(w);
+    w.H.host.game.zone.GetArmy = function () { return null; };
+    var r = series(w, { step: w.S.RunStep.Arrive, zoneId: ZONE });
+    r.marks.arrive = { sentAt: w.t + 5000, seen: false, sentOnce: false };
+    tick(w);
+    w.t += 5001;
+    tick(w);
+    assertStep(w, 'Arrive');
+    w.t += loaderOf(w).READ_MAX_MS;
+    tick(w);
+    assertStep(w, 'Arrive');
+    w.t += 1;
+    tick(w);
+    assertPaused(w, w.S.RunPause.NotObserved, /generals arrived but their armies are not readable/);
 });
 
 // ---- 9. StarAll -----------------------------------------------------------------
@@ -663,6 +836,7 @@ t.test('waves: hand over to PackStar and reach Clear; the watcher claims a non-l
     var w = homeWorld();
     w.g1.state.grid = 0;
     w.g2.state.grid = 0;
+    w.landing([500, 501]);
     onIsland(w, null, { Rifle: 8 });
     w.quests = [
         { key: 'q1', name: 'Side', finished: true, last: false },
@@ -725,6 +899,71 @@ t.test('Clear: ClearTimeout after CLEAR_MAX_MS', function () {
     assertPaused(w, w.S.RunPause.ClearTimeout, /last quest not finished after 30 min/);
 });
 
+t.test('Clear: quest done, a general busy far past CLEAR_MAX_MS stays Running', function () {
+    var w = homeWorld();
+    onIsland(w, null, {});
+    var r = series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
+    lastQuest(w).finished = true;
+    w.g1.state.task = { type: w.code.attack };
+    tick(w);
+    w.t = r.since + w.S.modules.adventures.away.CLEAR_MAX_MS * 3;
+    tick(w);
+    assertStep(w, 'Clear');
+    assert.ok(logged(w, /Anna \(1\.1\) busy/), 'the wait is logged');
+    w.g1.state.task = null;
+    tick(w);
+    assertStep(w, 'LastQuest');
+});
+
+t.test('Clear: last quest unfinished still pauses ClearTimeout', function () {
+    var w = homeWorld();
+    onIsland(w, null, {});
+    var r = series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
+    w.g1.state.task = { type: w.code.attack };
+    w.t = r.since + w.S.modules.adventures.away.CLEAR_MAX_MS + 1;
+    tick(w);
+    assertPaused(w, w.S.RunPause.ClearTimeout, /last quest not finished after 30 min/);
+});
+
+t.test('Clear: a null quest list past CLEAR_MAX_MS holds, then NotObserved', function () {
+    var w = homeWorld();
+    onIsland(w, null, {});
+    var r = series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
+    w.quests = null;
+    w.t = r.since + w.S.modules.adventures.away.CLEAR_MAX_MS + 1;
+    tick(w);
+    assertStep(w, 'Clear');
+    w.t += loaderOf(w).READ_MAX_MS;
+    tick(w);
+    assertStep(w, 'Clear');
+    w.t += 1;
+    tick(w);
+    assertPaused(w, w.S.RunPause.NotObserved, /quest list not readable after 60 s/);
+});
+
+// An empty pool and a pool whose last quest was skipped as unreadable both
+// read as a list that lacks the quest.
+[
+    { name: 'an empty list', quests: [] },
+    { name: 'a list of other quests', quests: [{ key: 'q1', name: 'Side', finished: false, last: false }] }
+].forEach(function (c) {
+    t.test('Clear: a list without the last quest holds, then NotObserved: ' + c.name, function () {
+        var w = homeWorld();
+        onIsland(w, null, {});
+        var r = series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
+        w.quests = c.quests;
+        w.t = r.since + w.S.modules.adventures.away.CLEAR_MAX_MS + 1;
+        tick(w);
+        assertStep(w, 'Clear');
+        w.t += loaderOf(w).READ_MAX_MS;
+        tick(w);
+        assertStep(w, 'Clear');
+        w.t += 1;
+        tick(w);
+        assertPaused(w, w.S.RunPause.NotObserved, /last quest not readable after 60 s/);
+    });
+});
+
 // ---- 13. Pack and the last quest ---------------------------------------------------
 
 // An elite unit in the catalogue, so a pack can choose between two classes.
@@ -749,6 +988,7 @@ function packWorld(free) {
     w.c = c;
     onIsland(w, [w.g1, w.g2, c], free || { Rifle: 13, Knight: 5 });
     w.quests = [{ key: 'q9', name: 'Final', finished: true, last: true }];
+    w.landing([500, 501]);
     return w;
 }
 
@@ -789,8 +1029,8 @@ t.test('Pack: carriers first, then generals; one class each within capacity; the
     assertStep(w, 'LastQuest');
     assert.strictEqual(w.orders.filter(function (o) { return o.code === w.code.star; }).length, 0, 'no star order');
     assert.strictEqual(w.c.state.grid, 30, 'the carrier stays on its grid');
-    // The wave file's grids, last wave first; the carrier's grid is never offered.
-    assert.deepStrictEqual(moveText(w), ['1.1->10', '1.2->20']);
+    // Landing fields in the map's order; the carrier's grid is never offered.
+    assert.deepStrictEqual(moveText(w), ['1.1->500', '1.2->501']);
     movesOf(w).forEach(function (m) {
         var r = w.raiseAt.filter(function (x) { return x.key === m.key; })[0];
         assert.ok(r && r.t >= m.t, m.key + ' moved before its raise');
@@ -803,7 +1043,7 @@ t.test('Pack: carriers first, then generals; one class each within capacity; the
     assert.ok(logged(w, /left in the free pool: /, 'warn'));
     assert.deepStrictEqual(plain(w.frees[ZONE]), { Rifle: 1, Knight: 1 });
     assert.strictEqual(claimsOf(w, 'q9').length, 0, 'the last quest waits for the pack');
-    assert.ok(logged(w, /placing 2 holder\(s\): 1\.1 -> 10, 1\.2 -> 20/));
+    assert.ok(logged(w, /placing 2 holder\(s\): 1\.1 -> 500, 1\.2 -> 501/));
     assert.strictEqual(countOf(w, 'PackStar', 'Pack'), 1);
     assert.strictEqual(countOf(w, 'Pack', 'Clear'), 1);
     assert.strictEqual(countOf(w, 'Clear', 'LastQuest'), 1);
@@ -831,9 +1071,8 @@ t.test('Pack: a planned holder at the star goes back to PackStar before any rais
     assert.ok(logged(w, /Pack -> PackStar.*Anna \(1\.1\) is not on the map/), 'reason logged');
 });
 
-t.test('PackStar: landing fields come before the battle grids', function () {
+t.test('PackStar: holders go to landing fields, never to a battle grid', function () {
     var w = packWorld();
-    w.landing([500, 501]);
     series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: PACK_KEYS });
     drive(w, { until: at('LastQuest') });
     assertStep(w, 'LastQuest');
@@ -843,13 +1082,13 @@ t.test('PackStar: landing fields come before the battle grids', function () {
 
 t.test('PackStar: an occupied grid and a grid the client refuses are skipped', function () {
     var w = packWorld();
-    w.landing([30, 500, 501]);
+    w.landing([30, 500, 501, 502]);
     w.blocked[500] = true;
     series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: PACK_KEYS });
     drive(w, { until: at('LastQuest') });
     assertStep(w, 'LastQuest');
-    // Candidates 30, 500, 501, 10, 20: Cara stands on 30, 500 is refused.
-    assert.deepStrictEqual(moveText(w), ['1.1->501', '1.2->10']);
+    // Cara stands on 30, 500 is refused.
+    assert.deepStrictEqual(moveText(w), ['1.1->501', '1.2->502']);
 });
 
 t.test('PackStar: no placeable grid pauses NotPlaceable; no move and no raise', function () {
@@ -878,7 +1117,7 @@ t.test('PackStar: a walking holder is waited on without a second move, then pack
     series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: PACK_KEYS });
     for (var i = 0; i < 6; i++) { tick(w); play(w); w.t += 1000; }
     assertStep(w, 'PackStar');
-    assert.deepStrictEqual(moveText(w), ['1.1->10', '1.2->20']);
+    assert.deepStrictEqual(moveText(w), ['1.1->500', '1.2->501']);
     assert.deepStrictEqual(w.raises, []);
     w.endWalks();
     drive(w, { until: at('LastQuest') });
@@ -887,20 +1126,41 @@ t.test('PackStar: a walking holder is waited on without a second move, then pack
     assert.deepStrictEqual(w.raises, ['1.5', '1.1', '1.2']);
 });
 
-t.test('PackStar: a walk longer than PLACE_MAX_MS pauses GeneralBusy', function () {
+t.test('PackStar: a long walk never pauses', function () {
     var w = packWorld();
     w.auto.walk = true;
     series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: PACK_KEYS });
     for (var i = 0; i < 3; i++) { tick(w); play(w); w.t += 1000; }
-    assertStep(w, 'PackStar');
-    var r = w.st.run();
-    w.t = r.since + w.S.modules.adventures.away.PLACE_MAX_MS;
+    w.t += 3600000;
     tick(w);
     assertStep(w, 'PackStar');
-    w.t += 1;
-    tick(w);
-    assertPaused(w, w.S.RunPause.GeneralBusy, /did not reach its grid after 5 min/);
+    assert.ok(logged(w, /walking to its grid/), 'the wait is logged');
     assert.deepStrictEqual(w.raises, []);
+    w.endWalks();
+    drive(w, { until: at('LastQuest') });
+    assertStep(w, 'LastQuest');
+});
+
+t.test('PackStar: one unreadable read after a long walk holds and does not pause', function () {
+    var w = packWorld();
+    w.auto.walk = true;
+    series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: PACK_KEYS });
+    tick(w);
+    play(w);
+    w.t += 3600000;
+    tick(w);
+    var zone = w.H.host.game.zone;
+    var army = zone.GetArmy;
+    zone.GetArmy = function () { return null; };
+    tick(w);
+    assertStep(w, 'PackStar');
+    zone.GetArmy = army;
+    tick(w);
+    assertStep(w, 'PackStar');
+    assert.strictEqual(w.st.run().waitUntil, null, 'a clean read ends the hold');
+    w.endWalks();
+    drive(w, { until: at('LastQuest') });
+    assertStep(w, 'LastQuest');
 });
 
 t.test('Restart: in PackStar while walking sends no second move', function () {
@@ -917,7 +1177,7 @@ t.test('Restart: in PackStar while walking sends no second move', function () {
     assert.strictEqual(movesOf(w).length, 2);
     drive(w, { until: at('LastQuest'), on: function (w2, name) { if (name === 'PackStar') w2.endWalks(); } });
     assertStep(w, 'LastQuest');
-    assert.deepStrictEqual(moveText(w), ['1.1->10', '1.2->20']);
+    assert.deepStrictEqual(moveText(w), ['1.1->500', '1.2->501']);
     assert.deepStrictEqual(w.raises, ['1.5', '1.1', '1.2']);
 });
 
@@ -930,7 +1190,7 @@ t.test('Kernel pause: PackStar after a move send places each holder once', funct
     w.kernelPause();
     drive(w, { until: at('LastQuest') });
     assertStep(w, 'LastQuest');
-    assert.deepStrictEqual(moveText(w), ['1.1->10', '1.2->20']);
+    assert.deepStrictEqual(moveText(w), ['1.1->500', '1.2->501']);
     assert.deepStrictEqual(w.raises, ['1.5', '1.1', '1.2']);
 });
 
@@ -1093,6 +1353,39 @@ t.test('Close: an adventure the client removes itself within MARK_SETTLE_MS is s
     assert.strictEqual(w.closes.length, 0);
 });
 
+t.test('Recall: a busy general never pauses; the others leave; JumpHome once he is gone', function () {
+    var w = homeWorld();
+    onIsland(w);
+    w.g2.state.task = { type: w.code.attack };
+    series(w, { step: w.S.RunStep.Recall, zoneId: ZONE });
+    tick(w);
+    play(w);
+    assert.strictEqual(sendsOf(w, '1.1').length, 1);
+    assert.strictEqual(sendsOf(w, '1.2').length, 0);
+    w.t += 3600000;
+    tick(w);
+    play(w);
+    assertStep(w, 'Recall');
+    assert.ok(logged(w, /Bert \(1\.2\) busy on the adventure/), 'the wait is logged');
+    w.g2.state.task = null;
+    drive(w, { until: at('JumpHome') });
+    assertStep(w, 'JumpHome');
+    assert.strictEqual(sendsOf(w, '1.1').length, 1);
+    assert.strictEqual(sendsOf(w, '1.2').length, 1);
+});
+
+t.test('Recall: three generals ready one at a time never pause', function () {
+    var w = homeWorld();
+    var g3 = gen('1.3', 'Cora', 30);
+    onIsland(w, [w.g1, w.g2, g3]);
+    series(w, { step: w.S.RunStep.Recall, zoneId: ZONE, keys: THREE });
+    oneAtATime(w, g3);
+    assertStep(w, 'JumpHome');
+    Object.keys(THREE).forEach(function (k) {
+        assert.strictEqual(sendsOf(w, k).length, 1, k);
+    });
+});
+
 // ---- 15. Accounting -----------------------------------------------------------------
 
 t.test('Account: lost = snapshot - (total + queued) stays exact when production finishes during the run', function () {
@@ -1215,6 +1508,7 @@ t.test('Retrain: a reload after the send sends no second order', function () {
 
 t.test('Repetition: End repetition during map 2 of x3 stops after map 2', function () {
     var w = homeWorld();
+    w.landing([500, 501]);
     series(w, { count: 3 });
     var ended = false;
     drive(w, { max: 2000, on: function (w2, name) {
@@ -1233,6 +1527,7 @@ t.test('Repetition: End repetition during map 2 of x3 stops after map 2', functi
 
 t.test('Repetition: each map gets a new run id and its own zoneId', function () {
     var w = homeWorld();
+    w.landing([500, 501]);
     series(w, { count: 2 });
     var seen = [];
     var moved = false;
@@ -1622,4 +1917,68 @@ t.test('run from a template carries retrain', function () {
         assert.strictEqual(w.S.modules.adventures.run.start(saved.id), true);
         assert.strictEqual(w.st.run().retrain, retrain);
     });
+});
+
+// ---- 21. Busy waits -----------------------------------------------------------------
+
+t.test('waitBusy: logs once a minute under a moved clock, shows the remaining time, saves nothing, leaves r.since', function () {
+    var w = homeWorld();
+    var r = series(w);
+    var since = r.since;
+    var saves = 0;
+    var save = w.st.save;
+    w.st.save = function () {
+        saves++;
+        return save.apply(this, arguments);
+    };
+    function lines() {
+        return w.H.logs().filter(function (l) { return /Bert \(1\.2\) busy/.test(l.args.join(' ')); }).length;
+    }
+    w.g2.state.task = { type: w.code.move, remaining: 7000 };
+    tick(w);
+    assert.strictEqual(lines(), 1);
+    W.ticksFor(w, loaderOf(w).BUSY_LOG_MS - 10000);
+    assert.strictEqual(lines(), 1);
+    W.ticksFor(w, 10000);
+    assert.strictEqual(lines(), 2);
+    assert.ok(logged(w, /Bert \(1\.2\) busy, waited 1 min, remaining 7000 \(raw\)/));
+    assert.strictEqual(saves, 0, 'the run file stays as it is');
+    assert.strictEqual(w.st.run().since, since);
+});
+
+t.test('waitBusy: go, pause and a pass without a wait clear the record; an absent field is tolerated', function () {
+    var w = homeWorld();
+    onIsland(w, null, {});
+    var r = series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
+    var rs = w.st.current();
+    var quest = lastQuest(w);
+    quest.finished = true;
+    w.g1.state.task = { type: w.code.attack };
+    tick(w);
+    assert.ok(rs.busy, 'the wait began');
+    w.st.go(w.S.RunStep.Clear, 'test');
+    assert.strictEqual(rs.busy, null, 'go');
+    tick(w);
+    assert.ok(rs.busy, 'the wait began again');
+    w.st.pause(w.S.RunPause.User, 'paused by you');
+    assert.strictEqual(rs.busy, null, 'pause');
+    w.st.resume();
+    tick(w);
+    assert.ok(rs.busy, 'the wait began again');
+    quest.finished = false;
+    tick(w);
+    assertStep(w, 'Clear');
+    assert.strictEqual(rs.busy, null, 'a pass that no longer waits');
+    quest.finished = true;
+    delete rs.busy;
+    delete rs.busySeen;
+    assert.strictEqual(w.st.waitsLong(r), true);
+    tick(w);
+    assertStep(w, 'Clear');
+    assert.ok(rs.busy, 'the record comes back');
+});
+
+t.test('no site pauses GeneralBusy', function () {
+    var w = homeWorld();
+    assert.strictEqual(w.S.RunPause.GeneralBusy, undefined);
 });

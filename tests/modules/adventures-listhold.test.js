@@ -82,6 +82,7 @@ function packWorld(grid1, grid2) {
     w.c = AC.general({ uid: '1.5', name: 'Cara', grid: 30, carrier: true, maxUnits: 10 });
     onIsland(w, [w.g1, w.g2, w.c], { Rifle: 16 });
     w.quests = [{ key: 'q9', name: 'Final', finished: true, last: true }];
+    w.landing([500, 501]);
     return w;
 }
 
@@ -464,6 +465,138 @@ t.test('missingLong: a longer gap restarts the time, per key, and a lost map is 
     w.t += 30000;
     assert.strictEqual(l.missingLong(r, 'a'), true);
     assert.strictEqual(l.missingLong(r, 'c'), false, 'another key has its own time');
+});
+
+// ---- passes that say nothing about a busy wait ----------------------------------------
+
+function busyLines(w) {
+    return w.H.logs().filter(function (l) { return /, waited \d+ min/.test(l.args.join(' ')); }).length;
+}
+
+// tick(w) starts the wait; hide() sets up one pass that says nothing about it,
+// show() (optional) undoes that, and a clean pass follows. The record is the
+// same all along and nothing is logged again.
+function keepsWait(w, hide, show) {
+    tick(w);
+    var rs = w.st.current();
+    var b = rs.busy;
+    assert.ok(b, 'the wait began');
+    var since = b.since;
+    var noted = b.noted;
+    var lines = busyLines(w);
+    w.t += 5000;
+    hide();
+    tick(w);
+    w.t += 5000;
+    if (show) show();
+    tick(w);
+    assert.strictEqual(rs.busy, b, 'the same record');
+    assert.strictEqual(b.since, since);
+    assert.strictEqual(b.noted, noted);
+    assert.strictEqual(busyLines(w), lines, 'no second log line');
+}
+
+t.test('a list hold does not end a busy wait', function () {
+    var w = islandWorld();
+    w.g1.state.task = { type: w.code.attack };
+    startRun(w, [WAVE], { step: w.S.WaveStep.Gate });
+    keepsWait(w, function () { w.ghost(w.g2); });
+    assertStep(w, 'Gate');
+});
+
+t.test('a read hold does not end a busy wait', function () {
+    var w = packWorld();
+    w.auto.walk = true;
+    startRun(w, [WAVE], { step: w.S.RunStep.PackStar, loadoutKeys: PACK_KEYS });
+    tick(w);
+    play(w);
+    var zone = w.H.host.game.zone;
+    var army = zone.GetArmy;
+    keepsWait(w, function () {
+        zone.GetArmy = function () { return null; };
+    }, function () {
+        zone.GetArmy = army;
+    });
+    assertStep(w, 'PackStar');
+});
+
+t.test('a missing report does not end a busy wait', function () {
+    var w = islandWorld();
+    w.g1.state.task = { type: w.code.attack };
+    startRun(w, [WAVE], { step: w.S.WaveStep.Gate });
+    keepsWait(w, function () {
+        w.fighters.splice(w.fighters.indexOf(w.g2), 1);
+    }, function () {
+        w.fighters.push(w.g2);
+    });
+    assertStep(w, 'Gate');
+});
+
+t.test('Clear: a null quest list does not end a busy wait', function () {
+    var w = homeWorld();
+    onIsland(w, [w.g1, w.g2]);
+    var quests = [{ key: 'q9', name: 'Final', finished: true, last: true }];
+    w.quests = quests;
+    w.g1.state.task = { type: w.code.attack };
+    startRun(w, [WAVE], { step: w.S.RunStep.Clear });
+    keepsWait(w, function () {
+        w.quests = null;
+    }, function () {
+        w.quests = quests;
+    });
+    assertStep(w, 'Clear');
+});
+
+// One pass reads a list that lacks the last quest. On a young step that pass
+// says so itself; on an old one, taking this for an unfinished quest would pause.
+[
+    { name: 'an empty list', quests: [] },
+    { name: 'a list of other quests', quests: [{ key: 'q1', name: 'Side', finished: false, last: false }] }
+].forEach(function (c) {
+    [
+        { name: 'a young step', age: 0 },
+        { name: 'past CLEAR_MAX_MS', age: 1 }
+    ].forEach(function (a) {
+        t.test('Clear: a list without the last quest does not end a busy wait: ' + c.name + ', ' + a.name, function () {
+            var w = homeWorld();
+            onIsland(w, [w.g1, w.g2]);
+            var quests = [{ key: 'q9', name: 'Final', finished: true, last: true }];
+            w.quests = quests;
+            w.g1.state.task = { type: w.code.attack };
+            var r = startRun(w, [WAVE], { step: w.S.RunStep.Clear });
+            if (a.age) w.t = r.since + w.S.modules.adventures.away.CLEAR_MAX_MS + a.age;
+            keepsWait(w, function () {
+                w.quests = c.quests;
+            }, function () {
+                w.quests = quests;
+            });
+            assertStep(w, 'Clear');
+        });
+    });
+});
+
+// A clean read lacks the only busy general, with the deadline far off.
+function lacksBusyGeneral(w, name) {
+    w.g1.state.task = { type: w.code.move };
+    keepsWait(w, function () {
+        w.fighters.splice(w.fighters.indexOf(w.g1), 1);
+    }, function () {
+        w.fighters.push(w.g1);
+    });
+    assertStep(w, name);
+}
+
+t.test('a general not listed before the deadline does not end a busy wait: Arrive', function () {
+    var w = homeWorld();
+    onIsland(w, [w.g1, w.g2]);
+    startRun(w, [WAVE], { step: w.S.RunStep.Arrive });
+    lacksBusyGeneral(w, 'Arrive');
+});
+
+t.test('a general not listed before the deadline does not end a busy wait: gather', function () {
+    var w = homeWorld();
+    startRun(w, [WAVE], { step: w.S.RunStep.Muster });
+    lacksBusyGeneral(w, 'Muster');
 });
 
 // ---- refusals over an unreadable general --------------------------------------------

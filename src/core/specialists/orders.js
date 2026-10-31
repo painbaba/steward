@@ -119,24 +119,31 @@
     // The client's own placeable test. It switches the player's cursor into
     // the garrison edit mode, so the previous mode is restored in finally even
     // when the host throws.
-    function isPlaceable(spec, grid) {
+    // placeCode returns the raw host code (0 means placeable), or null when the
+    // spec or cursor is absent or the host throws, so a caller can report why
+    // a grid was refused.
+    function placeCode(spec, grid) {
         var g = gi();
-        if (!spec || !g || !g.mMouseCursor || !g.mCurrentCursor) return false;
+        if (!spec || !g || !g.mMouseCursor || !g.mCurrentCursor) return null;
         var entered = false;
         try {
             g.mMouseCursor.SetCursorEditMode(EDIT_MODE_PLACE_GARRISON);
             entered = true;
             g.mCurrentCursor.mCurrentSpecialist = spec;
-            return g.mMouseCursor.CheckIfGarrisonIsPlacableInGame(grid, true) === 0;
+            return g.mMouseCursor.CheckIfGarrisonIsPlacableInGame(grid, true);
         } catch (e) {
-            S.kernel.warn(CATEGORY, 'isPlaceable threw:', e);
-            return false;
+            S.kernel.warn(CATEGORY, 'placeCode threw:', e);
+            return null;
         } finally {
             if (entered) {
                 try { g.mMouseCursor.SetToLastEditMode(); }
                 catch (e2) { S.kernel.warn(CATEGORY, 'SetToLastEditMode threw:', e2); }
             }
         }
+    }
+
+    function isPlaceable(spec, grid) {
+        return placeCode(spec, grid) === 0;
     }
 
     // The client's path test: a path from the target building's street entry
@@ -402,6 +409,7 @@
         newGrid:           newGrid,
         remaining:         remaining,
         isPlaceable:       isPlaceable,
+        placeCode:         placeCode,
         hasPath:           hasPath,
         sendTask:          sendTask,
         move:              move,

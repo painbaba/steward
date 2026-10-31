@@ -161,9 +161,15 @@ function homeStock(o, popName) {
 // On either world:
 //   - w.landing(grids) fills the map's landing fields (none by default);
 //   - w.blocked[grid] = true makes the client refuse that grid for a placement;
+//   - the client's star rule holds on the adventure: a general at the star can
+//     only be placed on a landing field, a general on the map never on one,
+//     and a landing field an own fighter stands on is refused;
 //   - w.auto.walk makes a move a walk: a Move task that holds until
 //     w.endWalks() puts each walker on its grid (default: instant move);
 //   - a general at the star (grid <= 0) has no garrison, so a raise is refused;
+//   - w.auto.starKeep keeps a starred general listed at grid 0, as the live
+//     client does, with his army in the free pool (default on the island world:
+//     he leaves the list, as tests on that end state expect);
 //   - w.ghost(g, passes) makes g a bridge ghost for the next passes ticks
 //     (default 1), play() in between included;
 //   - w.ghostAfterRead(g) does the same from the moment the next inventory
@@ -190,7 +196,7 @@ function world(o) {
         camps: o.camps || { 100: true, 200: true, 300: true },
         quests: o.quests === undefined ? defaultQuests : o.quests,
         auto: { move: true, attack: true, star: true, raise: true, unload: true,
-            map: true, visit: true, travel: true, close: true, walk: false },
+            map: true, visit: true, travel: true, close: true, walk: false, starKeep: false },
         blocked: {},
         orders: [], raises: [], unloads: [], buffs: [], claims: [],
         zoneSends: [], buffActions: [], productionOrders: [], closes: [],
@@ -212,7 +218,19 @@ function world(o) {
     H.host.game.zone.GetArmy = function () { return A.armyOf(w.free); };
     gi.mCurrentPlayer.getAvailableBuffs_vector = function () { return buffVector(w.stock); };
     gi.mMouseCursor.CheckIfGarrisonIsPlacableInGame = function (grid) {
-        return w.blocked[grid] ? 1 : sent.placeable;
+        var spec = gi.mCurrentCursor.mCurrentSpecialist;
+        var at = spec && spec.GetGarrisonGridIdx ? spec.GetGarrisonGridIdx() : 1;
+        var map = H.host.game.zone.mStreetDataMap;
+        var fields = (map && map.mLandingFields_vector) || [];
+        var landing = fields.some(function (f) { return f.GetGrid() === grid; });
+        var taken = (w.lists[gi.mCurrentViewedZoneID] || []).some(function (g) {
+            return typeof g.GetGarrisonGridIdx === 'function' && g.GetGarrisonGridIdx() === grid;
+        });
+        if (w.blocked[grid]) return 1;
+        if (!gi.isOnHomzone() && !(at > 0) && !landing) return 7;
+        if (!gi.isOnHomzone() && at > 0 && landing) return 8;
+        if (landing && taken) return 9;
+        return sent.placeable;
     };
 
     // Landing fields of the map: the grids the client lets a general be
@@ -312,7 +330,7 @@ function world(o) {
         else if (p1 === w.code.move && w.auto.move) g.state.grid = p2;
         if (p1 === w.code.attack && w.auto.attack) g.state.task = { type: w.code.attack };
         if (p1 === w.code.star && w.auto.star) {
-            if (!home) {
+            if (!home && !w.auto.starKeep) {
                 var list = w.lists[w.zoneOf(g)];
                 list.splice(list.indexOf(g), 1);
                 return;

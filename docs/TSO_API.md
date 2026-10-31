@@ -105,10 +105,10 @@ Host calls behind the core write actions (each is wrapped by `Steward.core.packe
 | `game.getResources().GetResourceAmount(name)` and `.GetFree()` | `resources.amount`, `resources.freePopulation` |
 | `unitBase.GetCosts_vector()` | `production.costs` |
 | `SendServerAction(95, code, grid, 0, dStartSpecialistTaskVO)` after `mCurrentCursor.mCurrentSpecialist = general`; codes 4 move, 5 attack, 7 travel to zone, 12 to star menu (not yet confirmed in steward logs) | `specialists.orders.move`, `.attack`, `.star` (via `sendTask`) |
-| `game.zone.mStreetDataMap.mLandingFields_vector[i].GetGrid()` (not yet confirmed in steward logs) | `zone.landingGrids` (returns an array of grid numbers, empty when unreadable) |
+| `game.zone.mStreetDataMap.mLandingFields_vector[i].GetGrid()` (not yet confirmed in steward logs; the vector also lists other players' fields, `lf.mId` differs, so steward's callers leave the choice to the placeable test) | `zone.landingGrids` (returns an array of grid numbers, empty when unreadable) |
 | `ServiceManager.getInstance().specialist.sendToZone(general, zoneId)`, home to an adventure and back home from one (the client's battle window uses the same call for Return home) | `specialists.orders.sendToZone` |
 | `game.player.GetHomeZoneId()`, else `game.gi.mCurrentPlayer.GetHomeZoneId()` | `zone.homeId` (returns a number or null) |
-| `mMouseCursor.CheckIfGarrisonIsPlacableInGame(grid, true)` in cursor edit mode 86; `mPathFinder.CalculatePath` | `orders.isPlaceable`, `orders.hasPath` (prechecks) |
+| `mMouseCursor.CheckIfGarrisonIsPlacableInGame(grid, true)` in cursor edit mode 86; `mPathFinder.CalculatePath` | `orders.placeCode` (the raw code), `orders.isPlaceable` (code 0 is placeable), `orders.hasPath` (prechecks). On an adventure a general with no garrison (at the star) is placeable only on a free landing field of the player's own landing zone; a general with a garrison goes through the normal rules. |
 | `general.GetTask().GetOriginalType()`, `.GetNewGarrisonGridIdx()` | `orders.rawTaskType`, `.taskKind`, `.newGrid` (verification) |
 | `general.GetTask().GetRemainingTime()` (unit assumed to be ms, not yet confirmed in steward logs; the raw value is logged) | `specialists.orders.remaining` (returns a number or null) |
 

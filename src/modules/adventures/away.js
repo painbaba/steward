@@ -39,8 +39,7 @@
 
     // Starting values, to be tuned in game.
     var JUMP_MS      = 60000;      // a visited zone that has not loaded is visited once more
-    var CLEAR_MAX_MS = 1800000;    // the last quest and the generals get this long after the last wave
-    var PLACE_MAX_MS = 300000;     // a holder walking from the star to its grid gets this long
+    var CLEAR_MAX_MS = 1800000;    // the last quest gets this long after the last wave
 
     var CATEGORY = 'adventures';
 
@@ -76,22 +75,6 @@
     function keyOfMark(name) {
         var i = name.indexOf(':');
         return i >= 0 ? name.slice(i + 1) : name;
-    }
-
-    // A hold on the step's own deadline (r.waitUntil), set on the first pass.
-    function hold(r, text) {
-        if (typeof r.waitUntil !== 'number') {
-            r.waitUntil = now() + ld().READ_MAX_MS;
-            st().save();
-            return;
-        }
-        if (now() > r.waitUntil) st().pause(S.RunPause.NotObserved, text);
-    }
-
-    function clearHold(r) {
-        if (r.waitUntil === null || r.waitUntil === undefined) return;
-        r.waitUntil = null;
-        st().save();
     }
 
     // Whether the own adventure list (read, not null) no longer holds the
@@ -165,8 +148,11 @@
     // ---- Arrival ------------------------------------------------------------
 
     // Waits per general, not by count: every loadout key must be listed here
-    // and idle. The deadline is the one Depart stored in the 'arrive' marker
-    // (a deadline, never a send time); without it, since + TRAVEL_CAP_MS.
+    // and idle. A general that is listed needs no deadline, because the game's
+    // remaining time runs short; the deadline only bounds a general not
+    // listed, who has nothing to wait on. It is the one Depart stored in the
+    // 'arrive' marker (a deadline, never a send time); without it, since +
+    // TRAVEL_CAP_MS.
     function arrive(r, inv) {
         var keys = ld().keysOf(r);
         var missing = null;
@@ -182,14 +168,20 @@
         }
         var rec = ld().marked(r, 'arrive');
         var deadline = rec && typeof rec.sentAt === 'number' ? rec.sentAt : r.since + ld().TRAVEL_CAP_MS;
-        if (now() <= deadline) return;
-        if (missing !== null) {
+        var over = now() > deadline;
+        // A read that lacks a general says nothing about a busy wait, and
+        // before the deadline missingLong does not run.
+        if (missing !== null) ld().keepBusy();
+        if (over && missing !== null && ld().missingLong(r, missing)) {
             st().pause(S.RunPause.GeneralMissing, ld().who(inv, missing) + ' did not arrive', { general: missing });
-        } else if (busy !== null) {
-            st().pause(S.RunPause.GeneralBusy, ld().who(inv, busy) + ' is still busy after arriving', { general: busy });
-        } else {
-            st().pause(S.RunPause.NotObserved, 'generals arrived but their armies are not readable');
+            return;
         }
+        if (busy !== null) {
+            ld().clearHold(r);
+            ld().waitBusy(r, busy, ld().who(inv, busy) + ' busy');
+            return;
+        }
+        if (over && missing === null) ld().hold(r, 'generals arrived but their armies are not readable');
     }
 
     // ---- Star ---------------------------------------------------------------
@@ -314,12 +306,6 @@
         return !!g && (g.cls === S.SpecialistType.Carrier || g.cls === S.SpecialistType.AdmiralCarrier);
     }
 
-    // A raise needs the general's garrison, which only a general on a map
-    // grid has.
-    function onMap(g) {
-        return !!g && typeof g.grid === 'number' && g.grid > 0;
-    }
-
     // The first loadout key whose general is walking to a grid, or null. A
     // key that cannot be looked up does not count as walking.
     function movingKey(r) {
@@ -355,94 +341,34 @@
     function offMap(p, inv) {
         var out = [];
         for (var i = 0; i < p.raises.length; i++) {
-            if (!onMap(ld().gen(inv, p.raises[i].key))) out.push(p.raises[i].key);
-        }
-        return out;
-    }
-
-    // Candidate grids for a holder: the island's landing fields, where the
-    // client places generals, then the grids the run's battle files stand
-    // generals on, last wave first, deduped.
-    function placeGrids(r) {
-        var out = [];
-        var seen = {};
-        function add(grid) {
-            if (has(seen, String(grid))) return;
-            seen[String(grid)] = true;
-            out.push(grid);
-        }
-        var landing = S.core.zone.landingGrids();
-        for (var i = 0; i < landing.length; i++) add(landing[i]);
-        for (i = r.paths.length - 1; i >= 0; i--) {
-            var f = S.core.battles.load(r.paths[i]);
-            if (!f || !f.ok) continue;
-            for (var j = 0; j < f.lines.length; j++) {
-                var l = f.lines[j];
-                if (typeof l.grid === 'number' && l.grid > 0) add(l.grid);
-            }
-        }
-        return out;
-    }
-
-    // A free placeable grid for each key: never one an own fighter stands on
-    // or one already chosen. The client's own placeable test decides, and
-    // the move's precheck runs it again before the packet. Returns { moves,
-    // missing, blocked, tried }; missing or blocked names the first key
-    // without a spec or without a grid, and then no move may go out.
-    function chooseGrids(r, inv, keys) {
-        var cands = placeGrids(r);
-        var taken = {};
-        for (var k in inv.byKey) {
-            if (!has(inv.byKey, k) || !inv.byKey[k]) continue;
-            var at = inv.byKey[k].grid;
-            if (typeof at === 'number' && at > 0) taken[String(at)] = true;
-        }
-        var out = { moves: [], missing: null, blocked: null, tried: cands.length };
-        for (var i = 0; i < keys.length; i++) {
-            var spec = S.core.specialists.lookup(keys[i]).spec;
-            if (!spec) {
-                out.missing = keys[i];
-                return out;
-            }
-            var chosen = null;
-            for (var j = 0; j < cands.length; j++) {
-                if (has(taken, String(cands[j]))) continue;
-                if (S.core.specialists.orders.isPlaceable(spec, cands[j])) {
-                    chosen = cands[j];
-                    break;
-                }
-            }
-            if (chosen === null) {
-                out.blocked = keys[i];
-                return out;
-            }
-            taken[String(chosen)] = true;
-            out.moves.push({ key: keys[i], grid: chosen });
+            if (!ld().onMap(ld().gen(inv, p.raises[i].key))) out.push(p.raises[i].key);
         }
         return out;
     }
 
     // The map is clear when its last quest is finished and no loadout general
-    // is still fighting. A camp still standing only warns: it may belong to
-    // a side quest or have been beaten in a way the map does not show.
+    // is still fighting. Once the quest is done a busy general is waited on
+    // with no limit, so only the quest itself can time out. A camp still
+    // standing only warns: it may belong to a side quest or have been beaten
+    // in a way the map does not show.
     function clear(r, inv) {
         var list = S.core.quests.list();
         var last = list ? lastQuestOf(list) : null;
         var questDone = !!(last && last.finished);
         var keys = ld().keysOf(r);
-        var idle = true;
+        var firstKey = null;
         for (var i = 0; i < keys.length; i++) {
             var g = ld().gen(inv, keys[i]);
-            if (g && !ready(g)) { idle = false; break; }
+            if (g && !ready(g)) { firstKey = keys[i]; break; }
         }
-        if (questDone && idle && !ld().anyAttacking()) {
+        if (questDone && firstKey === null && !ld().anyAttacking()) {
             // r.since is old here, so waitRead would pause at once; the hold
             // gives the read its own window from the first unreadable pass.
             if (!inv.ok) {
-                hold(r, 'free troops and armies not readable at the end of the map');
+                ld().hold(r, 'free troops and armies not readable at the end of the map');
                 return;
             }
-            clearHold(r);
+            ld().clearHold(r);
             // Troops freed by the last battles, or generals that were still
             // fighting during the first pack, are packed before the claim.
             if (packPlan(r, inv).raises.length) {
@@ -454,32 +380,45 @@
             st().go(S.RunStep.LastQuest, 'last quest finished');
             return;
         }
+        if (questDone) {
+            ld().clearHold(r);
+            ld().waitBusy(r, firstKey, firstKey !== null ? ld().who(inv, firstKey) + ' busy' : 'a fighter is busy');
+            return;
+        }
+        // A read without the last quest says nothing about it: the list can
+        // be unreadable, read empty or have skipped an entry. So it neither
+        // ends a busy wait nor reads as a quest not finished: while the quest
+        // was done the step can have grown older than CLEAR_MAX_MS.
+        if (!last) ld().keepBusy();
         if (now() - r.since <= CLEAR_MAX_MS) return;
+        if (!last) {
+            ld().holdRead(r, list ? 'last quest' : 'quest list');
+            return;
+        }
         var min = Math.round(CLEAR_MAX_MS / 60000);
         var camps = standingText(r) || 'none';
-        st().pause(S.RunPause.ClearTimeout, (questDone ? 'generals still busy ' + min + ' min after the last wave'
-            : 'last quest not finished after ' + min + ' min') + '; camps standing: ' + camps);
+        st().pause(S.RunPause.ClearTimeout, 'last quest not finished after ' + min + ' min; camps standing: ' + camps);
     }
 
-    // Places the planned holders that wait at the star on map grids: a raise
-    // needs a garrison, which a general has only on the map. A holder already
-    // walking is waited on first, because it may show its new grid while not
-    // yet idle, and so a restart or a kernel Pause never orders it twice.
+    // Places the planned holders that wait at the star on free landing fields,
+    // the only grids a general at the star can be placed on: a raise needs a
+    // garrison, which a general has only on the map. A holder already walking
+    // is waited on first, with no limit, because it may show its new grid
+    // while not yet idle, and so a restart or a kernel Pause never orders it
+    // twice.
     // A missing holder is settled before the last round is: past its
     // read-lag hold, settleRound counts a finished round every time it runs,
     // so a hold after it would count the same round on each pass and end in a
     // false rounds pause.
     function packStar(r, inv) {
         if (!inv.ok) {
-            ld().waitRead(r, 'free troops and armies');
+            ld().holdRead(r, 'free troops and armies');
             return;
         }
+        ld().clearHold(r);
         var walking = movingKey(r);
         if (walking !== null) {
-            if (now() - r.since > PLACE_MAX_MS) {
-                st().pause(S.RunPause.GeneralBusy, ld().who(inv, walking) + ' did not reach its grid after ' +
-                    Math.round(PLACE_MAX_MS / 60000) + ' min', { general: walking });
-            }
+            ld().waitBusy(r, walking, ld().who(inv, walking) + ' walking to its grid');
             return;
         }
         var need = offMap(packPlan(r, inv), inv);
@@ -487,7 +426,7 @@
             st().go(S.RunStep.Pack, 'holders on the map');
             return;
         }
-        var c = chooseGrids(r, inv, need);
+        var c = ld().chooseGrids(inv, need);
         if (c.missing !== null) {
             if (!ld().missingLong(r, c.missing)) return;
             st().pause(S.RunPause.GeneralMissing, ld().who(inv, c.missing) + ' is not on the island',
@@ -574,17 +513,17 @@
             return;
         }
         if (S.core.zone.id() !== r.zoneId) {
-            hold(r, 'view the adventure island to claim the last quest, then Resume');
+            ld().hold(r, 'view the adventure island to claim the last quest, then Resume');
             return;
         }
         var list = S.core.quests.list();
         var last = list ? lastQuestOf(list) : null;
         if (!last) {
-            hold(r, 'last quest not readable or not listed; if it was claimed by hand, close the ' +
+            ld().hold(r, 'last quest not readable or not listed; if it was claimed by hand, close the ' +
                 'adventure by hand, then Resume');
             return;
         }
-        clearHold(r);
+        ld().clearHold(r);
         // A claim already sent is settled before the quest's own state is
         // read: the send itself can make the quest read not finished.
         var s = ld().staleMark(r, 'lastQuest', ld().MARK_SETTLE_MS);
@@ -656,9 +595,9 @@
         ld().attempt(round, 'close', ld().wrapSend(r, 'close', S.core.adventures.close(r.adventure)));
     }
 
-    // Sends home every loadout general still on the island. Once the island
-    // is no longer viewed (closing it may move the view) the generals return
-    // on their own.
+    // Sends home every loadout general still on the island, each as he gets
+    // ready, with no limit on a busy one. Once the island is no longer viewed
+    // (closing it may move the view) the generals return on their own.
     function recall(r, inv) {
         if (S.core.zone.id() !== r.zoneId || !S.core.specialists.listReadable()) {
             log('adventure no longer viewed; generals return on their own');
@@ -667,11 +606,13 @@
         }
         var homeId = S.core.zone.homeId();
         if (typeof homeId !== 'number') {
-            ld().waitRead(r, 'home zone id');
+            ld().holdRead(r, 'home zone id');
             return;
         }
+        ld().clearHold(r);
         var keys = ld().keysOf(r);
         var need = [];
+        var open = [];
         var busy = null;
         for (var i = 0; i < keys.length; i++) {
             var name = 'recall:' + keys[i];
@@ -685,17 +626,13 @@
                 ld().markSeen(r, name);
                 continue;
             }
+            open.push(name);
             if (ready(g)) need.push(keys[i]);
             else if (busy === null) busy = keys[i];
         }
+        if (busy !== null) ld().waitBusy(r, busy, ld().who(inv, busy) + ' busy on the adventure');
         if (!need.length) {
-            if (busy === null) {
-                st().go(S.RunStep.JumpHome, 'generals sent home');
-                return;
-            }
-            if (now() - r.since > ld().TRAVEL_CAP_MS) {
-                st().pause(S.RunPause.GeneralBusy, ld().who(inv, busy) + ' is still busy on the adventure', { general: busy });
-            }
+            if (busy === null) st().go(S.RunStep.JumpHome, 'generals sent home');
             return;
         }
         for (i = 0; i < need.length; i++) {
@@ -707,6 +644,7 @@
                 return;
             }
         }
+        ld().dropShown(r, S.RunStep.Recall, open);
         var next = ld().settleRound(r, S.RunStep.Recall, function (f) {
             var k = keyOfMark(f.key);
             st().pause(S.RunPause.DepartFailed, 'send ' + k + ' home failed: ' + f.reason, { general: k });
@@ -770,7 +708,6 @@
     S.modules.adventures.away = {
         JUMP_MS:      JUMP_MS,
         CLEAR_MAX_MS: CLEAR_MAX_MS,
-        PLACE_MAX_MS: PLACE_MAX_MS,
         plan:         plan
     };
 

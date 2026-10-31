@@ -134,8 +134,8 @@
     }
 
     // Grids of the landing fields: where the client lets a general be placed on
-    // an adventure map. An unreadable vector yields an empty list so callers
-    // fall back to other candidate grids.
+    // an adventure map. An unreadable vector yields an empty list, so a caller
+    // finds no grid.
     function landingGrids() {
         var out = [];
         try {

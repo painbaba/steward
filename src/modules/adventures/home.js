@@ -36,8 +36,7 @@
 
     // Starting values, to be tuned in game.
     var GAP_MS                 = 180000;    // the game wants this long between two maps
-    var GATHER_CAP_MS          = 1800000;   // generals not home and idle after this long pause
-    var GATHER_SLACK_MS        = 120000;    // added to a busy general's remaining time
+    var GATHER_CAP_MS          = 1800000;   // a general not listed at home after this long pauses
     var MAP_OPEN_MS            = 60000;     // a started map must be listed within this long
     var PRODUCTION_WAIT_MAX_MS = 21600000;  // the home load waits this long for queued troops
 
@@ -95,50 +94,40 @@
     // ---- Gathering ----------------------------------------------------------
 
     // Holds until every loadout general is listed at home, idle and not
-    // travelling, then goes to next. A busy general with a readable remaining
-    // time moves the deadline out to that time plus slack; otherwise the
-    // deadline is GATHER_CAP_MS after the step began.
+    // travelling, then goes to next. A listed general that is busy is waited
+    // for with no limit, since he will get ready and the game's remaining time
+    // runs short. Only a general not listed has a deadline, GATHER_CAP_MS after
+    // the step began, because he has nothing to wait on. A step this old can
+    // meet one bad read, so an unreadable list holds instead of pausing at once.
     function gather(r, inv, next, why) {
         if (!S.core.specialists.listReadable()) {
-            ld().waitRead(r, 'specialist list');
+            ld().holdRead(r, 'specialist list');
             return;
         }
+        ld().clearHold(r);
         var keys = ld().keysOf(r);
-        var t = now();
-        var first = null;
-        var firstListed = false;
+        var missing = null;
+        var busy = null;
         for (var i = 0; i < keys.length; i++) {
             var g = ld().gen(inv, keys[i]);
-            if (g && g.idle && !g.travelling) continue;
-            if (first === null) {
-                first = keys[i];
-                firstListed = !!g;
-            }
-            if (!g) continue;
-            var rem = S.core.specialists.orders.remaining(specOf(keys[i]));
-            if (typeof rem !== 'number') continue;
-            var until = t + Math.min(rem, ld().REMAINING_MAX_MS) + GATHER_SLACK_MS;
-            // A remaining time that counts down keeps now + remaining almost
-            // constant; the second of tolerance keeps clock jitter from
-            // writing the run file on every pass.
-            if (until > (typeof r.waitUntil === 'number' ? r.waitUntil : 0) + 1000) {
-                if (typeof r.waitUntil !== 'number') log(keys[i] + ' busy, remaining ' + rem + ' (raw)');
-                r.waitUntil = until;
-                st().save();
+            if (!g) {
+                if (missing === null) missing = keys[i];
+            } else if (!g.idle || g.travelling) {
+                if (busy === null) busy = keys[i];
             }
         }
-        if (first === null) {
+        if (missing === null && busy === null) {
             st().go(next, why);
             return;
         }
-        var deadline = typeof r.waitUntil === 'number' ? r.waitUntil : r.since + GATHER_CAP_MS;
-        if (t <= deadline) return;
-        if (!firstListed) {
-            st().pause(S.RunPause.GeneralMissing, first + ' is not on the home island', { general: first });
+        // A read that lacks a general says nothing about a busy wait, and
+        // before the deadline missingLong does not run.
+        if (missing !== null) ld().keepBusy();
+        if (missing !== null && now() > r.since + GATHER_CAP_MS && ld().missingLong(r, missing)) {
+            st().pause(S.RunPause.GeneralMissing, missing + ' is not on the home island', { general: missing });
             return;
         }
-        st().pause(S.RunPause.GeneralBusy, ld().who(inv, first) + ' has been busy for ' +
-            Math.round((t - r.since) / 60000) + ' min', { general: first });
+        if (busy !== null) ld().waitBusy(r, busy, ld().who(inv, busy) + ' busy');
     }
 
     // ---- Before the map -----------------------------------------------------
@@ -323,13 +312,15 @@
             return;
         }
         if (!S.core.specialists.listReadable()) {
-            ld().waitRead(r, 'specialist list');
+            ld().holdRead(r, 'specialist list');
             return;
         }
+        ld().clearHold(r);
         var keys = ld().keysOf(r);
         var toSend = [];
         var busy = null;
         var travelling = [];
+        var open = [];
         var i;
         for (i = 0; i < keys.length; i++) {
             var k = keys[i];
@@ -350,6 +341,7 @@
                 travelling.push({ key: k, spec: specOf(k) });
                 continue;
             }
+            open.push(name);
             if (g.idle) toSend.push(k);
             else if (busy === null) busy = k;
         }
@@ -358,10 +350,7 @@
             departed(r, travelling, keys.length);
             return;
         }
-        if (busy !== null && now() - r.since > GATHER_CAP_MS) {
-            st().pause(S.RunPause.GeneralBusy, ld().who(inv, busy) + ' is busy and cannot leave', { general: busy });
-            return;
-        }
+        if (busy !== null) ld().waitBusy(r, busy, ld().who(inv, busy) + ' busy and cannot leave yet');
         if (!toSend.length) return;
 
         for (i = 0; i < toSend.length; i++) {
@@ -373,6 +362,7 @@
                 return;
             }
         }
+        ld().dropShown(r, RS.Depart, open);
         var next = ld().settleRound(r, RS.Depart, function (f) {
             var key = f.key.indexOf(DEPART) === 0 ? f.key.substring(DEPART.length) : f.key;
             st().pause(S.RunPause.DepartFailed, 'send ' + key + ' failed: ' + f.reason, { general: key });
@@ -690,7 +680,6 @@
     S.modules.adventures.home = {
         GAP_MS:                 GAP_MS,
         GATHER_CAP_MS:          GATHER_CAP_MS,
-        GATHER_SLACK_MS:        GATHER_SLACK_MS,
         MAP_OPEN_MS:            MAP_OPEN_MS,
         PRODUCTION_WAIT_MAX_MS: PRODUCTION_WAIT_MAX_MS,
         plan:                   plan

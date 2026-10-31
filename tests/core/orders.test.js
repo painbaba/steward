@@ -117,6 +117,22 @@ t.test('isPlaceable restores the cursor mode when the host throws', function () 
     assert.strictEqual(last.length, 1);
 });
 
+t.test('placeCode returns the host code, restores the cursor mode, null when the host throws', function () {
+    var g = AC.general({ uid: 'g1' });
+    var s = setup({ generals: [g] });
+    assert.strictEqual(s.orders.placeCode(g, 42), 0);
+    s.sent.placeable = 7;
+    assert.strictEqual(s.orders.placeCode(g, 42), 7);
+    var modes = s.sent.calls.filter(function (c) { return c.target === 'mMouseCursor'; });
+    assert.deepStrictEqual(modes.map(function (c) { return c.method; }),
+        ['SetCursorEditMode', 'SetToLastEditMode', 'SetCursorEditMode', 'SetToLastEditMode']);
+    assert.strictEqual(s.orders.placeCode(null, 42), null);
+    s.H.host.game.gi.mMouseCursor.CheckIfGarrisonIsPlacableInGame = function () { throw new Error('host'); };
+    assert.strictEqual(s.orders.placeCode(g, 42), null);
+    var last = s.sent.calls.filter(function (c) { return c.method === 'SetToLastEditMode'; });
+    assert.strictEqual(last.length, 3);
+});
+
 t.test('hasPath needs a building at the target and a path above zero', function () {
     var g = AC.general({ uid: 'g1', grid: 5 });
     var s = setup({ generals: [g], buildings: { 300: camp(300) } });

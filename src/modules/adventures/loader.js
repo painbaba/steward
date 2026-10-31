@@ -32,7 +32,9 @@
  * read that already shows the effect moves on at once.
  *
  * The per-general helpers that the home and away steps share (read waits,
- * loadout key order, names, the departure test) live here as well.
+ * loadout key order, names, the departure test) live here as well. waitBusy()
+ * is the one wait for a general that is present and busy, and hold() the
+ * deadline of a step that may already have waited a long time.
  *
  * A specialist list that lost entries says nothing about what it does not
  * show. listHold() stops a step on such a read, missingLong() lets a general
@@ -57,8 +59,9 @@
     var MISSING_GAP_MS    = 30000;     // a longer silence restarts the two windows above
     var MARK_SETTLE_MS    = 30000;     // a sent, unseen mark waits this long for its effect
     var REMAINING_MAX_MS  = 3600000;   // clamp of one remaining-time reading
-    var TRAVEL_SLACK_MS   = 60000;     // added to the longest remaining travel time
+    var TRAVEL_SLACK_MS   = 300000;    // the game's remaining time runs short; this only guards a general not listed when the travel ends
     var TRAVEL_CAP_MS     = 1800000;   // travel wait when no remaining time is readable
+    var BUSY_LOG_MS       = 60000;     // a busy wait logs this seldom
 
     var CATEGORY = 'adventures';
 
@@ -84,13 +87,71 @@
 
     // ---- Shared step helpers ------------------------------------------------
 
+    function notReadable(what) {
+        return what + ' not readable after ' + Math.round(READ_MAX_MS / 1000) + ' s';
+    }
+
     // An unreadable read holds the step, and pauses NotObserved once the step
     // has waited READ_MAX_MS since r.since.
     function waitRead(r, what) {
-        if (now() - r.since > READ_MAX_MS) {
-            st().pause(S.RunPause.NotObserved, what + ' not readable after ' +
-                Math.round(READ_MAX_MS / 1000) + ' s');
+        if (now() - r.since > READ_MAX_MS) st().pause(S.RunPause.NotObserved, notReadable(what));
+    }
+
+    // A hold on the step's own deadline (r.waitUntil), set on the first pass.
+    function hold(r, text) {
+        keepBusy();
+        if (typeof r.waitUntil !== 'number') {
+            r.waitUntil = now() + READ_MAX_MS;
+            st().save();
+            return;
         }
+        if (now() > r.waitUntil) st().pause(S.RunPause.NotObserved, text);
+    }
+
+    function clearHold(r) {
+        if (r.waitUntil === null || r.waitUntil === undefined) return;
+        r.waitUntil = null;
+        st().save();
+    }
+
+    // waitRead's wording on hold's window, for a step that may have waited a
+    // long time, where waitRead would pause on the first bad read.
+    function holdRead(r, what) {
+        hold(r, notReadable(what));
+    }
+
+    // This pass says nothing about a busy wait (a read failed or lacks a
+    // general), so it must not end it. Otherwise a read that flaps restarts the
+    // record, logs every other pass and falls back to the fast polls.
+    function keepBusy() {
+        st().current().busySeen = true;
+    }
+
+    // The one wait for a general that is present and busy: no limit, it ends
+    // when a pass no longer waits. It neither moves the step nor saves, so
+    // r.since stays put, the next pass does not read the wait as progress and
+    // the run file is not rewritten each pass. One record per run and step: a
+    // change of general keeps since and noted, so the log stays at one line a
+    // minute whatever the generals do. The game's remaining time is logged
+    // only: it runs short, so nothing may be built on it.
+    function waitBusy(r, key, text) {
+        var rs = st().current();
+        var t = now();
+        var b = rs.busy;
+        if (!b || b.runId !== r.id || b.step !== r.step) {
+            b = { runId: r.id, step: r.step, key: key, text: text, since: t, noted: null };
+            rs.busy = b;
+        }
+        b.key = key;
+        b.text = text;
+        keepBusy();
+        if (b.noted !== null && t - b.noted < BUSY_LOG_MS) return;
+        b.noted = t;
+        var spec = key ? S.core.specialists.lookup(key).spec : null;
+        var rem = spec ? S.core.specialists.orders.remaining(spec) : null;
+        S.kernel.log(CATEGORY, st().label() + ': ' + text + ', waited ' +
+            Math.round((t - b.since) / 60000) + ' min' +
+            (typeof rem === 'number' ? ', remaining ' + rem + ' (raw)' : ''));
     }
 
     // Holds the step on a read that lost entries, and pauses NotObserved once
@@ -107,6 +168,7 @@
             rs.listBadLast = null;
             return false;
         }
+        keepBusy();
         var t = now();
         if (typeof rs.listBadSince !== 'number' || t - rs.listBadLast > MISSING_GAP_MS) {
             rs.listBadSince = t;
@@ -131,6 +193,7 @@
     // on the next report. A script reload keeps runState without going
     // through resetMemory, so the map may be absent.
     function missingLong(r, key) {
+        keepBusy();
         var rs = st().current();
         if (!rs.missing) rs.missing = {};
         var t = now();
@@ -171,6 +234,54 @@
         if (g.travelling) return true;
         return S.core.specialists.orders.taskKind(S.core.specialists.lookup(key).spec) ===
             S.GeneralTask.TravelToZone;
+    }
+
+    // A raise needs the general's garrison, which only a general on a map
+    // grid has. A general at the star reads grid 0.
+    function onMap(g) {
+        return !!g && typeof g.grid === 'number' && g.grid > 0;
+    }
+
+    // A free placeable grid for each key. Landing fields are the only grids a
+    // general at the star can be placed on, and the vector also lists other
+    // players' fields, so the client's own placeable test decides; the move's
+    // precheck runs it again before the packet. Never a grid an own fighter
+    // stands on, one already chosen or one in the optional avoid array.
+    // Returns { moves, missing, blocked, tried }; missing or blocked names the
+    // first key without a spec or without a grid, and moves holds what was
+    // chosen before it.
+    function chooseGrids(inv, keys, avoid) {
+        var cands = S.core.zone.landingGrids();
+        var taken = {};
+        for (var k in inv.byKey) {
+            if (has(inv.byKey, k) && onMap(inv.byKey[k])) taken[String(inv.byKey[k].grid)] = true;
+        }
+        if (avoid) {
+            for (var a = 0; a < avoid.length; a++) taken[String(avoid[a])] = true;
+        }
+        var out = { moves: [], missing: null, blocked: null, tried: cands.length };
+        for (var i = 0; i < keys.length; i++) {
+            var spec = S.core.specialists.lookup(keys[i]).spec;
+            if (!spec) {
+                out.missing = keys[i];
+                return out;
+            }
+            var chosen = null;
+            for (var j = 0; j < cands.length; j++) {
+                if (has(taken, String(cands[j]))) continue;
+                if (S.core.specialists.orders.isPlaceable(spec, cands[j])) {
+                    chosen = cands[j];
+                    break;
+                }
+            }
+            if (chosen === null) {
+                out.blocked = keys[i];
+                return out;
+            }
+            taken[String(chosen)] = true;
+            out.moves.push({ key: keys[i], grid: chosen });
+        }
+        return out;
     }
 
     // Whether any own fighter on the viewed zone has an Attack task; the wave
@@ -305,6 +416,23 @@
         }
         if (roundsExhausted(r, what)) return 'paused';
         return 'new';
+    }
+
+    // Takes a finished round out of settleRound's count when it has no failure
+    // and none of its orders is still open. A step that sends as generals get
+    // ready starts many rounds, and each order of this one took effect, so it
+    // has nothing left to count, nothing to send again and no reason to wait
+    // the settling time. open lists the mark names of the generals that still
+    // read as here and not on their way. r.rounds and the step stay as they
+    // are, so a count from a round that truly did not show is kept and the
+    // busy wait goes on.
+    function dropShown(r, step, open) {
+        var round = currentRound(r, step);
+        if (!round || !complete(round) || firstFailure(round)) return;
+        for (var i = 0; i < open.length; i++) {
+            if (has(round.expected, open[i])) return;
+        }
+        st().dropRound('orders shown');
     }
 
     // ---- Battle files -------------------------------------------------------
@@ -574,15 +702,23 @@
         REMAINING_MAX_MS:  REMAINING_MAX_MS,
         TRAVEL_SLACK_MS:   TRAVEL_SLACK_MS,
         TRAVEL_CAP_MS:     TRAVEL_CAP_MS,
+        BUSY_LOG_MS:       BUSY_LOG_MS,
         now:               now,
         gen:               gen,
         waitRead:          waitRead,
+        hold:              hold,
+        clearHold:         clearHold,
+        holdRead:          holdRead,
+        keepBusy:          keepBusy,
+        waitBusy:          waitBusy,
         listHold:          listHold,
         missingLong:       missingLong,
         keysOf:            keysOf,
         who:               who,
         seenOnVerified:    seenOnVerified,
         leaving:           leaving,
+        onMap:             onMap,
+        chooseGrids:       chooseGrids,
         anyAttacking:      anyAttacking,
         startRound:        startRound,
         currentRound:      currentRound,
@@ -596,6 +732,7 @@
         roundsExhausted:   roundsExhausted,
         dropOrphan:        dropOrphan,
         settleRound:       settleRound,
+        dropShown:         dropShown,
         linesOf:           linesOf,
         firstMismatch:     firstMismatch,
         supply:            supply,

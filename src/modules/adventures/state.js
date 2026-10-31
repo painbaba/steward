@@ -32,8 +32,10 @@
  * round in flight), cache (parsed wave lines), questRetry (quest key ->
  * time a failed claim may be retried), homeNote (the last wait the home
  * steps logged, so a repeated wait is logged once), listBadSince and
- * listBadLast (first and latest read of a specialist list that lost entries)
- * and missing (general key -> { since, last } of the reads that lacked it).
+ * listBadLast (first and latest read of a specialist list that lost entries),
+ * missing (general key -> { since, last } of the reads that lacked it),
+ * busy (the busy wait of this run and step: { runId, step, key, text, since,
+ * noted }) and busySeen (whether this pass kept that wait going).
  * They describe callbacks and reads of this client session, which do not
  * exist after a restart.
  * resetMemory() is the one place that resets them for a new or loaded run.
@@ -140,7 +142,6 @@
     S.RunPause.User              = 'PauseUser';
     S.RunPause.WaveFile          = 'PauseWaveFile';
     S.RunPause.GeneralMissing    = 'PauseGeneralMissing';
-    S.RunPause.GeneralBusy       = 'PauseGeneralBusy';
     S.RunPause.PositionFailed    = 'PausePositionFailed';
     S.RunPause.NotPlaceable      = 'PauseNotPlaceable';
     S.RunPause.TroopsShort       = 'PauseTroopsShort';
@@ -167,6 +168,10 @@
     var FILE_VERSION = 1;
     var SUBDIR = 'adventures';
     var FILE_NAME = 'run.json';
+
+    // A busy general usually ends soon, so the first minute of a wait polls;
+    // after that the tick looks often enough.
+    var BUSY_FAST_MS = 60000;
 
     // Each problem is reported once per script load; a store that cannot
     // write would otherwise warn on every transition.
@@ -241,9 +246,13 @@
 
     // Whether the run waits for something that takes minutes, so the tick is
     // enough to see it end. A blocker covers Settle and the wait for production
-    // at home, which are no long steps by themselves.
+    // at home, which are no long steps by themselves, and so does a busy
+    // general once his wait has outlasted BUSY_FAST_MS on any step. The busy
+    // record may be absent after a script reload.
     function waitsLong(r) {
         if (r.blocker) return true;
+        var b = current().busy;
+        if (b && b.runId === r.id && b.step === r.step && clock() - b.since >= BUSY_FAST_MS) return true;
         var i = stepIndex(r.step);
         return i >= 0 && RUN_STEPS[i][6] === true;
     }
@@ -487,6 +496,8 @@
         rs.listBadSince = null;
         rs.listBadLast = null;
         rs.missing = {};
+        rs.busy = null;
+        rs.busySeen = false;
     }
 
     // The only literal of the run object. start holds the facts fixed at
@@ -730,7 +741,8 @@
     // unless opts.keepRounds carries the round over (Load -> Verify, and
     // Attack -> Confirm, which reads the round's results). Going to the same
     // step re-enters it with fresh rounds and a fresh start time. Every step
-    // change drops the waiting deadline; a waiting step sets its own.
+    // change drops the waiting deadline and the busy wait; a waiting step sets
+    // its own.
     function go(step, why, opts) {
         var rs = current();
         var r = rs.run;
@@ -746,6 +758,7 @@
         r.step = step;
         r.since = clock();
         r.waitUntil = null;
+        rs.busy = null;
         if (!(opts && opts.keepRounds)) {
             r.rounds = 0;
             rs.round = null;
@@ -778,6 +791,7 @@
             at:      clock()
         };
         rs.round = null;
+        rs.busy = null;
         var who = '';
         if (r.pause.general !== null) who += ' general ' + r.pause.general;
         if (r.pause.target !== null) who += ' target ' + r.pause.target;
@@ -869,6 +883,17 @@
         return true;
     }
 
+    // module.js brackets each step pass with these two: a pass that did not
+    // keep the busy wait going ended it, whatever the reason.
+    function passBegins() {
+        current().busySeen = false;
+    }
+
+    function passEnds() {
+        var rs = current();
+        if (!rs.busySeen) rs.busy = null;
+    }
+
     // The series is done: every requested run has finished.
     function done() {
         var rs = current();
@@ -895,6 +920,7 @@
 
     S.modules.adventures.state = {
         FILE_VERSION:  FILE_VERSION,
+        BUSY_FAST_MS:  BUSY_FAST_MS,
         current:       current,
         run:           run,
         load:          load,
@@ -906,6 +932,8 @@
         resume:        resume,
         clear:         clear,
         dropRound:     dropRound,
+        passBegins:    passBegins,
+        passEnds:      passEnds,
         done:          done,
         now:           now,
         nameOf:        nameOf,

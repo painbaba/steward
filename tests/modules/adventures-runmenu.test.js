@@ -262,6 +262,52 @@ t.test('rows read no file', function () {
     assert.ok(Object.keys(w.fs.disk).length > 0);
 });
 
+// ---- busy wait -------------------------------------------------------------------
+
+// A memory-only busy record for the run's current step, started `ago` ms back.
+function setBusy(w, ago, step) {
+    var r = w.st.run();
+    w.st.current().busy = { runId: r.id, step: step === undefined ? r.step : step, key: 'g1',
+        text: 'The Smuggler (325505.0) busy', since: w.t - ago, noted: null };
+}
+
+t.test('busy: the stage row shows who and how long, ahead of the round count', function () {
+    var w = setup({ step: 'Arrive' });
+    var r = w.st.run();
+    w.st.current().round = { runId: r.id, waveIndex: 0, step: r.step, zoneId: 7,
+        expected: { a: true, b: true }, results: { a: { status: 'ok' } } };
+    setBusy(w, 1000);
+    assert.strictEqual(row(w, 'Wait for all generals').detail, 'The Smuggler (325505.0) busy');
+    setBusy(w, 150000);
+    assert.strictEqual(row(w, 'Wait for all generals').detail, 'The Smuggler (325505.0) busy, 2 min');
+    w.st.current().busy = null;
+    assert.notStrictEqual(row(w, 'Wait for all generals').detail.indexOf('busy'), 0);
+});
+
+t.test('busy: the wave row shows it after the step name', function () {
+    var w = setup({ waves: 2, waveIndex: 0, step: 'wave Gate' });
+    setBusy(w, 61000);
+    assert.strictEqual(row(w, 'Wave 1').detail, 'Gate, The Smuggler (325505.0) busy, 1 min');
+    assert.strictEqual(row(w, 'Wave 2').detail, '');
+});
+
+t.test('busy: the status line picks it up', function () {
+    var w = setup({ step: 'Arrive' });
+    setBusy(w, 120000);
+    assert.strictEqual(labels(w)[1], 'Now: Wait for all generals, The Smuggler (325505.0) busy, 2 min');
+});
+
+t.test('busy: a record of another step shows nothing', function () {
+    var w = setup({ step: 'Arrive' });
+    setBusy(w, 120000, w.S.RunStep.Muster);
+    assert.ok(row(w, 'Wait for all generals').detail.indexOf('busy') < 0);
+    var r = w.st.run();
+    w.st.current().busy = { runId: r.id + 1, step: r.step, key: 'g1', text: 'x busy', since: w.t, noted: null };
+    assert.ok(row(w, 'Wait for all generals').detail.indexOf('busy') < 0);
+    delete w.st.current().busy;
+    assert.doesNotThrow(function () { labels(w); });
+});
+
 // ---- controls --------------------------------------------------------------------
 
 // The states of the investigation's table: [name, setup options, mutate, can()].
