@@ -504,6 +504,35 @@ t.test('a list hold does not end a busy wait', function () {
     assertStep(w, 'Gate');
 });
 
+// A wave short of troops while a general is busy: Anna fights holding hers,
+// Bert has none and the free pool is empty.
+function supplyWaitWorld() {
+    var w = islandWorld();
+    w.g1.state.task = { type: w.code.attack };
+    w.free = {};
+    w.g2.state.army = {};
+    startRun(w, [WAVE], { step: w.S.WaveStep.Supply });
+    return w;
+}
+
+t.test('a list hold does not end a Supply wait', function () {
+    var w = supplyWaitWorld();
+    keepsWait(w, function () { w.ghost(w.g2); });
+    assertStep(w, 'Supply');
+});
+
+t.test('an unreadable free pool does not end a Supply wait', function () {
+    var w = supplyWaitWorld();
+    var zone = w.H.host.game.zone;
+    var army = zone.GetArmy;
+    keepsWait(w, function () {
+        zone.GetArmy = function () { return null; };
+    }, function () {
+        zone.GetArmy = army;
+    });
+    assertStep(w, 'Supply');
+});
+
 t.test('a read hold does not end a busy wait', function () {
     var w = packWorld();
     w.auto.walk = true;

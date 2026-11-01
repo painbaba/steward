@@ -411,16 +411,27 @@
         return sum;
     }
 
+    // Most short troops first, then key order, so a plan never depends on the
+    // order the game lists its generals in.
+    function byScore(a, b) {
+        if (a.score !== b.score) return b.score - a.score;
+        return a.key < b.key ? -1 : (a.key > b.key ? 1 : 0);
+    }
+
     // Where the troops for a wave come from. wave = [{ key, army }]; only
     // inv.free and inv.byKey are read. A general whose army already matches
     // draws nothing. Otherwise it draws the difference when a raise reuses
-    // its own troops, else the whole target. A wave general's surplus never
-    // counts for another general. When the free pool is short, idle donors
-    // outside the wave are added, best first; an unload is all-or-nothing,
-    // so a donor adds its whole army. A donor holding none of the types
-    // still short is passed over, since unloading it would not help. Donor
-    // names come from the same inv.byKey read, so a report never needs a
-    // second inventory read that could disagree with the plan.
+    // its own troops, else the whole target. When the free pool is short,
+    // idle donors outside the wave are added, best first; an unload is
+    // all-or-nothing, so a donor adds its whole army. A donor holding none of
+    // the types still short is passed over, since unloading it would not help.
+    // A wave general's surplus counts for another general only with
+    // opts.surplus, and then only after the outside donors. He has to be
+    // unloaded like any donor, so need grows by what he then draws back and
+    // coverage stays honest; the pool is not credited with his surplus
+    // directly, because that would depend on the order the raises run in.
+    // Donor names come from the same inv.byKey read, so a report never needs
+    // a second inventory read that could disagree with the plan.
     function planSupply(wave, inv, opts) {
         var reuseOwn = (opts && typeof opts.reuseOwn === 'boolean') ? opts.reuseOwn : RAISE_REUSES_OWN_TROOPS;
         var byKey = (inv && inv.byKey) || {};
@@ -451,10 +462,7 @@
                 candidates.push({ key: k, name: byKey[k].name || '', army: byKey[k].army || {}, score: heldOf(byKey[k].army || {}, shortStart) });
             }
         }
-        candidates.sort(function (a, b) {
-            if (a.score !== b.score) return b.score - a.score;
-            return a.key < b.key ? -1 : (a.key > b.key ? 1 : 0);
-        });
+        candidates.sort(byScore);
 
         var pool = add(free, {});
         var shortAfter = shortStart;
@@ -464,6 +472,28 @@
             donors.push({ key: candidates[i].key, name: candidates[i].name, army: candidates[i].army });
             pool = add(pool, candidates[i].army);
             shortAfter = minus(need, pool);
+        }
+
+        if (opts && opts.surplus) {
+            var spares = [];
+            for (i = 0; i < lines.length; i++) {
+                var l = lines[i];
+                if (!byKey[l.key].donorOk) continue;
+                // kept is what his raise reuses, spare what an unload adds beyond
+                // that. Both hold for either reuseOwn value, and a line that
+                // matches has an empty spare.
+                var kept = minus(l.want, l.draw);
+                var spare = minus(l.have, kept);
+                spares.push({ key: l.key, name: byKey[l.key].name || '', army: l.have, kept: kept, spare: spare, score: heldOf(spare, shortAfter) });
+            }
+            spares.sort(byScore);
+            for (i = 0; i < spares.length && !isEmpty(shortAfter); i++) {
+                if (heldOf(spares[i].spare, shortAfter) === 0) continue;
+                donors.push({ key: spares[i].key, name: spares[i].name, army: spares[i].army });
+                need = add(need, spares[i].kept);
+                pool = add(pool, spares[i].army);
+                shortAfter = minus(need, pool);
+            }
         }
 
         return {

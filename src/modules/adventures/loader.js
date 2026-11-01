@@ -42,6 +42,13 @@
  * unreadable() tells a refusal over such a read from a real one. All three
  * work from memory only and survive no restart: a new client reads afresh.
  *
+ * A wave that is short may only look short: troops can sit with a general
+ * who is fighting or walking, and they reach the pool when he is done. So the
+ * wave's Supply waits, with no limit, while the plan cannot cover and any own
+ * general or carrier on the island is busy, and calls the troops short only
+ * with everyone idle and nothing left to unload. The load at home keeps its
+ * pause: nothing there brings troops back by itself.
+ *
  * Bundle slot: module file; top level only assigns
  * S.modules.adventures.loader; state and every core are read at call time.
  */
@@ -52,7 +59,7 @@
 
     // Starting values, to be tuned in game.
     var MAX_ROUNDS        = 2;         // action rounds per step before a pause
-    var MAX_UNLOAD_CYCLES = 2;         // Supply -> Unload -> Supply cycles per load
+    var MAX_UNLOAD_CYCLES = 2;         // Supply -> Unload -> Supply cycles per load at home
     var READ_LAG_MS       = 10000;     // a verified effect may read this late; the old gap between two looks
     var READ_MAX_MS       = 60000;     // an unreadable read pauses after this long
     var MISSING_GRACE_MS  = READ_MAX_MS;  // a general stays gone this long before a pause
@@ -86,6 +93,24 @@
     }
 
     // ---- Shared step helpers ------------------------------------------------
+
+    // A general that can take an order now: present, idle and not travelling.
+    function ready(g) {
+        return !!g && g.idle && !g.travelling;
+    }
+
+    // Key of the first general or carrier of this read that is not ready, in
+    // key order, or null. inv.byKey is every own fighter on the viewed zone,
+    // whether the loadout holds him or not and whatever he carries.
+    function firstBusy(inv) {
+        var keys = [];
+        for (var k in inv.byKey) if (has(inv.byKey, k)) keys.push(k);
+        keys.sort();
+        for (var i = 0; i < keys.length; i++) {
+            if (!ready(inv.byKey[keys[i]])) return keys[i];
+        }
+        return null;
+    }
 
     function notReadable(what) {
         return what + ' not readable after ' + Math.round(READ_MAX_MS / 1000) + ' s';
@@ -494,11 +519,49 @@
         return !!b && b.key === '' && typeof b.reason === 'string' && b.reason.indexOf(WAIT_PREFIX) === 0;
     }
 
-    // opts: { waitQueued, waitMaxMs }, optional. With waitQueued, troops
-    // that are short but already in production are waited for (up to
+    // The one plan of Supply and Verify: both must agree on what is short. A
+    // wave's own generals may donate their surplus only with untilIdle.
+    function planOf(lines, inv, opts) {
+        return S.core.army.planSupply(lines, inv, { surplus: !!(opts && opts.untilIdle) });
+    }
+
+    // Holds a wave's Supply that the plan cannot cover; true when the step
+    // holds this pass. An unreadable source only lowers what is available, so
+    // a short plan may be false on such a read, while a covered one never is.
+    // A wait that just ended moves to the same step: r.since is old by then,
+    // so this gives the first idle read its READ_LAG_MS and lets a general who
+    // turns busy again be waited for, instead of pausing on that one read.
+    function holdShort(r, inv, steps, shortText) {
+        if (!inv.ok) {
+            holdRead(r, 'troops');
+            return true;
+        }
+        clearHold(r);
+        var key = firstBusy(inv);
+        if (key) {
+            waitBusy(r, key, who(inv, key) + ' busy, troops short: ' + shortText);
+            return true;
+        }
+        var b = st().current().busy;
+        if (!b || b.runId !== r.id || b.step !== r.step) return false;
+        st().go(steps.supply, 'every general idle');
+        return true;
+    }
+
+    // opts: { waitQueued, waitMaxMs, untilIdle }, optional. With waitQueued,
+    // troops that are short but already in production are waited for (up to
     // waitMaxMs since the step began) instead of pausing at once.
+    //
+    // untilIdle is the wave's Supply. A plan that cannot cover then goes, in
+    // this order: an unreadable read holds; a busy general is waited for; a
+    // wait that just ended re-arms the step; donors are unloaded, partial
+    // ones too, since with everyone idle nothing else can add troops; the
+    // read lag passes; TroopsShort. MAX_UNLOAD_CYCLES does not apply to a
+    // wave: no raise happens inside the Supply -> Unload loop and each cycle
+    // empties at least one donor, so the loop ends by itself.
     function supply(r, lines, inv, steps, opts) {
-        var p = S.core.army.planSupply(lines, inv);
+        var untilIdle = !!(opts && opts.untilIdle);
+        var p = planOf(lines, inv, opts);
         if (p.missing.length) {
             if (!missingLong(r, p.missing[0])) return;
             st().pause(S.RunPause.GeneralMissing, p.missing[0] + ' is not on the island', { general: p.missing[0] });
@@ -521,9 +584,12 @@
                 }
                 return;
             }
-            if (settling) return;
-            st().pause(S.RunPause.TroopsShort, 'troops short: ' + shortText);
-            return;
+            if (untilIdle && holdShort(r, inv, steps, shortText)) return;
+            if (!untilIdle || !p.donors.length) {
+                if (settling) return;
+                st().pause(S.RunPause.TroopsShort, 'troops short: ' + shortText);
+                return;
+            }
         }
         if (isWaitBlocker(r.blocker)) r.blocker = null;
         if (p.donors.length) {
@@ -536,7 +602,7 @@
             for (var i = 0; i < p.donors.length; i++) keys.push(p.donors[i].key);
             r.donors = keys;
             r.cycles++;
-            if (r.cycles > MAX_UNLOAD_CYCLES) {
+            if (!untilIdle && r.cycles > MAX_UNLOAD_CYCLES) {
                 st().pause(S.RunPause.TroopsShort, 'donors unloaded but the free pool is still short: ' +
                     S.core.army.text(p.shortBefore));
                 return;
@@ -599,7 +665,7 @@
         st().go(steps.verify, 'loading ' + (empties.length + raises.length) + ' general(s)', { keepRounds: true });
     }
 
-    function verify(r, lines, inv, steps) {
+    function verify(r, lines, inv, steps, opts) {
         var m = firstMismatch(lines, inv);
         if (!m) {
             st().go(steps.done, 'all armies match');
@@ -619,6 +685,12 @@
         // and a raise refused on a pool that lags after an unload needs the
         // time before the retry can succeed.
         if (roundSettling(round)) return;
+        // A retry cannot succeed on this pool, and Supply decides whether to
+        // wait, unload or pause.
+        if (opts && opts.untilIdle && !S.core.army.isEmpty(planOf(lines, inv, opts).shortBefore)) {
+            st().go(steps.supply, 'troops short, supply again');
+            return;
+        }
         r.rounds++;
         if (r.rounds < MAX_ROUNDS) {
             st().go(steps.load, 'mismatch, retry once', { keepRounds: true });
@@ -705,6 +777,8 @@
         BUSY_LOG_MS:       BUSY_LOG_MS,
         now:               now,
         gen:               gen,
+        ready:             ready,
+        firstBusy:         firstBusy,
         waitRead:          waitRead,
         hold:              hold,
         clearHold:         clearHold,

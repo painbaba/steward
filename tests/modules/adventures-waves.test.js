@@ -660,6 +660,298 @@ t.test('Verify: a mismatch twice pauses LoadMismatch', function () {
     assert.ok(w.raises.length >= 2 && w.raises.length <= 4, String(w.raises.length));
 });
 
+
+// ---- Supply: a wave waits for troops that are still in the game --------------
+
+function ldr(w) { return w.S.modules.adventures.loader; }
+
+function busyOn(g, w) { g.state.task = { type: w.code.attack }; }
+
+// A wave short by 3 Rifle on the whole island: the free pool is empty and
+// Bert holds nothing. extra lists further generals; opts goes to startRun.
+function shortWorld(extra, opts) {
+    var w = attackWorld({ extra: extra || [] });
+    w.free = {};
+    w.g2.state.army = {};
+    startRun(w, ['C:/b/w1.txt'], Object.assign({ step: w.S.WaveStep.Supply }, opts || {}));
+    return w;
+}
+
+function otherGeneral(uid, name, army, o) {
+    return AC.general(Object.assign({ uid: uid, name: name, grid: 40, army: army }, o || {}));
+}
+
+function assertWaiting(w) {
+    assertSupply(w);
+    assert.ok(w.st.current().busy, 'a busy record');
+    assert.strictEqual(w.raises.length + w.unloads.length + w.orders.length, 0);
+}
+
+function assertTroopsShort(w) {
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Paused, 'status ' + r.status + ' at ' + stepName(w));
+    assert.strictEqual(r.pause.reason, w.S.RunPause.TroopsShort, r.pause.reason + ': ' + r.pause.message);
+}
+
+t.test('Supply: short with a busy donor waits past any window, unloads once idle', function () {
+    var donor = otherGeneral('1.4', 'Dora', { Rifle: 6 });
+    var w = shortWorld([donor]);
+    busyOn(donor, w);
+    tick(w);
+    assertWaiting(w);
+    assert.ok(logged(w, /Dora \(1\.4\) busy, troops short: .*, waited /), 'the wait is logged');
+    W.ticksFor(w, 4 * 3600000);
+    assertWaiting(w);
+    assert.ok(w.t >= 4 * 3600000 + ldr(w).READ_MAX_MS);
+    donor.state.task = null;
+    tick(w);
+    assert.strictEqual(stepName(w), 'Unload');
+    assert.ok(!logged(w, /every general idle/), 'a covering donor needs no re-arm');
+    tick(w);
+    play(w);
+    assert.deepStrictEqual(w.unloads, ['1.4']);
+    tick(w);
+    assert.strictEqual(stepName(w), 'Supply');
+    tick(w);
+    assert.strictEqual(stepName(w), 'Load');
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+});
+
+t.test('Supply: a busy general holding no short type still waits, then TroopsShort after the hold', function () {
+    var other = otherGeneral('1.5', 'Emil', { Bow: 9 });
+    var w = shortWorld([other]);
+    busyOn(other, w);
+    tick(w);
+    assertWaiting(w);
+    W.ticksFor(w, 3 * 3600000);
+    assertWaiting(w);
+    other.state.task = null;
+    tick(w);
+    assert.ok(logged(w, /Supply -> Supply \(every general idle\)/), 'the wait ended and re-armed');
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    tick(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running, 'the first idle read is inside the hold');
+    w.t += ldr(w).READ_LAG_MS;
+    tick(w);
+    assertTroopsShort(w);
+});
+
+t.test('Supply: a busy general outside the loadout counts, a foreign one does not', function () {
+    var keys = { loadoutKeys: { '1.1': true, '1.2': true } };
+    var cases = [
+        ['fighting', {}, function (g, w) { busyOn(g, w); }, true],
+        ['travelling', { travelling: true }, function () {}, true],
+        ['moving', {}, function (g, w) { g.state.task = { type: w.code.move, newGrid: 5 }; }, true],
+        ['foreign', { playerId: 2 }, function (g, w) { busyOn(g, w); }, false]
+    ];
+    cases.forEach(function (c) {
+        var x = otherGeneral('1.6', 'Frieda', {}, c[1]);
+        var w = shortWorld([x], keys);
+        c[2](x, w);
+        tick(w);
+        if (c[3]) {
+            assertWaiting(w);
+            assert.ok(logged(w, /Frieda \(1\.6\) busy/), c[0]);
+        } else {
+            assert.ok(!w.st.current().busy, c[0] + ': no wait');
+            w.t += ldr(w).READ_LAG_MS;
+            tick(w);
+            assertTroopsShort(w);
+        }
+    });
+});
+
+t.test('Supply: a partial idle donor is not unloaded while a general is busy', function () {
+    var part = otherGeneral('1.4', 'Dora', { Rifle: 1 });
+    var other = otherGeneral('1.5', 'Emil', {});
+    var w = shortWorld([part, other]);
+    busyOn(other, w);
+    tick(w);
+    W.ticksFor(w, 3600000);
+    assertWaiting(w);
+    assert.strictEqual(w.unloads.length, 0);
+    assert.deepStrictEqual(plain(part.state.army), { Rifle: 1 });
+    other.state.task = null;
+    tick(w);
+    tick(w);
+    assert.strictEqual(stepName(w), 'Unload', 'with everyone idle the partial donor goes');
+});
+
+t.test('Supply: partial donors with all idle unload, then TroopsShort names the rest', function () {
+    var part = otherGeneral('1.4', 'Dora', { Rifle: 1 });
+    var w = shortWorld([part]);
+    tick(w);
+    assert.strictEqual(stepName(w), 'Unload');
+    tick(w);
+    play(w);
+    assert.deepStrictEqual(w.unloads, ['1.4']);
+    tick(w);
+    assert.strictEqual(stepName(w), 'Supply');
+    tick(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running, 'inside the read lag');
+    w.t += ldr(w).READ_LAG_MS;
+    tick(w);
+    assertTroopsShort(w);
+    assert.ok(w.st.run().pause.message.indexOf(w.S.core.army.text({ Rifle: 2 })) >= 0, w.st.run().pause.message);
+});
+
+t.test('Supply: an idle donor that covers unloads at once while another is busy', function () {
+    var donor = otherGeneral('1.4', 'Dora', { Rifle: 6 });
+    var other = otherGeneral('1.5', 'Emil', {});
+    var w = shortWorld([donor, other]);
+    busyOn(other, w);
+    tick(w);
+    assert.strictEqual(stepName(w), 'Unload');
+    assert.deepStrictEqual(plain(w.st.run().donors), ['1.4']);
+    assert.ok(!w.st.current().busy);
+});
+
+t.test('Supply: past MAX_UNLOAD_CYCLES a wave keeps unloading while a donor is left', function () {
+    var donor = otherGeneral('1.4', 'Dora', { Rifle: 6 });
+    var w = shortWorld([donor]);
+    w.st.run().cycles = ldr(w).MAX_UNLOAD_CYCLES;
+    w.t += ldr(w).READ_LAG_MS;
+    tick(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    assert.strictEqual(stepName(w), 'Unload');
+    assert.strictEqual(w.st.run().cycles, ldr(w).MAX_UNLOAD_CYCLES + 1);
+    tick(w);
+    play(w);
+    assert.deepStrictEqual(w.unloads, ['1.4']);
+});
+
+t.test('Supply: a general back with no troops ends in TroopsShort, and so does one gone from the list', function () {
+    var back = otherGeneral('1.4', 'Dora', { Rifle: 6 });
+    var w = shortWorld([back]);
+    busyOn(back, w);
+    tick(w);
+    assertWaiting(w);
+    back.state.task = null;
+    back.state.army = {};
+    tick(w);
+    tick(w);
+    w.t += ldr(w).READ_LAG_MS;
+    tick(w);
+    assertTroopsShort(w);
+
+    var lost = otherGeneral('1.4', 'Dora', { Rifle: 6 });
+    var w2 = shortWorld([lost]);
+    busyOn(lost, w2);
+    tick(w2);
+    assertWaiting(w2);
+    w2.fighters.splice(w2.fighters.indexOf(lost), 1);
+    tick(w2);
+    tick(w2);
+    w2.t += ldr(w2).READ_LAG_MS;
+    tick(w2);
+    assertTroopsShort(w2);
+});
+
+t.test('Supply: a general idle then busy again inside the hold causes no pause', function () {
+    var other = otherGeneral('1.5', 'Emil', {});
+    var w = shortWorld([other]);
+    busyOn(other, w);
+    tick(w);
+    assertWaiting(w);
+    other.state.task = null;
+    tick(w);
+    assert.ok(logged(w, /every general idle/));
+    busyOn(other, w);
+    tick(w);
+    assertWaiting(w);
+    W.ticksFor(w, 2 * ldr(w).READ_LAG_MS);
+    assertWaiting(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+});
+
+t.test('Supply: short on an unreadable free pool holds, NotObserved after READ_MAX_MS', function () {
+    var w = attackWorld();
+    w.g2.state.army = {};
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Supply });
+    var zone = w.H.host.game.zone;
+    var army = zone.GetArmy;
+    zone.GetArmy = function () { return null; };
+    tick(w);
+    assertSupply(w);
+    W.ticksFor(w, ldr(w).READ_MAX_MS / 2);
+    assertSupply(w);
+    zone.GetArmy = army;
+    tick(w);
+    assert.strictEqual(stepName(w), 'Load', 'a read back in time clears it');
+
+    var w2 = attackWorld();
+    w2.g2.state.army = {};
+    startRun(w2, ['C:/b/w1.txt'], { step: w2.S.WaveStep.Supply });
+    w2.H.host.game.zone.GetArmy = function () { return null; };
+    tick(w2);
+    W.ticksFor(w2, ldr(w2).READ_MAX_MS + 20000);
+    var r = w2.st.run();
+    assert.strictEqual(r.status, w2.S.RunStatus.Paused);
+    assert.strictEqual(r.pause.reason, w2.S.RunPause.NotObserved, r.pause.reason + ': ' + r.pause.message);
+});
+
+t.test('Supply: a wave general\'s surplus is unloaded and the wave loads', function () {
+    var w = attackWorld();
+    w.free = {};
+    w.g1.state.army = { Rifle: 10 };
+    w.g2.state.army = {};
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Supply });
+    for (var i = 0; i < 12 && stepName(w) !== 'Reach' && w.st.run().status === w.S.RunStatus.Running; i++) {
+        tick(w);
+        play(w);
+        w.t += ldr(w).READ_LAG_MS;
+    }
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running, JSON.stringify(w.st.run().pause));
+    assert.strictEqual(stepName(w), 'Reach');
+    assert.deepStrictEqual(w.unloads, ['1.1']);
+    assert.strictEqual(w.g1.state.army.Rifle, 5);
+});
+
+t.test('Verify: short with a busy general goes back to Supply and waits, no LoadMismatch', function () {
+    var other = otherGeneral('1.5', 'Emil', {});
+    var w = attackWorld({ extra: [other] });
+    w.free = {};
+    w.g2.state.army = { Rifle: 1 };
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Load });
+    busyOn(other, w);
+    tick(w);
+    play(w);
+    tick(w);
+    assert.strictEqual(stepName(w), 'Verify');
+    w.t += ldr(w).READ_LAG_MS;
+    tick(w);
+    assert.strictEqual(stepName(w), 'Supply');
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    tick(w);
+    assertWaiting(w);
+    other.state.task = null;
+    tick(w);
+    tick(w);
+    w.t += ldr(w).READ_LAG_MS;
+    tick(w);
+    assertTroopsShort(w);
+});
+
+t.test('Resume of a TroopsShort with a general still busy waits', function () {
+    var other = otherGeneral('1.5', 'Emil', {});
+    var w = shortWorld([other]);
+    tick(w);
+    w.t += ldr(w).READ_LAG_MS;
+    tick(w);
+    assertTroopsShort(w);
+    busyOn(other, w);
+    w.st.resume();
+    for (var i = 0; i < 6 && !w.st.current().busy; i++) {
+        tick(w);
+        play(w);
+    }
+    assertSupply(w);
+    var b = w.st.current().busy;
+    assert.ok(b, 'a busy record');
+    assert.strictEqual(b.step, w.st.run().step);
+    assert.strictEqual(b.key, '1.5');
+});
+
 // ---- Reach / Settle ---------------------------------------------------------
 
 t.test('Settle: unreachable while a fighter attacks stays in Settle', function () {

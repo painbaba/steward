@@ -67,10 +67,6 @@
         S.kernel.warn(CATEGORY, st().label() + ': ' + text);
     }
 
-    function ready(g) {
-        return !!g && g.idle && !g.travelling;
-    }
-
     // The key part of a marker name like 'recall:<key>'.
     function keyOfMark(name) {
         var i = name.indexOf(':');
@@ -160,7 +156,7 @@
         for (var i = 0; i < keys.length; i++) {
             var g = ld().gen(inv, keys[i]);
             if (!g) { if (missing === null) missing = keys[i]; }
-            else if (!ready(g)) { if (busy === null) busy = keys[i]; }
+            else if (!ld().ready(g)) { if (busy === null) busy = keys[i]; }
         }
         if (missing === null && busy === null && inv.ok) {
             st().go(S.RunStep.StarAll, 'every general arrived');
@@ -330,7 +326,7 @@
             if (!g) continue;
             var h = { key: g.key, capacity: g.capacity, army: g.army };
             if (isCarrier(g)) carriers.push(h);
-            else if (g.cls === S.SpecialistType.General && ready(g)) generals.push(h);
+            else if (g.cls === S.SpecialistType.General && ld().ready(g)) generals.push(h);
         }
         return S.core.army.planPack(inv.free, carriers.concat(generals));
     }
@@ -359,7 +355,7 @@
         var firstKey = null;
         for (var i = 0; i < keys.length; i++) {
             var g = ld().gen(inv, keys[i]);
-            if (g && !ready(g)) { firstKey = keys[i]; break; }
+            if (g && !ld().ready(g)) { firstKey = keys[i]; break; }
         }
         if (questDone && firstKey === null && !ld().anyAttacking()) {
             // r.since is old here, so waitRead would pause at once; the hold
@@ -627,7 +623,7 @@
                 continue;
             }
             open.push(name);
-            if (ready(g)) need.push(keys[i]);
+            if (ld().ready(g)) need.push(keys[i]);
             else if (busy === null) busy = keys[i];
         }
         if (busy !== null) ld().waitBusy(r, busy, ld().who(inv, busy) + ' busy on the adventure');

@@ -403,7 +403,7 @@
     }
 
     function supply(r, w, inv) {
-        ld().supply(r, w.supply, inv, waveSteps());
+        ld().supply(r, w.supply, inv, waveSteps(), { untilIdle: true });
     }
 
     function unload(r, w, inv) {
@@ -415,7 +415,7 @@
     }
 
     function verify(r, w, inv) {
-        ld().verify(r, w.supply, inv, waveSteps());
+        ld().verify(r, w.supply, inv, waveSteps(), { untilIdle: true });
     }
 
     // First open Attack or Buff line that cannot be attacked now, as a

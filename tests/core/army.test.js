@@ -276,6 +276,92 @@ t.test('planSupply: a wave key that is not in the inventory is listed as missing
     assert.deepStrictEqual(plain(plan.lines.map(function (l) { return l.key; })), ['g1']);
 });
 
+function surplusWorld(g2army) {
+    return setup({
+        free: { Rifle: 20, Sabre: 50 },
+        fighters: [
+            A.fighter({ uid: 'g1', army: {} }),
+            A.fighter({ uid: 'g2', army: g2army })
+        ]
+    });
+}
+
+t.test('planSupply: with surplus on, an in-wave general holding a short type donates and need counts his full want', function () {
+    var s = surplusWorld({ Rifle: 80 });
+    var wave = [{ key: 'g1', army: { Rifle: 100 } }, { key: 'g2', army: { Sabre: 50 } }];
+    var plan = s.army.planSupply(wave, s.army.inventory(), { surplus: true });
+    assert.deepStrictEqual(plain(plan.donors.map(function (d) { return d.key; })), ['g2']);
+    assert.deepStrictEqual(plain(plan.donors[0].army), { Rifle: 80 });
+    assert.deepStrictEqual(plain(plan.need), { Rifle: 100, Sabre: 50 });
+    assert.deepStrictEqual(plain(plan.shortAfter), {});
+    assert.strictEqual(plan.covered, true);
+});
+
+t.test('planSupply: surplus counts what a wave general reuses as his own', function () {
+    var s = surplusWorld({ Rifle: 80 });
+    var wave = [{ key: 'g1', army: { Rifle: 100 } }, { key: 'g2', army: { Rifle: 30 } }];
+    var plan = s.army.planSupply(wave, s.army.inventory(), { surplus: true });
+    assert.deepStrictEqual(plain(plan.donors.map(function (d) { return d.key; })), ['g2']);
+    assert.deepStrictEqual(plain(plan.need), { Rifle: 130 });
+    assert.deepStrictEqual(plain(plan.shortAfter), { Rifle: 30 });
+    assert.strictEqual(plan.covered, false);
+});
+
+t.test('planSupply: outside donors go before a wave general\'s surplus', function () {
+    var s = setup({
+        free: { Rifle: 20, Sabre: 10 },
+        fighters: [
+            A.fighter({ uid: 'g1', army: {} }),
+            A.fighter({ uid: 'g2', army: { Rifle: 150 } }),
+            A.fighter({ uid: 'd1', army: { Rifle: 80 } })
+        ]
+    });
+    var wave = [{ key: 'g1', army: { Rifle: 100 } }, { key: 'g2', army: { Sabre: 10 } }];
+    var plan = s.army.planSupply(wave, s.army.inventory(), { surplus: true });
+    assert.deepStrictEqual(plain(plan.donors.map(function (d) { return d.key; })), ['d1']);
+    assert.strictEqual(plan.covered, true);
+});
+
+t.test('planSupply: surplus skips a busy, travelling or matching wave general', function () {
+    var s = setup({
+        free: {},
+        fighters: [
+            A.fighter({ uid: 'g1', army: {} }),
+            A.fighter({ uid: 'busy', task: specStubs.task(1, 0, 1000), army: { Rifle: 80 } }),
+            A.fighter({ uid: 'away', travelling: true, army: { Rifle: 80 } }),
+            A.fighter({ uid: 'same', army: { Rifle: 80 } })
+        ]
+    });
+    var wave = [
+        { key: 'g1', army: { Rifle: 100 } },
+        { key: 'busy', army: {} },
+        { key: 'away', army: {} },
+        { key: 'same', army: { Rifle: 80 } }
+    ];
+    var plan = s.army.planSupply(wave, s.army.inventory(), { surplus: true });
+    assert.deepStrictEqual(plain(plan.donors), []);
+    assert.deepStrictEqual(plain(plan.need), { Rifle: 100 });
+    assert.strictEqual(plan.covered, false);
+});
+
+t.test('planSupply: surplus with reuseOwn false offers his whole army and need stays', function () {
+    var s = surplusWorld({ Rifle: 80 });
+    var wave = [{ key: 'g1', army: { Rifle: 100 } }, { key: 'g2', army: { Rifle: 30 } }];
+    var plan = s.army.planSupply(wave, s.army.inventory(), { surplus: true, reuseOwn: false });
+    assert.deepStrictEqual(plain(plan.donors.map(function (d) { return d.key; })), ['g2']);
+    assert.deepStrictEqual(plain(plan.donors[0].army), { Rifle: 80 });
+    assert.deepStrictEqual(plain(plan.need), { Rifle: 130 });
+    assert.deepStrictEqual(plain(plan.shortAfter), { Rifle: 30 });
+});
+
+t.test('planSupply: without the option a wave general\'s surplus stays out', function () {
+    var s = surplusWorld({ Rifle: 80 });
+    var wave = [{ key: 'g1', army: { Rifle: 100 } }, { key: 'g2', army: { Sabre: 50 } }];
+    var plan = s.army.planSupply(wave, s.army.inventory());
+    assert.deepStrictEqual(plain(plan.donors), []);
+    assert.strictEqual(plan.covered, false);
+});
+
 // ---- troopCapacity ------------------------------------------------------------
 
 t.test('troopCapacity prefers GetMaxMilitaryUnits over the description', function () {

@@ -465,6 +465,45 @@ t.test('Home load: short and not covered pauses TroopsShort', function () {
     assert.strictEqual(w.raises.length, 0);
 });
 
+t.test('Home load: short with a busy general outside the loadout still pauses TroopsShort after the hold', function () {
+    var w = homeWorld({ free: { Rifle: 4 } });
+    w.place(gen('1.3', 'Cora', 30, {}, { task: { type: w.code.attack } }), HOME);
+    series(w, { step: w.S.RunStep.Supply, run: { snapshot: { Rifle: 4 } } });
+    tick(w);
+    assertStep(w, 'Supply');
+    assert.ok(!logged(w, /busy, troops short/), 'no wait at home');
+    w.t += w.S.modules.adventures.loader.READ_LAG_MS;
+    tick(w);
+    assertPaused(w, w.S.RunPause.TroopsShort, /troops short: /);
+    assert.strictEqual(w.unloads.length, 0);
+});
+
+t.test('Home load: donors over the cycle cap still pause', function () {
+    var l = null;
+    var w = homeWorld({ free: { Rifle: 0 } });
+    l = w.S.modules.adventures.loader;
+    w.place(gen('1.3', 'Cora', 30, { Rifle: 10 }), HOME);
+    series(w, { step: w.S.RunStep.Supply, run: { snapshot: { Rifle: 10 }, cycles: l.MAX_UNLOAD_CYCLES } });
+    tick(w);
+    assertStep(w, 'Supply');
+    w.t += l.READ_LAG_MS;
+    tick(w);
+    assertPaused(w, w.S.RunPause.TroopsShort, /donors unloaded/);
+    assert.strictEqual(w.unloads.length, 0);
+});
+
+t.test('Home load: partial donors still pause without an unload', function () {
+    var w = homeWorld({ free: { Rifle: 0 } });
+    w.place(gen('1.3', 'Cora', 30, { Rifle: 2 }), HOME);
+    series(w, { step: w.S.RunStep.Supply, run: { snapshot: { Rifle: 2 } } });
+    tick(w);
+    assertStep(w, 'Supply');
+    w.t += w.S.modules.adventures.loader.READ_LAG_MS;
+    tick(w);
+    assertPaused(w, w.S.RunPause.TroopsShort, /troops short: /);
+    assert.deepStrictEqual(w.unloads, []);
+});
+
 // ---- 6. StartMap ----------------------------------------------------------------
 
 t.test('StartMap: an open map is taken as it is, with zoneId from own(), and no start is sent', function () {
