@@ -51,3 +51,63 @@ schtasks /Create /TN "TSO Monitor" /SC ONLOGON /RL LIMITED /TR "powershell -NoPr
 ```
 
 Remove it again with `schtasks /Delete /TN "TSO Monitor" /F`.
+
+## tso-autostart.ps1
+
+Keeps the client running with the login the launcher already stores. It replaces
+`SettlersOnline.ps1` (including its `settings.json` backup) as the way to start
+the game, and is safe to run next to `tso-monitor.ps1`.
+
+```bash
+powershell -ExecutionPolicy Bypass -File tools\tso-autostart.ps1
+```
+
+Run it with `-CheckOnly` to print the game status, launcher and client state
+without starting anything.
+
+What it does:
+
+- Starts the newest launcher under `C:\Users\Roland\TSOClient` that has a
+  `settings.dat`, with `--x64 --autologin`, in that folder (the launcher opens
+  `settings.dat` relative to its working directory). `--autostart` is not a
+  launcher option and is ignored. `--autologin` needs "remember me" ticked in the
+  launcher once.
+- Before each start it asks the game site, one GET every 2 minutes. 503 with the
+  maintenance page means maintenance, 200 means the site is up, anything else
+  means unknown. It only logs in when the site is up.
+- The site returns before the game (over 30 minutes on 2026-10-30), and the login
+  server answers the same either way, so only a login proves the game is up.
+  After maintenance the first login waits 30 minutes (`-AfterMaintenanceSec`).
+- Restarts a client that exited with any non-zero code. Code 0 is a manual close
+  while the game is up, which stays closed (`-RestartOnCleanExit` overrides it).
+- While the client runs it checks the site every 5 minutes and closes the client
+  after two maintenance answers in a row, then restarts it when the game is back
+  (`-NoCloseOnMaintenance` turns this off).
+- Failed starts back off from 2 minutes, doubling up to 30. After 8 in a row
+  (`-MaxFailures`, about 2.5 hours) it exits with code 2, because each one is a
+  real login attempt.
+- Never starts a login next to an open launcher: a new login ends the session
+  started elsewhere. A launcher it started itself that is stuck after 5 minutes
+  gets closed; a CAPTCHA stays open for you to solve and blocks retries.
+
+Other options: `-ClientRoot`, `-LauncherRoot`, `-StatusUrl`, `-LogDir`,
+`-BackupDir` (empty disables the backup), `-IntervalSec`, `-StatusWaitSec`,
+`-StatusRunningSec`, `-BackoffBaseSec`, `-BackoffMaxSec`, `-LaunchTimeoutSec`,
+`-StableSec`, `-CloseTimeoutSec`, `-CloseAfterHits`.
+
+Output goes to `tso_portable\steward\autostart\autostart-YYYY-MM-DD.log`. It
+never contains credentials: the login stays in `settings.dat`, and the game
+process command line (which carries the auth token) is never read. Do not add
+`--debug`, which makes the launcher write that token to `debug.txt`.
+
+### Auto-start at logon (optional)
+
+The task must run as your user with "only when logged on" (the default for
+`/SC ONLOGON` with no password), because the client needs your desktop:
+
+```bash
+schtasks /Create /TN "TSO Autostart" /SC ONLOGON /RL LIMITED /TR "powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\dev\steward\tools\tso-autostart.ps1"
+```
+
+Stop it with `schtasks /End /TN "TSO Autostart"`, remove it with
+`schtasks /Delete /TN "TSO Autostart" /F`.

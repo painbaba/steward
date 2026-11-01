@@ -38,7 +38,7 @@ param(
 
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
-$inv = [Globalization.CultureInfo]::InvariantCulture
+. (Join-Path $PSScriptRoot 'tso-common.ps1')
 $utf8 = New-Object Text.UTF8Encoding($true)   # BOM so PS 5.1 / Excel read umlauts from the event log
 
 if (-not $LogDir) { $LogDir = Join-Path $ClientRoot 'steward\monitor' }
@@ -77,7 +77,6 @@ public static class TsoMonNative {
 '@
 
 function Fmt([double]$v, [string]$f = '0.0') { return $v.ToString($f, $inv) }
-function Stamp([datetime]$t) { return $t.ToString('yyyy-MM-dd HH:mm:ss', $inv) }
 
 function Write-Event([string]$msg, [string]$level = 'INFO') {
     $line = '{0} [{1}] {2}' -f (Stamp (Get-Date)), $level, $msg
@@ -107,27 +106,6 @@ function Get-Tail([string]$path, [int]$n) {
         if ($want -lt $fs.Length) { $lines = $lines | Select-Object -Skip 1 }
         return @($lines | Select-Object -Last $n)
     } finally { $fs.Dispose() }
-}
-
-function Find-ClientProcesses {
-    $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, ExecutablePath, CreationDate)
-    $roots = @($all | Where-Object {
-        $_.ExecutablePath -and $_.ExecutablePath.StartsWith($ClientRoot + '\', [StringComparison]::OrdinalIgnoreCase) -and
-        $_.Name -like $ProcessName })
-    $ids = @{}
-    foreach ($r in $roots) { $ids[[int]$r.ProcessId] = $r }
-    # Children (and grandchildren) of matched processes, e.g. helpers spawned by AIR.
-    $added = $true
-    while ($added) {
-        $added = $false
-        foreach ($p in $all) {
-            $pp = [int]$p.ParentProcessId
-            if (-not $ids.ContainsKey([int]$p.ProcessId) -and $ids.ContainsKey($pp) -and $p.CreationDate -ge $ids[$pp].CreationDate) {
-                $ids[[int]$p.ProcessId] = $p; $added = $true
-            }
-        }
-    }
-    return $ids.Values
 }
 
 $tracked = @{}     # key "pid@starttime" -> state
@@ -227,28 +205,6 @@ function Take-Sample($st, $sys, $consoleKB, $consoleDelta) {
     Check-Warnings $st $s
 }
 
-function Format-ExitCode($code) {
-    if ($null -eq $code) { return 'unknown' }
-    # X8 on an Int32 prints the two's complement, i.e. the NTSTATUS as Windows shows it.
-    $hex = ([int32]$code).ToString('X8', $inv)
-    $hint = ''
-    switch ($hex) {
-        '00000000' { $hint = ' (normal exit)' }
-        '00000001' { $hint = ' (killed/terminated, e.g. Task Manager)' }
-        'FFFFFFFF' { $hint = ' (terminated by another process, e.g. Stop-Process)' }
-        'C0000005' { $hint = ' (ACCESS_VIOLATION)' }
-        'C00000FD' { $hint = ' (STACK_OVERFLOW)' }
-        'C0000409' { $hint = ' (STACK_BUFFER_OVERRUN / fail-fast)' }
-        'C0000017' { $hint = ' (NO_MEMORY)' }
-        'C0000374' { $hint = ' (HEAP_CORRUPTION)' }
-        'C000041D' { $hint = ' (FATAL_USER_CALLBACK_EXCEPTION)' }
-        'E0434352' { $hint = ' (.NET exception)' }
-        '80000003' { $hint = ' (BREAKPOINT)' }
-        'C000013A' { $hint = ' (CTRL_C / console closed)' }
-    }
-    return ('{0} (0x{1}){2}' -f $code, $hex, $hint)
-}
-
 function On-Exit($key, $st) {
     $p = $st.Proc
     $code = $null; $exitTime = Get-Date
@@ -324,7 +280,7 @@ try {
     while ($true) {
         $loopStart = Get-Date
         $found = @()
-        try { $found = @(Find-ClientProcesses) } catch { Write-Event "process scan failed: $($_.Exception.Message)" 'WARN' }
+        try { $found = @(Find-TsoProcesses $ClientRoot $ProcessName) } catch { Write-Event "process scan failed: $($_.Exception.Message)" 'WARN' }
         foreach ($cim in $found) {
             $known = $false
             foreach ($st in $tracked.Values) { if ($st.Pid -eq [int]$cim.ProcessId) { $known = $true } }
