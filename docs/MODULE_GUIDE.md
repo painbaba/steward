@@ -204,7 +204,7 @@ Use your module's `id` as the category. Don't log inside hot loops.
 
 A module shows things in the native menu and the dashboard through two optional fields of its register spec.
 
-- `ui` adds a section to one dashboard tab. `tab` is one of `specialists`, `geologists`, `quests`, `buildings`, `events`, `tools` or `misc`. `section.id` is unique and also the settings buffer key. `render($body, h)` runs when the dashboard draws the tab; `h` is `S.kernel.ui.helpers` (`headerRow`, `gridRow`, `formRow`, `input`, `dropdown`, `toggle`, `button`, `settings`, `update`, ...).
+- `ui` adds a section to one dashboard tab. `tab` is one of `specialists`, `geologists`, `quests`, `buildings`, `events` or `misc`. `misc` renders on the Settings screen and is for modules unrelated to running the game. `section.id` is unique and also the settings buffer key. `render($body, h)` runs when the dashboard draws the tab; `h` is `S.kernel.ui.helpers` (`headerRow`, `gridRow`, `formRow`, `input`, `dropdown`, `toggle`, `button`, `settings`, `update`, ...).
 - `menu` adds a submenu to the native `~Steward~` menu. Use it for read-only tools, such as opening a tab or showing an alert.
 
 ```js
@@ -245,7 +245,7 @@ A module may declare `barMenu: { title, items }` to add a root item beside `~Ste
 
 Dashboard settings go through a buffer: `h.settings(id)` returns it, `h.update(id, patch)` merges changes into it, and the dashboard Save button writes them to the module's settings. Keep state that describes the current moment out of the buffer; a session-only value is cleared when the menu entry reopens the dashboard.
 
-A module can also own a dialog of its own, opened from its `menu` items, when a dashboard tab does not fit (the adventures module's template dialog is the example). Such a module registers only a `menu`, so it gets no dashboard section and no quick toggle. Its dialog uses its own `Modal` id, calls `S.kernel.ui.ensureStyle(id)` before it is first shown so it shares the dashboard stylesheet, and passes every user string through `h.escape` before it reaches the page. Opening a modal hides the dashboard. A zone load closes host modals and drops unsaved edits.
+A module can also own a dialog of its own, opened from its `menu` items, when a dashboard tab does not fit (the adventures module's template dialog is the example). Settings is a dialog of the same kind, with its own id. Such a module registers only a `menu`, so it gets no dashboard section and no quick toggle. Its dialog uses its own `Modal` id, calls `S.kernel.ui.ensureStyle(id)` before it is first shown so it shares the dashboard stylesheet, and passes every user string through `h.escape` before it reaches the page. Opening a modal hides the dashboard. A zone load closes host modals and drops unsaved edits.
 
 UI primitives are host-provided; see [`TSO_API.md`](TSO_API.md).
 
@@ -317,6 +317,6 @@ Stubs live under `tests/stubs/`:
 
 Canonical example: `tests/modules/geologists.test.js`. It builds a zone with a single idle geologist, writes settings, calls `plan()`, asserts the resulting `queue.add` payload — end-to-end planner test in ~25 lines.
 
-What the runner does **not** cover: `SendServerAction` payloads (host-side state), UI rendering against the dashboard DOM, anything depending on AIR-only globals like `air.File`. Those stay validated by the live-host smoke test in each module's plan.
+What the runner does **not** cover: `SendServerAction` payloads (host-side state), UI rendering against the dashboard DOM, anything depending on AIR-only globals. Those stay validated by the live-host smoke test in each module's plan.
 
 When adding a module, write planner tests alongside the implementation. Lint already ignores `tests/` so test files use modern JS freely; only `src/` is held to the AIR-32 ES5 subset.

@@ -13,8 +13,14 @@
  * only picks the 'steward/logs' folder and reports where it landed.
  * log.filePath() returns the native path of the current log file (or null).
  *
- * The logger boots in a "console only, all categories enabled" mode. Once
- * Steward.kernel.settings.load() runs, configure() picks up persisted prefs.
+ * console.log rotates by size, by day, or both, and at most keepRotated old
+ * files stay beside it. Rotation is driven by the writes themselves with no
+ * timer, so a quiet log rotates at its first line after midnight, and a failed
+ * rotation only delays: the line is still written and history stays on disk.
+ *
+ * Stored settings are applied when the bundle loads (kernel/70_lifecycle.js),
+ * before the first file write, so size, day and fileEnabled hold from the very
+ * first line. With nothing stored, the defaults in state are the configuration.
  *
  * Failures inside the logger never throw — kernel-tick code must be able to
  * call this from anywhere without a try/catch.
@@ -24,6 +30,9 @@
 
     var LEVEL = S.LogLevel;
 
+    var LOG_NAME = 'console.log';
+    var ASIDE_NAME = LOG_NAME + '.rotating';   // the current file during a rotation
+
     var state = {
         enabled:        true,
         debugEnabled:   false,    // DEBUG-level lines are dropped unless this is true
@@ -31,6 +40,12 @@
         categories:     {},       // {} means "all enabled"
         maxFileSizeKB:  S.kernel.LIMITS.LOG_FILE_MAX_KB_DEFAULT,
         keepRotated:    S.kernel.LIMITS.LOG_KEEP_ROTATED_DEFAULT,
+        rotateDaily:    S.kernel.LIMITS.LOG_ROTATE_DAILY_DEFAULT,
+        fileBytes:      null,     // size of console.log; null until read from disk
+        lastWriteDay:   null,     // dayKey of the last write; null when unknown
+        rotateRetryAt:  0,        // ms; no rotation attempt before this time
+        rotating:       false,    // recursion guard: file helpers log their failures
+        rotatePending:  false,    // a rotation started and has not moved the file aside
         logDir:         null,
         logFile:        null,
         consoleSink:    null
@@ -108,7 +123,7 @@
 
         try {
             state.logDir  = r.dir;
-            state.logFile = r.dir.resolvePath('console.log');
+            state.logFile = r.dir.resolvePath(LOG_NAME);
         } catch (e) {
             state.logDir  = null;
             state.logFile = null;
@@ -133,45 +148,140 @@
         return state.logFile;
     }
 
-    function rotateIfNeeded() {
-        try {
-            var maxBytes = state.maxFileSizeKB * 1024;
-            if (maxBytes <= 0) return;
-            var f = ensureLogFile();
-            if (!f || !f.exists || f.size < maxBytes) return;
+    function dayKey(d) {
+        return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+    }
 
-            // Drop the oldest, then shift each rotated file up by one suffix.
-            for (var i = state.keepRotated; i >= 1; i--) {
-                var older = state.logDir.resolvePath('console.log.' + i);
-                if (i === state.keepRotated) {
-                    if (older.exists) older.deleteFile();
-                } else {
-                    if (older.exists) {
-                        var renamed = state.logDir.resolvePath('console.log.' + (i + 1));
-                        if (renamed.exists) renamed.deleteFile();
-                        older.moveTo(renamed, true);
-                    }
-                }
+    function rotatedName(n) { return LOG_NAME + '.' + n; }
+
+    // Numbered rotated files, highest number first. Only a pure number counts,
+    // so console.log.1.5, console.log.bak and the aside file are never touched.
+    function rotatedFiles() {
+        var prefix = LOG_NAME + '.';
+        var entries = S.kernel.files.list(state.logDir.nativePath, '');
+        var out = [];
+        for (var i = 0; i < entries.length; i++) {
+            var name = entries[i].name;
+            if (name.indexOf(prefix) !== 0) continue;
+            var rest = name.substring(prefix.length);
+            if (!/^\d+$/.test(rest)) continue;
+            out.push({ n: Number(rest), name: name, path: entries[i].path });
+        }
+        out.sort(function (a, b) { return b.n - a.n; });
+        return out;
+    }
+
+    // Deletes numbered files above limit. False when one could not be deleted.
+    function pruneRotated(limit) {
+        var files = rotatedFiles();
+        var ok = true;
+        for (var i = 0; i < files.length; i++) {
+            if (files[i].n > limit && !S.kernel.files.remove(files[i].path)) ok = false;
+        }
+        return ok;
+    }
+
+    function readDisk() {
+        var f = S.kernel.files.info(state.logFile.nativePath);
+        // info reports failure as null. Throw, so the caller lands in the
+        // back-off and never rotates on stale values.
+        if (!f) throw new Error('could not read ' + LOG_NAME);
+        if (!f.exists) {
+            state.fileBytes = 0;
+            state.lastWriteDay = null;
+            return;
+        }
+        state.fileBytes = f.size;
+        // During an unfinished rotation the date is our own appended lines, not
+        // a sign that another profile rotated, so it must not clear the due day.
+        if (!state.rotatePending) {
+            state.lastWriteDay = f.modified === null ? null : dayKey(new Date(f.modified));
+        }
+    }
+
+    function rotationDue(today) {
+        if (state.fileBytes === 0) return false;
+        if (state.maxFileSizeKB > 0 && state.fileBytes >= state.maxFileSizeKB * 1024) return true;
+        return state.rotateDaily && state.lastWriteDay !== null && state.lastWriteDay !== today;
+    }
+
+    // The current file holds today's lines only from here on, or nothing was due.
+    function markCurrent(today) {
+        state.lastWriteDay = today;
+        state.rotatePending = false;
+    }
+
+    // The current file moves aside first: a failed first move changes nothing,
+    // and a later failure leaves every file on disk under some name. Moves never
+    // overwrite, so a surprise target aborts instead of destroying history.
+    function rotateFiles(today) {
+        var dir = state.logDir;
+        state.rotatePending = true;
+        // A leftover from a rotation that died here goes through the chain first;
+        // the current file then stays due, with rotatePending still set, and
+        // rotates on the next line.
+        if (!dir.resolvePath(ASIDE_NAME).exists) {
+            dir.resolvePath(LOG_NAME).moveTo(dir.resolvePath(ASIDE_NAME), false);
+            state.fileBytes = 0;
+            markCurrent(today);
+        }
+        if (!pruneRotated(state.keepRotated - 1)) throw new Error('could not delete an old rotated file');
+        var files = rotatedFiles();
+        for (var i = 0; i < files.length; i++) {
+            dir.resolvePath(files[i].name).moveTo(dir.resolvePath(rotatedName(files[i].n + 1)), false);
+        }
+        if (state.keepRotated > 0) dir.resolvePath(ASIDE_NAME).moveTo(dir.resolvePath(rotatedName(1)), false);
+        else dir.resolvePath(ASIDE_NAME).deleteFile();
+    }
+
+    // Returns a line for the log when rotation failed, else null. Catches
+    // everything, so a rotation failure can never stop the line being written.
+    function rotateIfNeeded() {
+        if (state.rotating) return null;
+        var now = new Date();
+        state.rotating = true;
+        try {
+            var today = dayKey(now);
+            if (state.fileBytes === null) readDisk();
+            if (!rotationDue(today)) {
+                markCurrent(today);
+                return null;
             }
-            // Move current to .1
-            var dotOne = state.logDir.resolvePath('console.log.1');
-            if (dotOne.exists) dotOne.deleteFile();
-            f.moveTo(dotOne, true);
-            // Recreate fresh file by clearing the cached reference
-            state.logFile = null;
-        } catch (e) { /* swallow */ }
+            if (now.getTime() < state.rotateRetryAt) return null;
+            // A second profile or an outside truncation may have changed the
+            // file since the counter was seeded.
+            readDisk();
+            if (!rotationDue(today)) {
+                markCurrent(today);
+                return null;
+            }
+            rotateFiles(today);
+            return null;
+        } catch (e) {
+            var retryMs = S.kernel.TIMEOUTS.LOG_ROTATE_RETRY_MS;
+            state.rotateRetryAt = now.getTime() + retryMs;
+            var note = format(LEVEL.Warn, 'logger', 'rotation failed, retry in ' + (retryMs / 1000) + ' s: ' + e);
+            emitToConsole(LEVEL.Warn, note);
+            return note;
+        } finally {
+            state.rotating = false;
+        }
     }
 
     function emitToFile(line) {
         if (!state.fileEnabled) return;
         try {
-            rotateIfNeeded();
             var f = ensureLogFile();
             if (!f) return;
+            var note = rotateIfNeeded();
+            var text = (note ? note + '\n' : '') + line + '\n';
             var stream = new air.FileStream();
             stream.open(f, air.FileMode.APPEND);
-            stream.writeUTFBytes(line + '\n');
+            stream.writeUTFBytes(text);
             stream.close();
+            // Characters, not bytes: non-ASCII lines run slightly past the cap
+            // and the disk confirm before a rotation covers the real size.
+            if (state.fileBytes !== null) state.fileBytes += text.length;
         } catch (e) { /* swallow */ }
     }
 
@@ -217,14 +327,42 @@
         }
     };
 
+    function validCount(value) {
+        return typeof value === 'number' && isFinite(value) && value >= 0;
+    }
+
     log.configure = function (cfg) {
         if (!cfg) return;
         if (typeof cfg.enabled === 'boolean')        state.enabled       = cfg.enabled;
         if (typeof cfg.debugEnabled === 'boolean')   state.debugEnabled  = cfg.debugEnabled;
         if (typeof cfg.fileEnabled === 'boolean')    state.fileEnabled   = cfg.fileEnabled;
-        if (typeof cfg.maxFileSizeKB === 'number')   state.maxFileSizeKB = cfg.maxFileSizeKB;
-        if (typeof cfg.keepRotated === 'number')     state.keepRotated   = cfg.keepRotated;
+        if (typeof cfg.rotateDaily === 'boolean')    state.rotateDaily   = cfg.rotateDaily;
+        if (validCount(cfg.maxFileSizeKB))           state.maxFileSizeKB = Math.floor(cfg.maxFileSizeKB);
         if (cfg.categories && typeof cfg.categories === 'object') state.categories = cfg.categories;
+        if (validCount(cfg.keepRotated)) {
+            state.keepRotated = Math.floor(cfg.keepRotated);
+            if (state.fileEnabled) {
+                // Lowering keep must not wait for the next rotation to free the
+                // disk. The guard stops a failed delete re-entering the logger
+                // from rotating in the middle of this.
+                state.rotating = true;
+                try {
+                    if (ensureLogFile()) pruneRotated(state.keepRotated);
+                } catch (e) { /* swallow */ }
+                finally { state.rotating = false; }
+            }
+        }
+    };
+
+    // What is in force now: the single source for the Settings screen.
+    log.effective = function () {
+        return {
+            debugEnabled:  state.debugEnabled,
+            fileEnabled:   state.fileEnabled,
+            maxFileSizeKB: state.maxFileSizeKB,
+            keepRotated:   state.keepRotated,
+            rotateDaily:   state.rotateDaily
+        };
     };
 
     S.kernel.debug = debug;

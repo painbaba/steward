@@ -180,8 +180,33 @@ function make(opts) {
     };
 }
 
+// Host Modal and document stand-ins. Body() has no length, so the render
+// functions return early; its visibility is the test's switch. The style
+// element already lists both scopes, so ensureStyle returns at once.
+function installModal(H) {
+    var rig = { made: [], visible: false };
+    function Modal(id, title, closable) {
+        rig.made.push({ id: id, title: title, closable: closable });
+    }
+    Modal.prototype.create = noop;
+    Modal.prototype.show = noop;
+    Modal.prototype.hide = noop;
+    Modal.prototype.Body = function () {
+        return { length: 0, is: function () { return rig.visible; } };
+    };
+    Modal.prototype.Footer = function () { return { length: 0 }; };
+    H.ctx.Modal = Modal;
+    H.ctx.document = {
+        getElementById: function () {
+            return { getAttribute: function () { return 'StewardDashboard,StewardSettings'; } };
+        }
+    };
+    return rig;
+}
+
 module.exports = {
     make:               make,
     makeSettingsHost:   makeSettingsHost,
-    makeGame:           makeGame
+    makeGame:           makeGame,
+    installModal:       installModal
 };

@@ -22,13 +22,16 @@
         UI_INIT_RETRY_MS:        1000,     // retry interval if window.nativeWindow not yet available
         UI_INIT_MAX_ATTEMPTS:    30,       // give up after this many retries (~30s)
         STATUS_UPDATE_MS:        5000,     // cadence for refreshing the in-menu status label
-        SETTINGS_SAVE_DEBOUNCE_MS: 500     // throttle disk writes when many writes hit at once
+        SETTINGS_SAVE_DEBOUNCE_MS: 500,    // throttle disk writes when many writes hit at once
+        LOG_ROTATE_RETRY_MS:     60000,    // delay before a failed log rotation is tried again
+        TICK_INTERVAL_MIN_MS:    10000     // lowest tick the Settings screen accepts
     };
 
     S.kernel.LIMITS = {
         QUEUE_DEPTH_WARN:        500,      // log a warning beyond this — module is misbehaving
-        LOG_FILE_MAX_KB_DEFAULT: 5000,
-        LOG_KEEP_ROTATED_DEFAULT: 3
+        LOG_FILE_MAX_KB_DEFAULT: 5120,     // rotate console.log at 5 MB
+        LOG_KEEP_ROTATED_DEFAULT: 7,       // numbered old files kept beside console.log
+        LOG_ROTATE_DAILY_DEFAULT: true     // rotate at the first write after midnight
     };
 
 }(Steward));

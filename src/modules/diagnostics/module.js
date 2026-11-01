@@ -1,7 +1,7 @@
 /*
  * Diagnostics module.
  *
- * Read-only. Renders inside the dashboard's Tools tab as a "Diagnostics"
+ * Read-only. Renders on the Settings screen as a "Diagnostics"
  * section with one-shot probes: each row is a description + Run button
  * that dumps kernel/host/specialist state to the standard logger.
  *
@@ -27,7 +27,7 @@
         plan:     plan,
         // Late-binding refs — see collect/module.js for why.
         ui: {
-            tab: 'tools',
+            tab: 'misc',
             section: {
                 id:    'diagnostics',
                 title: 'Diagnostics',

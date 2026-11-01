@@ -40,6 +40,10 @@ fast, points at steward. `VirtualMB` around 2 TB is normal for the 64-bit
 client (address-space reservations); it matters only for the 32-bit
 `client.exe`, which has a 2 GB limit and gets a warning at 75%.
 
+A log rotation shows as a negative `ConsoleLogDeltaKB`. The crash snapshot
+tails only the current `console.log`, so a crash just after a rotation has a
+short tail; the rest is in `console.log.1`.
+
 ### Auto-start at logon (optional)
 
 ```bash

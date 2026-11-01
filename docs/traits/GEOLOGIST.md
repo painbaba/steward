@@ -1,7 +1,7 @@
 # Geologist Traits — Live Findings
 
 > Status: in progress, snapshot 2026-04-28. Sourced from
-> `Tools → Diagnostics → Dump Specialists` runs (host script
+> `Settings → Diagnostics → Dump Specialists` runs (host script
 > `docs/analysis/dump_specialists.js`). Update as more types are
 > captured.
 

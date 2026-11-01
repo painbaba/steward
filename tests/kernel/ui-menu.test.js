@@ -2,6 +2,7 @@
 
 var t = require('../runner');
 var harness = require('../harness');
+var hostStubs = require('../stubs/host');
 
 // Native menu stubs with construction counters, so a test can tell an
 // in-place label update from a rebuild (which constructs new menus/items),
@@ -729,4 +730,63 @@ t.test('a bar menu without visible is always shown', function () {
     var s = setupVis({ noVisible: true });
     t.assert.ok(visEntry(s.rootMenu));
     t.assert.strictEqual(s.K.ui.showBarMenu('vis', true), false);
+});
+
+// ---- Settings item ----------------------------------------------------------
+
+function settingsItem(rootMenu) {
+    return rootMenu.getItemByName('StewardRoot').submenu.getItemByName('StewardOpenSettings');
+}
+
+t.test('Settings item is the last menu entry, after a separator', function () {
+    var s = setup();
+    var items = s.rootMenu.getItemByName('StewardRoot').submenu.items;
+    var last = items[items.length - 1];
+    t.assert.strictEqual(last.name, 'StewardOpenSettings');
+    t.assert.strictEqual(last.label, 'Settings…');
+    t.assert.strictEqual(items[items.length - 2].isSeparator, true);
+});
+
+t.test('Settings stays last in ~Steward~ with a bar menu beside it', function () {
+    var s = setupGamma();
+    var items = s.rootMenu.getItemByName('StewardRoot').submenu.items;
+    t.assert.strictEqual(items[items.length - 1].name, 'StewardOpenSettings');
+    t.assert.strictEqual(items.filter(function (it) { return it.name === 'StewardOpenSettings'; }).length, 1);
+    t.assert.strictEqual(s.rootMenu.items.indexOf(barEntry(s.rootMenu)),
+        s.rootMenu.items.indexOf(s.rootMenu.getItemByName('StewardRoot')) + 1);
+    t.assert.strictEqual(barEntry(s.rootMenu).submenu.getItemByName('StewardOpenSettings'), null);
+});
+
+t.test('Settings item is built once and refreshes do not touch it', function () {
+    var s = setup();
+    settle(s);
+    var item = settingsItem(s.rootMenu);
+    var before = snapshot(s.counts);
+    for (var i = 0; i < 5; i++) s.H.Steward.kernel.ui.status.refresh();
+    s.H.Steward.kernel.ui.toggle();
+    t.assert.strictEqual(settingsItem(s.rootMenu), item);
+    t.assert.strictEqual(item.label, 'Settings…');
+    t.assert.deepStrictEqual(snapshot(s.counts), before);
+    t.assert.strictEqual(s.rootMenu.getItemByName('StewardRoot').submenu.items.filter(function (it) {
+        return it.name === 'StewardOpenSettings';
+    }).length, 1);
+});
+
+t.test('selecting Settings opens the settings modal', function () {
+    var s = setup();
+    var made = hostStubs.installModal(s.H).made;
+    settingsItem(s.rootMenu).onSelect();
+    t.assert.strictEqual(made.length, 1);
+    t.assert.strictEqual(made[0].id, 'StewardSettings');
+    t.assert.strictEqual(made[0].title, 'Steward — Settings');
+});
+
+t.test('selecting Settings without a host Modal logs an error and does not throw', function () {
+    var s = setup();
+    s.H.clearLogs();
+    settingsItem(s.rootMenu).onSelect();
+    var errors = s.H.logs().filter(function (l) {
+        return l.level === 'error' && /Modal class unavailable/.test(l.args.join(' '));
+    });
+    t.assert.strictEqual(errors.length, 1);
 });

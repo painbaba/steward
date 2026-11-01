@@ -1,7 +1,7 @@
 # Explorer Traits — Live Findings
 
 > Status: in progress, snapshot 2026-04-27. Sourced from
-> `Tools → Diagnostics → Deep dump explorer types` runs in the live AIR
+> `Settings → Diagnostics → Deep dump explorer types` runs in the live AIR
 > client. Update as more types are captured.
 
 ## TL;DR

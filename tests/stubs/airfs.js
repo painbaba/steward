@@ -1,18 +1,25 @@
 /*
  * In-memory Adobe AIR file system stub.
  *
- * make(opts) returns { air, disk, dirs, fail, appDir, storageDir, docsDir,
- * stats, browses, fire }. Pass `host: { air: fs.air }` to harness.boot so the
+ * make(opts) returns { air, disk, dirs, mtime, fail, now, appDir, storageDir,
+ * docsDir, stats, browses, fire }. Pass `host: { air: fs.air }` to harness.boot so the
  * kernel file API (src/kernel/17_files.js) and the logger run against it.
  *
  *   disk:  nativePath -> text   (files)
  *   dirs:  nativePath -> true   (directories; the three roots exist)
- *   fail:  { write: {}, move: {}, read: {} } keyed by nativePath; a truthy
- *          entry makes the matching call throw:
+ *   mtime: nativePath -> Date   (modification dates; a test may seed these)
+ *   now:   null for the real clock, else a ms timestamp. Every modification
+ *          date the stub writes (an append, a created directory, a moved file
+ *          without a date) is stamped with it, so a test that fakes the
+ *          process clock keeps the fake disk on the same day.
+ *   fail:  { write: {}, move: {}, read: {}, remove: {} } keyed by nativePath; a
+ *          truthy entry makes the matching call throw:
  *            write[path]  writeUTFBytes on a stream opened for that file
  *            move[path]   moveTo where path is the source or the destination
  *            read[path]   readUTFBytes on a stream opened for that file
- *   stats: { opens, closes } FileStream counters
+ *            remove[path] deleteFile on that file
+ *   stats: { opens, closes, moves } FileStream and moveTo counters; moves
+ *          counts every call, failed or not
  *   browses: one record per browseForOpen / browseForOpenMultiple call,
  *          { file, title, filters, multiple }
  *   fire(file, type, event): calls the listeners `file` holds for `type`
@@ -78,8 +85,8 @@ function make(opts) {
     var disk  = {};
     var dirs  = {};
     var mtime = {};
-    var fail  = { write: {}, move: {}, read: {} };
-    var stats = { opens: 0, closes: 0 };
+    var fail  = { write: {}, move: {}, read: {}, remove: {} };
+    var stats = { opens: 0, closes: 0, moves: 0 };
     var browses = [];
 
     dirs[appDir] = true;
@@ -99,7 +106,14 @@ function make(opts) {
         return file._app || (opts.appReadOnly && underApp(file._path));
     }
 
-    function touch(p) { mtime[p] = new Date(); }
+    // Filled in below, once the returned object exists: the clock lives on it.
+    var api = null;
+
+    function stamp() {
+        return (api && api.now !== null) ? new Date(api.now) : new Date();
+    }
+
+    function touch(p) { mtime[p] = stamp(); }
 
     function File(path) {
         this._path = norm(path);
@@ -173,6 +187,7 @@ function make(opts) {
     File.prototype.deleteFile = function () {
         var p = this._path;
         if (!isFilePath(p)) throw new Error('IOError: file does not exist ' + p);
+        if (fail.remove[p]) throw new Error('IOError: delete fault ' + p);
         if (unwritable(this)) throw securityError();
         delete disk[p];
         delete mtime[p];
@@ -181,13 +196,14 @@ function make(opts) {
     File.prototype.moveTo = function (dest, overwrite) {
         var src = this._path;
         var dst = dest._path;
+        stats.moves++;
         if (fail.move[src] || fail.move[dst]) throw new Error('IOError: move fault ' + src + ' -> ' + dst);
         if (!isFilePath(src)) throw new Error('IOError: source missing ' + src);
         if (unwritable(this) || unwritable(dest)) throw securityError();
         if (dest.exists && !overwrite) throw new Error('IOError: destination exists ' + dst);
         if (isDirPath(dst)) throw new Error('IOError: destination is a directory ' + dst);
         disk[dst] = disk[src];
-        mtime[dst] = mtime[src] || new Date();
+        mtime[dst] = mtime[src] || stamp();
         delete disk[src];
         delete mtime[src];
     };
@@ -292,10 +308,12 @@ function make(opts) {
         for (var i = 0; i < list.length; i++) list[i](ev);
     }
 
-    return {
+    api = {
         air:        air,
         disk:       disk,
         dirs:       dirs,
+        mtime:      mtime,
+        now:        null,
         fail:       fail,
         appDir:     appDir,
         storageDir: storageDir,
@@ -305,6 +323,7 @@ function make(opts) {
         fire:       fire,
         file:       function (path) { return new File(path); }
     };
+    return api;
 }
 
 module.exports = { make: make };

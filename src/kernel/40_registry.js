@@ -67,6 +67,9 @@
  *
  * The `events` tab hosts read-only event tools.
  *
+ * `misc` sections render on the Settings screen, not as a dashboard tab, and
+ * are for modules unrelated to running the game.
+ *
  * The Status tab is reserved (rendered by the kernel's UI shell, not by a
  * module). Mail/Trades is deliberately omitted until that subsystem ships.
  */
@@ -79,7 +82,6 @@
         quests:      true,
         buildings:   true,
         events:      true,
-        tools:       true,
         misc:        true
     };
 

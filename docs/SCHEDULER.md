@@ -175,6 +175,8 @@ Steward.kernel.scheduler.wake(id, delayMs);   // true when a new wake was armed
 Steward.kernel.settings.read('scheduler').tickInterval     // default: 10000 (ms)
 ```
 
+The Settings screen edits it in seconds, with a 10 s minimum. The new value applies at the next tick.
+
 Faster ticks mean tighter responsiveness at the cost of more game-API churn. 10 seconds matches autoTSO's `aQueue.interval` and is a known-safe default.
 
 ## Example: a Normal-tier module

@@ -100,6 +100,36 @@ t.test('ui.tab events is accepted', function () {
     t.assert.strictEqual(H.Steward.kernel.registry.byTab('events').length, 1);
 });
 
+t.test('ui.tab misc is accepted', function () {
+    var H = harness.boot({ sections: ['kernel'] });
+    var s = validSpec('m');
+    s.ui = { tab: 'misc', section: { id: 'm', title: 'Misc', render: function () {} } };
+    H.Steward.kernel.register(s);
+    t.assert.ok(H.Steward.kernel.registry.get('m').ui);
+    t.assert.strictEqual(H.Steward.kernel.registry.byTab('misc').length, 1);
+});
+
+t.test('ui.tab tools is rejected with a warning and the module still registers', function () {
+    var H = harness.boot({ sections: ['kernel'] });
+    var s = validSpec('old');
+    s.ui = { tab: 'tools', section: { id: 'old', title: 'Old', render: function () {} } };
+    t.assert.strictEqual(H.Steward.kernel.register(s), true);
+    t.assert.strictEqual(H.Steward.kernel.registry.get('old').ui, null);
+    t.assert.strictEqual(H.Steward.kernel.registry.byTab('tools').length, 0);
+    var warned = H.logs().filter(function (l) {
+        return l.level === 'warn' && l.category === 'registry' &&
+               /not a known tab/.test(l.args.join(' '));
+    });
+    t.assert.strictEqual(warned.length, 1);
+});
+
+t.test('diagnostics registers on misc and nothing registers on tools', function () {
+    var H = harness.boot();
+    var misc = H.Steward.kernel.registry.byTab('misc').map(function (m) { return m.id; });
+    t.assert.ok(misc.indexOf('diagnostics') >= 0);
+    t.assert.strictEqual(H.Steward.kernel.registry.byTab('tools').length, 0);
+});
+
 t.test('items as a function is kept', function () {
     var H = harness.boot({ sections: ['kernel'] });
     var fn = function () { return [{ label: 'A', onSelect: function () {} }]; };

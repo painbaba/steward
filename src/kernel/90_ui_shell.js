@@ -1,14 +1,15 @@
 /*
  * In-game UI shell.
  *
- * Two surfaces:
+ * Three surfaces:
  *
  *   1. Native menu — pause toggle, status, "Open Dashboard…", module
  *      submenus declared via the register spec's `menu` field (read-only
- *      tools such as the event calculator), then quick toggles. The
- *      dashboard remains the single configuration surface. Module
- *      submenus are built at init; a module may rebuild its own inner
- *      submenu on a user action, and label functions refresh in place.
+ *      tools such as the event calculator), quick toggles, then
+ *      "Settings…". The dashboard and the Settings modal are the
+ *      configuration surfaces. Module submenus are built at init; a
+ *      module may rebuild its own inner submenu on a user action, and
+ *      label functions refresh in place.
  *      A module may also declare a `barMenu`: one more root item right
  *      after ~Steward~, built the same way but refreshed when it opens
  *      instead of on the status tick. An entry may stay out of the bar
@@ -28,17 +29,23 @@
  *        ├──────────────────────────────────┤
  *        │ Save                       Close │
  *        └──────────────────────────────────┘
- *      Tabs: Status | Specialists | Quests | Buildings | Events | Tools | Misc
+ *      Tabs: Status | Explorers | Geologists | Quests | Collections & Buildings | Events
  *      (Mail/Trades is intentionally deferred until those modules ship.)
+ *
+ *   3. Settings modal — same frame with no tab bar: the kernel Logging and
+ *      Scheduler sections, then the `misc` module sections. It shares the
+ *      dashboard's settings buffer and footer.
  *
  *   Module dialogs share the dashboard stylesheet through ensureStyle(id),
  *   which scopes the same rules to each modal id; the scope list is kept on
  *   the <style> element so it survives a script reload.
  *
  * Settings buffer (explicit Save semantics):
- *   - Modal opens → buffer snapshot of each module's settings.
+ *   - Either modal (dashboard or Settings) opens → one buffer, snapshotting
+ *     each module's settings on first use.
  *   - Modules render via helpers.settings(id) which proxies the buffer.
- *   - Save → flushes dirty modules. Close → discards.
+ *   - Save → flushes dirty modules and applies the logger and scheduler
+ *     settings through lifecycle.applySettings. Close → discards.
  */
 
 (function (S) {
@@ -92,9 +99,10 @@
         saveBtn:   null
     };
 
-    // The tab order shown in the bar — must match what the registry
-    // accepts (see 40_registry.js). Status is built-in; the rest are
-    // module-populated. Mail/Trades is omitted (deferred to a later phase).
+    // The tab order shown in the bar. Status is built-in; every other id is
+    // in the registry's TABS (see 40_registry.js). `misc` is the exception
+    // that has no tab here: it renders on the Settings screen. Mail/Trades
+    // is omitted (deferred to a later phase).
     // Internal `id` strings stay stable so module ui specs (and the registry's
     // TABS set) don't have to track renames. Only the user-visible `label`
     // changes here.
@@ -104,10 +112,13 @@
         { id: 'geologists',  label: 'Geologists' },
         { id: 'quests',      label: 'Quests' },
         { id: 'buildings',   label: 'Collections & Buildings' },
-        { id: 'events',      label: 'Events' },
-        { id: 'tools',       label: 'Tools' },
-        { id: 'misc',        label: 'Misc' }
+        { id: 'events',      label: 'Events' }
     ];
+
+    // A second id, not the dashboard's: the host's create() is a no-op for a
+    // live id and removes a closed modal asynchronously, so one id reused
+    // with another title and layout would race.
+    var SETTINGS_MODAL_ID = 'StewardSettings';
 
     // -----------------------------------------------------------------
     // Native menu plumbing
@@ -241,6 +252,15 @@
             try { sub.addItem(new air.NativeMenuItem('', true)); } catch (e) { /* sep */ }
             toggleItems = {};
             appendModuleQuickToggles(sub);
+
+            try { sub.addItem(new air.NativeMenuItem('', true)); } catch (e) { /* sep */ }
+
+            var settingsItem = new air.NativeMenuItem('Settings…');
+            settingsItem.name = 'StewardOpenSettings';
+            settingsItem.enabled = true;
+            try { settingsItem.addEventListener(air.Event.SELECT, function () { openSettings(); }); }
+            catch (e) { /* ignore */ }
+            sub.addItem(settingsItem);
 
             root.submenu = sub;
             container.addItem(root);
@@ -914,40 +934,41 @@
         el.setAttribute('data-scopes', key);
     }
 
-    function openDashboard(initialTabId) {
+    // The one open sequence: the refusal and the buffer reset live here so a
+    // second screen cannot drift from the first.
+    function openScreen(modalId, title, label, activeTab, render) {
         if (typeof Modal === 'undefined') {
-            S.kernel.error('ui', 'host Modal class unavailable — cannot open dashboard');
+            S.kernel.error('ui', 'host Modal class unavailable — cannot open ' + label.toLowerCase());
             return;
         }
-        ensureStyle(dashboard.modalId);
+        if (hasOpenEdits()) { notify('Save or close the open window first'); return; }
+        ensureStyle(modalId);
         dashboard.buffer = {};
         dashboard.dirty = {};
-        dashboard.activeTab = initialTabId || 'specialists';
+        dashboard.activeTab = activeTab;
         try {
-            dashboard.modal = new Modal(dashboard.modalId, 'Steward — Auto Settings', true);
+            dashboard.modal = new Modal(modalId, title, true);
             dashboard.modal.create();
-            renderDashboard();
+            render();
             dashboard.modal.show();
         } catch (e) {
-            S.kernel.error('ui', 'openDashboard threw:', e);
+            S.kernel.error('ui', 'open' + label + ' threw:', e);
         }
+    }
+
+    function openDashboard(initialTabId) {
+        openScreen(dashboard.modalId, 'Steward — Auto Settings', 'Dashboard',
+            initialTabId || 'specialists', renderDashboard);
+    }
+
+    function openSettings() {
+        openScreen(SETTINGS_MODAL_ID, 'Steward — Settings', 'Settings', null, renderSettings);
     }
 
     function closeDashboard(commit) {
         if (commit && hasDirty()) {
             flushBuffers();
             notify('Configuration saved');
-        } else if (!commit && hasDirty()) {
-            // Notify modules that buffered changes were thrown away so they
-            // can repaint any stale state derived from the buffer.
-            for (var moduleId in dashboard.dirty) {
-                if (!dashboard.dirty[moduleId]) continue;
-                var mod = S.kernel.registry.get(moduleId);
-                if (mod && mod.ui && mod.ui.section && typeof mod.ui.section.onCancel === 'function') {
-                    try { mod.ui.section.onCancel(); }
-                    catch (e) { S.kernel.error('ui', moduleId, 'onCancel threw:', e); }
-                }
-            }
         }
         dashboard.buffer = {};
         dashboard.dirty = {};
@@ -1039,9 +1060,12 @@
             $panel.append(h.formRow('Render failed — see log.', ''));
         }
 
-        // Visual separator between sections — empty row.
-        $panel.append($('<div>', { 'class': 'steward-section-spacer' })
-            .css({ height: '10px' }));
+        $panel.append(sectionSpacer());
+    }
+
+    // Visual separator between sections — empty row.
+    function sectionSpacer() {
+        return $('<div>', { 'class': 'steward-section-spacer' }).css({ height: '10px' });
     }
 
     // Render one event in the Status tab's "Active events" section.
@@ -1123,8 +1147,6 @@
         $panel.append(h.formRow('Modules running', $modText));
 
         $panel.append(h.formRow('Queue depth', String(S.kernel.queue.depth())));
-        $panel.append(h.formRow('Tick interval',
-            S.kernel.scheduler.state.tickIntervalMs + ' ms'));
         var ver = S.kernel.VERSION;
         var verLabel = (typeof ver === 'string' && /^\d/.test(ver)) ? 'v' + ver : 'dev';
         $panel.append(h.formRow('Build', $('<code>').text(verLabel)));
@@ -1147,6 +1169,124 @@
                 }
             }
         } catch (e) { /* ignore */ }
+    }
+
+    // -----------------------------------------------------------------
+    // Settings screen — built into the shell like the Status tab. Rows
+    // write through h.update, so Save and Close work as on the dashboard.
+    // -----------------------------------------------------------------
+
+    // The number typed, or null for blank, non-numeric or negative input.
+    function parseNumber(text) {
+        var t = String(text).replace(/^\s+|\s+$/g, '');
+        if (t === '') return null;
+        var n = Number(t);
+        return (isFinite(n) && n >= 0) ? n : null;
+    }
+
+    // Each returns the stored unit, or null when the input is rejected.
+    var settingsParse = {
+        sizeKB: function (text) {
+            var n = parseNumber(text);
+            return n === null ? null : Math.round(n * 1024);
+        },
+        keep: function (text) {
+            var n = parseNumber(text);
+            return n === null ? null : Math.floor(n);
+        },
+        tickMs: function (text) {
+            var n = parseNumber(text);
+            if (n === null) return null;
+            return Math.max(S.kernel.TIMEOUTS.TICK_INTERVAL_MIN_MS, Math.round(n * 1000));
+        }
+    };
+
+    function showMB(kb) { return Math.round(kb / 1024 * 100) / 100; }
+    function showCount(n) { return n; }
+    function showSeconds(ms) { return ms / 1000; }
+
+    // Text input bound to a number. A rejected entry reverts and a clamped
+    // one shows the clamped value. h.input fires on blur and a disabled Save
+    // swallows the click that causes the blur, so typing marks the namespace
+    // dirty at once; the click's change event still runs before the flush.
+    function numberInput(ns, key, value, parse, show) {
+        var h = S.kernel.ui.helpers;
+        var current = value;
+        var $i = h.input({ value: show(value), width: '70px', onChange: function (text) {
+            var next = parse(text);
+            if (next !== null) {
+                current = next;
+                var patch = {};
+                patch[key] = next;
+                h.update(ns, patch);
+            }
+            $i.val(show(current));
+        } });
+        $i.on('input', function () { h.update(ns, {}); });
+        return $i;
+    }
+
+    function loggerToggle(key, checked) {
+        var h = S.kernel.ui.helpers;
+        return h.toggle({
+            checked:  checked,
+            onChange: function (next) {
+                var patch = {};
+                patch[key] = next;
+                h.update('logger', patch);
+            }
+        });
+    }
+
+    function renderLoggingSection($panel) {
+        var h = S.kernel.ui.helpers;
+        var cfg = S.kernel.log.effective();
+
+        $panel.append(h.headerRow('Logging', { icon: '✎' }));
+        $panel.append(h.formRow('Debug lines', loggerToggle('debugEnabled', cfg.debugEnabled)));
+        $panel.append(h.formRow('Write to file', loggerToggle('fileEnabled', cfg.fileEnabled)));
+        $panel.append(h.formRow('Rotate at size (MB)',
+            numberInput('logger', 'maxFileSizeKB', cfg.maxFileSizeKB, settingsParse.sizeKB, showMB),
+            '0 = off'));
+        $panel.append(h.formRow('Rotate daily', loggerToggle('rotateDaily', cfg.rotateDaily)));
+        $panel.append(h.formRow('Old files to keep',
+            numberInput('logger', 'keepRotated', cfg.keepRotated, settingsParse.keep, showCount),
+            '0 = none'));
+        $panel.append(sectionSpacer());
+    }
+
+    function renderSchedulerSection($panel) {
+        var h = S.kernel.ui.helpers;
+
+        $panel.append(h.headerRow('Scheduler', { icon: '⏱' }));
+        // `tickInterval` in ms is the key scheduler.configure reads.
+        $panel.append(h.formRow('Tick interval (seconds)',
+            numberInput('scheduler', 'tickInterval', S.kernel.scheduler.state.tickIntervalMs,
+                settingsParse.tickMs, showSeconds),
+            'minimum ' + showSeconds(S.kernel.TIMEOUTS.TICK_INTERVAL_MIN_MS)));
+        $panel.append(sectionSpacer());
+    }
+
+    function renderSettings() {
+        if (!dashboard.modal) return;
+        var $body = dashboard.modal.Body();
+        if (!$body || !$body.length) return;
+        $body.empty();
+
+        var h = S.kernel.ui.helpers;
+        var $panel = $('<div>', { 'class': 'steward-panel' });
+        // Same wrapper as activateTab: BS3 .row needs container-fluid.
+        var $container = $('<div>', { 'class': 'container-fluid' });
+        $panel.append($container);
+        $body.append($panel);
+
+        $container.append(h.indentRow('Logging and scheduler changes apply on Save. ' +
+            'Diagnostics buttons run at once.'));
+        renderLoggingSection($container);
+        renderSchedulerSection($container);
+        renderModuleTab($container, 'misc');
+
+        renderFooter();
     }
 
     // -----------------------------------------------------------------
@@ -1180,6 +1320,13 @@
         return false;
     }
 
+    // The native menu stays clickable behind a modal, and opening a screen
+    // drops the buffer. Visibility matters because the header X and a zone
+    // load skip closeDashboard and leave a stale dirty flag behind.
+    function hasOpenEdits() {
+        return hasDirty() && dashboard.modal && dashboard.modal.Body().is(':visible');
+    }
+
     function updateFooterButtons() {
         if (!dashboard.saveBtn) return;
         dashboard.saveBtn.prop('disabled', !hasDirty());
@@ -1191,12 +1338,8 @@
             try {
                 S.kernel.settings.write(moduleId, dashboard.buffer[moduleId]);
                 S.kernel.log('ui', 'saved settings for', moduleId);
-                var mod = S.kernel.registry.get(moduleId);
-                if (mod && mod.ui && mod.ui.section &&
-                        typeof mod.ui.section.onSave === 'function') {
-                    try { mod.ui.section.onSave(); }
-                    catch (e) { S.kernel.error('ui', moduleId, 'onSave threw:', e); }
-                }
+                var apply = S.kernel.lifecycle.applySettings[moduleId];
+                if (typeof apply === 'function') apply();
             } catch (e) {
                 S.kernel.error('ui', 'failed to save', moduleId, ':', e);
             }
@@ -1244,9 +1387,12 @@
     S.kernel.ui.seedPaused       = function (v) { paused = v === true; refreshStatus(); };
 
     S.kernel.ui.openDashboard    = openDashboard;
+    S.kernel.ui.openSettings     = openSettings;
     S.kernel.ui.closeDashboard   = closeDashboard;
     S.kernel.ui.bufferedSettings = bufferedSettings;
     S.kernel.ui.markDirty        = markDirty;
+    S.kernel.ui.settingsParse    = settingsParse;
+    S.kernel.ui.TAB_ORDER        = TAB_ORDER;
 
     S.kernel.ui.ensureStyle      = ensureStyle;
     S.kernel.ui.scopeCss         = scopeCss;

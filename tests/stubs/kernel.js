@@ -39,6 +39,8 @@ function attachCaptures(Steward) {
             // Preserve any helper props the original carries (.isEnabled, .configure etc.).
             var keys = Object.keys(orig);
             for (var k = 0; k < keys.length; k++) wrapper[keys[k]] = orig[keys[k]];
+            // The real logger, which the capture hides unless DEBUG_LOG is set.
+            wrapper.raw = orig;
             Steward.kernel[lvl] = wrapper;
         }(levels[i]));
     }

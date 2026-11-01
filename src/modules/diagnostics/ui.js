@@ -1,7 +1,7 @@
 /*
  * Dashboard surface for the diagnostics module.
  *
- * Renders inside the Tools tab. Each probe is a row with the description on
+ * Renders on the Settings screen. Each probe is a row with the description on
  * the left and a button on the right. All output goes through the standard
  * logger (category 'diag') so users can paste it back when reporting bugs.
  */

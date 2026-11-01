@@ -4,7 +4,8 @@
  * Steward.kernel.lifecycle.boot() runs once after the bundle finishes loading.
  * Sequence:
  *   1. Load settings from disk
- *   2. Configure logger from settings
+ *   2. Configure logger from settings (also applied once at bundle load, at
+ *      the end of this file, so the first file write already honours them)
  *   3. Run each registered module's boot() hook
  *   4. Initialize UI shell
  *   5. Start the scheduler
@@ -137,8 +138,20 @@
     S.kernel.lifecycle = {
         boot:     boot,
         shutdown: shutdown,
-        booted:   function () { return booted; }
+        booted:   function () { return booted; },
+        // Keyed by settings namespace: the one path that applies a kernel
+        // section's stored values, used at boot and again after a Save.
+        applySettings: {
+            logger:    applyLoggerSettings,
+            scheduler: applySchedulerSettings
+        }
     };
+
+    // Modules load after this file and their registry lines are the first file
+    // writes, and the host has loaded settings before injecting any userscript.
+    // Applying here is what makes rotation and fileEnabled honour saved values
+    // from the very first line, instead of only once boot runs.
+    applyLoggerSettings();
 
     // Defer boot until the bundle finishes loading. setTimeout(0) would fire
     // after the current synchronous run completes; we use a small extra delay

@@ -13,9 +13,11 @@ Steward's dashboard mirrors autoTSO's tab structure with one omission and
 one addition:
 
 - **Status** — Steward-only. Surfaces master pause, modules running, queue
-  depth, tick interval, and live events. autoTSO has no equivalent.
-- **Specialists / Quests / Buildings / Tools / Misc** — mirror autoTSO,
-  Steward modules slot in.
+  depth and live events. autoTSO has no equivalent.
+- **Specialists / Geologists / Quests / Buildings / Events** — mirror
+  autoTSO where it has the tab; Steward modules slot in.
+- **Settings** — a separate dialog, not a tab. It holds the Logging,
+  Scheduler and `misc` sections.
 - **Mail/Trades** — *deferred*. The tab is intentionally absent until the
   Mail and Trade modules ship. Modules can't register against `'mail'`
   today (registry rejects unknown tabs). Re-add the tab to

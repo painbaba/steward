@@ -2,8 +2,6 @@
 
 Steward provides a single, category-based logger that emits to both the in-client JavaScript console and a rotating log file in writable storage.
 
-> **Status:** This document describes the v0.1 logger contract. Implementation lands in P1 (`src/kernel/20_logger.js`). Module authors should code against this surface from day one.
-
 ## API
 
 ```js
@@ -49,8 +47,11 @@ Settings live under `Steward.kernel.settings.read('logger')` (mapped to `'stewar
 | `debugEnabled` | `false` | When `true`, DEBUG-level lines are emitted; otherwise dropped.  |
 | `categories`   | `{}`    | Per-category enable map. A missing key defaults to `true`.      |
 | `fileEnabled`  | `true`  | Whether to also write to disk.                                  |
-| `maxFileSizeKB`| `5000`  | Rotate the file when it grows past this size. `0` = no rotate.  |
-| `keepRotated`  | `3`     | Number of rotated files to retain.                              |
+| `maxFileSizeKB`| `5120`  | Rotate the file when it grows past this size. `0` = no size rotation. |
+| `keepRotated`  | `7`     | Number of rotated files to retain. `0` keeps none.              |
+| `rotateDaily`  | `true`  | Also rotate the file when its last write was on an earlier day. |
+
+The Settings screen (Settings → Logging) edits these values.
 
 To disable a noisy category at runtime:
 
@@ -114,7 +115,9 @@ Steward uses the same round trip, in `Steward.kernel.files.appFile`, so its logs
 
 Settings remain delegated to the host's `settings` global (which uses its own per-profile path under `applicationDirectory` — and the host similarly bypasses the security check via the same `.nativePath` trick). Logs and settings are unrelated path-wise.
 
-When the file exceeds `maxFileSizeKB`, it is renamed in-place:
+### Rotation
+
+Either trigger rotates the file: it grew past `maxFileSizeKB`, or (with `rotateDaily`) its last write was on an earlier day. The two are independent; either can be off. Rotation is driven by writes, so a quiet log rotates at its first line after midnight, not at midnight itself.
 
 ```
 console.log              # current
@@ -124,7 +127,13 @@ console.log.2
 console.log.<keepRotated>
 ```
 
-The oldest is deleted before the rotation chain shifts.
+The oldest is deleted before the chain shifts. With `keepRotated` at `0` no rotated file is kept. Lowering `keepRotated` deletes the excess files when the setting is saved.
+
+If a rotation fails, history stays intact, the line that triggered it is still written, and the next attempt happens after a minute. While a rotation is in flight the current file is moved aside to `console.log.rotating`. That file may exist briefly, or remain after a failure, and goes through the chain at the next rotation.
+
+Disk use is bounded by `(keepRotated + 1) * maxFileSizeKB`, 40 MB with the defaults.
+
+Stored settings apply when the bundle loads, before the first file write. Save on the Settings screen applies them again at once, with no reload. A direct `settings.write('logger', ...)` from elsewhere still needs a script reload or a call to `S.kernel.lifecycle.applySettings.logger()`.
 
 ## Log line format
 
