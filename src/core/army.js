@@ -348,8 +348,8 @@
     // empty) source.
     // listOk is false when a read in this pass lost an entry, so a general
     // absent from byKey is unknown rather than gone. It stays true on a list
-    // that cannot be read at all: only ok reports that, and the callers have
-    // their own handling for it.
+    // that cannot be read at all: listRead reports that, and it is false then
+    // for the same reason, a general absent from byKey is unknown.
     function inventory() {
         var read = readFreeArmy();
         var free = read || {};
@@ -397,6 +397,7 @@
             byKey:    byKey,
             freeOk:   freeOk,
             listOk:   listOk,
+            listRead: readable,
             ok:       readable && freeOk && allArmies && listOk
         };
     }

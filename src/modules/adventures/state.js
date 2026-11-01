@@ -31,11 +31,11 @@
  * Memory-only parts of runState, never written: loaded, round (the action
  * round in flight), cache (parsed wave lines), questRetry (quest key ->
  * time a failed claim may be retried), homeNote (the last wait the home
- * steps logged, so a repeated wait is logged once), listBadSince and
- * listBadLast (first and latest read of a specialist list that lost entries),
- * missing (general key -> { since, last } of the reads that lacked it),
- * busy (the busy wait of this run and step: { runId, step, key, text, since,
- * noted }) and busySeen (whether this pass kept that wait going).
+ * steps logged, so a repeated wait is logged once), quiet (the quiet clock of
+ * this step: { since, last, ms }), missing (general key -> { since, last } of
+ * the reads that lacked it), busy (the busy wait of this run and step: { runId,
+ * step, key, text, since, noted, read }, read marking a wait kept alive by a bad
+ * read) and busySeen (whether this pass kept that wait going).
  * They describe callbacks and reads of this client session, which do not
  * exist after a restart.
  * resetMemory() is the one place that resets them for a new or loaded run.
@@ -283,6 +283,19 @@
         return false;
     }
 
+    // What the user must do so a Running run gets its passes again, or '' when
+    // the viewed zone is the right one. Passes stop on a wrong zone, so no step
+    // can say this itself. A wave step runs on the island, like an ADVENTURE
+    // step. The game may not be loaded when the menu opens.
+    function viewHint(r) {
+        if (!r || r.status !== S.RunStatus.Running) return '';
+        var zone;
+        try { zone = { id: S.core.zone.id(), isHome: S.core.zone.isHome() }; }
+        catch (e) { return ''; }
+        if (readyOn(r, zone)) return '';
+        return !isWaveStep(r.step) && whereOf(r.step) === HOME ? 'go home' : 'view the island';
+    }
+
     function stepName(step) {
         return nameOf(isWaveStep(step) ? S.WaveStep : S.RunStep, step);
     }
@@ -493,8 +506,7 @@
         rs.cache = null;
         rs.questRetry = {};
         rs.homeNote = null;
-        rs.listBadSince = null;
-        rs.listBadLast = null;
+        rs.quiet = null;
         rs.missing = {};
         rs.busy = null;
         rs.busySeen = false;
@@ -512,7 +524,8 @@
     // lines. waitUntil is the deadline of the step that is waiting. popBase
     // is the free population read before the last population buff, so the
     // next pass can tell whether the buff took effect. settledAt is when the
-    // island was first seen quiet while Settle holds (null: not quiet).
+    // island was first seen quiet in an unbroken row of passes while Settle
+    // holds (null: not quiet).
     function newRun(start) {
         var s = isPlainObject(start) ? start : {};
         var t = clock();
@@ -951,6 +964,7 @@
         isWaveStep:    isWaveStep,
         partOf:        partOf,
         readyOn:       readyOn,
+        viewHint:      viewHint,
         waitsLong:     waitsLong
     };
 

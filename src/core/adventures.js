@@ -115,8 +115,11 @@
 
     // The player's own open adventures as [{ name, zoneId }]. [] means the
     // manager read fine and none is open; null means it could not be read, so
-    // callers never mistake an unreadable manager for "nothing open". Runs on
-    // the menu's status tick, so it never logs.
+    // callers never mistake an unreadable manager for "nothing open". This
+    // assumes the manager gives an empty vector when nothing is open, so a list
+    // with no length is a failed read. A bad entry fails the whole read too: a
+    // skipped entry could be the very adventure the caller looks for, and would
+    // read as closed. Runs on the menu's status tick, so it never logs.
     function own() {
         var out = [];
         try {
@@ -129,12 +132,10 @@
                     if (arr && typeof arr.length === 'number') advs = arr;
                 }
             } catch (e1) { /* fall back to the index walk */ }
-            var n = (advs && typeof advs.length === 'number') ? advs.length : 0;
-            for (var i = 0; i < n; i++) {
-                try {
-                    var adv = advs[i];
-                    if (mgr.isMyAdventure(adv)) out.push({ name: String(adv.adventureName), zoneId: adv.zoneID });
-                } catch (e2) { /* skip this entry */ }
+            if (!advs || typeof advs.length !== 'number') return null;
+            for (var i = 0; i < advs.length; i++) {
+                var adv = advs[i];
+                if (mgr.isMyAdventure(adv)) out.push({ name: String(adv.adventureName), zoneId: adv.zoneID });
             }
         } catch (e) {
             return null;

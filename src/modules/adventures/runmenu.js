@@ -205,7 +205,11 @@
         if (r.status === S.RunStatus.Paused) return r.pause ? r.pause.message : '';
         if (r.status === S.RunStatus.Done) return 'Series done; use Stop run to clear';
         var row = currentRow(view(pass).groups);
-        return row ? 'Now: ' + row.label + (row.detail ? ', ' + row.detail : '') : '';
+        var line = row ? 'Now: ' + row.label + (row.detail ? ', ' + row.detail : '') : '';
+        // A wrong zone stops the passes, so nothing else can say why the run
+        // stands.
+        var hint = line ? st().viewHint(r) : '';
+        return hint ? line + ', ' + hint : line;
     }
 
     // ---- Items --------------------------------------------------------------

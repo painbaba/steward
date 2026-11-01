@@ -469,11 +469,12 @@ function settleWorld(extra) {
     return w;
 }
 
-t.test('Settle: pauses after 20 s of quiet and not after 10', function () {
+t.test('Settle: pauses after SETTLE_QUIET_MS of quiet and not just short of it', function () {
     var w = settleWorld();
+    var limit = w.ex.SETTLE_QUIET_MS;
     tick(w);
     assert.strictEqual(typeof w.st.run().settledAt, 'number');
-    W.ticksFor(w, 10000);
+    W.ticksFor(w, limit - 10000);
     assertStep(w, 'Settle');
     W.ticksFor(w, 10000);
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Paused);
@@ -483,16 +484,17 @@ t.test('Settle: pauses after 20 s of quiet and not after 10', function () {
 t.test('Settle: a battle in between restarts the quiet time', function () {
     var fighter = AC.general({ uid: '1.6', grid: 60 });
     var w = settleWorld([fighter]);
+    var limit = w.ex.SETTLE_QUIET_MS;
     tick(w);
-    W.ticksFor(w, 10000);
+    W.ticksFor(w, limit / 2);
     fighter.state.task = { type: w.code.attack };
-    W.ticksFor(w, 10000);
+    W.ticksFor(w, limit / 2);
     assert.strictEqual(w.st.run().settledAt, null);
     assertStep(w, 'Settle');
     fighter.state.task = null;
     tick(w);
     assert.strictEqual(w.st.run().settledAt, w.t);
-    W.ticksFor(w, 10000);
+    W.ticksFor(w, limit - 10000);
     assertStep(w, 'Settle');
     W.ticksFor(w, 10000);
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Paused);

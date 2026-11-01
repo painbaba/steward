@@ -47,6 +47,12 @@ function setup(o) {
     return w;
 }
 
+// The run's island, viewed: the zone the steps after Pack run on.
+function onIsland(w) {
+    w.st.run().zoneId = W.ZONE;
+    w.H.host.game.gi.visitZone(W.ZONE);
+}
+
 function plain(v) { return JSON.parse(JSON.stringify(v)); }
 
 // Rows of every group in order: [{ group, label, file, mark, detail }].
@@ -293,6 +299,7 @@ t.test('busy: the wave row shows it after the step name', function () {
 
 t.test('busy: the status line picks it up', function () {
     var w = setup({ step: 'Arrive' });
+    onIsland(w);
     setBusy(w, 120000);
     assert.strictEqual(labels(w)[1], 'Now: Wait for all generals, The Smuggler (325505.0) busy, 2 min');
 });
@@ -306,6 +313,40 @@ t.test('busy: a record of another step shows nothing', function () {
     assert.ok(row(w, 'Wait for all generals').detail.indexOf('busy') < 0);
     delete w.st.current().busy;
     assert.doesNotThrow(function () { labels(w); });
+});
+
+// ---- view hint ------------------------------------------------------------------
+
+t.test('hint: a step that runs on the island names it when home is viewed', function () {
+    var w = setup({ step: 'Arrive' });
+    assert.strictEqual(labels(w)[1], 'Now: Wait for all generals, view the island');
+    w = setup({ waves: 2, waveIndex: 1, step: 'wave Attack' });
+    assert.strictEqual(labels(w)[1], 'Now: Wave 2, Attack, view the island');
+});
+
+t.test('hint: the hint follows the busy text', function () {
+    var w = setup({ step: 'Arrive' });
+    setBusy(w, 120000);
+    assert.strictEqual(labels(w)[1], 'Now: Wait for all generals, The Smuggler (325505.0) busy, 2 min, view the island');
+});
+
+t.test('hint: a home step viewed on the island says go home', function () {
+    var w = setup({ step: 'Muster' });
+    onIsland(w);
+    assert.ok(/, go home$/.test(labels(w)[1]), labels(w)[1]);
+});
+
+t.test('hint: no hint on the right zone, on an any-zone step, paused or done', function () {
+    var w = setup({ step: 'Arrive' });
+    onIsland(w);
+    assert.ok(!/view the island|go home/.test(labels(w)[1]), labels(w)[1]);
+    w = setup({ step: 'Muster' });
+    assert.ok(!/view the island|go home/.test(labels(w)[1]), labels(w)[1]);
+    w = setup({ step: 'Arrive', paused: true });
+    assert.strictEqual(labels(w)[1], 'paused by you');
+    w.st.resume();
+    w.st.done();
+    assert.strictEqual(labels(w)[1], 'Series done; use Stop run to clear');
 });
 
 // ---- controls --------------------------------------------------------------------
@@ -393,6 +434,7 @@ t.test('title per status', function () {
 
 t.test('status line paused, running and done', function () {
     var w = setup({ waves: 2, waveIndex: 1, step: 'wave Attack' });
+    onIsland(w);
     assert.strictEqual(labels(w)[1], 'Now: Wave 2, Attack');
     w.st.pause(w.S.RunPause.User, 'paused by you');
     assert.strictEqual(labels(w)[1], 'paused by you');

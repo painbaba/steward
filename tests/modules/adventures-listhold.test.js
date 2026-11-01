@@ -4,8 +4,8 @@
 // on it. A ghost (w.ghost in tests/stubs/adventures.js) is a real entry whose
 // members read undefined for a moment. Each test puts one in front of a step
 // that would read the absent general as a fact, then checks the step acts on
-// the next clean read. A general that is really gone still pauses, after the
-// grace.
+// the next clean read. A bad read holds with no limit and never pauses; a
+// general that is really gone still pauses, after the grace.
 
 var t = require('../runner');
 var AC = require('../stubs/actions');
@@ -228,14 +228,21 @@ t.test('Recall: one ghost does not count as gone, nobody is sent over that read'
     holds(w);
 });
 
-t.test('Recall: a null list still goes to JumpHome', function () {
+t.test('Recall: a null list holds, nobody is left behind and nobody is sent', function () {
     var w = homeWorld();
     onIsland(w, [w.g1, w.g2]);
     startRun(w, [WAVE], { step: w.S.RunStep.Recall });
+    var vector = w.gi.mCurrentPlayerZone.GetSpecialists_vector;
     w.gi.mCurrentPlayerZone.GetSpecialists_vector = function () { return null; };
+    holds(w);
+    W.ticksFor(w, 120000);
+    assertStep(w, 'Recall');
+    assert.strictEqual(sends(w), 0);
+    assert.ok(/not readable/.test(w.st.current().busy.text), 'the wait names the read');
+    w.gi.mCurrentPlayerZone.GetSpecialists_vector = vector;
     tick(w);
-    assertStep(w, 'JumpHome');
-    assert.strictEqual(w.zoneSends.length, 0);
+    play(w);
+    assert.deepStrictEqual(w.zoneSends.map(function (s) { return s.key; }).sort(), ['1.1', '1.2']);
 });
 
 t.test('Position: a ghost on a Star line does not read as starred', function () {
@@ -299,62 +306,56 @@ t.test('Clear: a ghost tick does not pass the pack check, the clean read goes ba
 
 // ---- the window of bad reads ----------------------------------------------------
 
-t.test('hold: bad reads pause NotObserved only after READ_MAX_MS, with nothing sent', function () {
+t.test('hold: bad reads hold with no limit, never pause and send nothing', function () {
     var w = islandWorld();
     startRun(w, [WAVE], { step: w.S.WaveStep.Gate });
-    w.ghost(w.g2, 100);
+    w.ghost(w.g2, 100000);
     tick(w);
-    W.ticksFor(w, ld(w).READ_MAX_MS);
+    W.ticksFor(w, ld(w).READ_MAX_MS * 30);
     assertStep(w, 'Gate');
-    w.t += 1;
+    assert.strictEqual(sends(w), 0);
+    assert.strictEqual(w.st.run().pause, null);
+    assert.ok(/not readable/.test(w.st.current().busy.text), 'the wait names the read');
+});
+
+t.test('hold: a clean read ends the hold at once, however long it lasted', function () {
+    var w = islandWorld();
+    startRun(w, [WAVE], { step: w.S.WaveStep.Gate });
+    var ms = ld(w).READ_MAX_MS * 5;
+    w.ghost(w.g2, ms / 10000);      // ticksFor ticks every 10 s
+    W.ticksFor(w, ms);
+    assertStep(w, 'Gate');
     tick(w);
-    assertPaused(w, w.S.RunPause.NotObserved, /specialist list incomplete for 60 s/);
+    assertStep(w, 'Position');
+});
+
+t.test('hold: a user pause during a long hold, then Resume, holds on and does not pause', function () {
+    var w = islandWorld();
+    startRun(w, [WAVE], { step: w.S.WaveStep.Gate });
+    w.ghost(w.g2, 100000);
+    tick(w);
+    W.ticksFor(w, ld(w).READ_MAX_MS * 3);
+    w.S.modules.adventures.run.pause();
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Paused);
+    assert.strictEqual(w.S.modules.adventures.run.resume(), true);
+    tick(w);
+    W.ticksFor(w, ld(w).READ_MAX_MS * 3);
+    assertStep(w, 'Gate');
     assert.strictEqual(sends(w), 0);
 });
 
-t.test('hold: a clean tick in between restarts the window', function () {
-    var w = islandWorld();
-    w.g1.state.task = { type: w.code.attack };     // keeps a clean Gate where it is
-    startRun(w, [WAVE], { step: w.S.WaveStep.Gate });
-    w.ghost(w.g2, 5);
-    W.ticksFor(w, 60000);
-    assert.strictEqual(w.st.current().listBadSince, null, 'the clean tick cleared it');
-    w.ghost(w.g2, 100);
-    W.ticksFor(w, 10000 + ld(w).READ_MAX_MS);
-    assertStep(w, 'Gate');
-    w.t += 1;
-    tick(w);
-    assertPaused(w, w.S.RunPause.NotObserved);
-});
-
-t.test('hold: a Resume gets a fresh window', function () {
-    var w = islandWorld();
-    startRun(w, [WAVE], { step: w.S.WaveStep.Gate });
-    w.ghost(w.g2, 100);
-    tick(w);
-    W.ticksFor(w, ld(w).READ_MAX_MS + 1);
-    assertPaused(w, w.S.RunPause.NotObserved);
-    assert.strictEqual(w.st.current().listBadSince, null);
-    assert.strictEqual(w.S.modules.adventures.run.resume(), true);
-    tick(w);
-    W.ticksFor(w, ld(w).READ_MAX_MS);
-    assertStep(w, 'Gate');
-    w.t += 1;
-    tick(w);
-    assertPaused(w, w.S.RunPause.NotObserved);
-});
-
-t.test('hold: one bad tick long after another starts a new window', function () {
+t.test('hold: a bad read long after another keeps the same wait', function () {
     var w = islandWorld();
     startRun(w, [WAVE], { step: w.S.WaveStep.Gate });
     w.ghost(w.g2);
     tick(w);
+    var since = w.st.current().busy.since;
     // No plan call in between: another zone viewed, or the kernel paused.
     w.t += 300000;
     w.ghost(w.g2);
     tick(w);
     assertStep(w, 'Gate');
-    assert.strictEqual(w.st.current().listBadSince, w.t);
+    assert.strictEqual(w.st.current().busy.since, since);
 });
 
 // ---- a general really gone --------------------------------------------------------
@@ -584,7 +585,7 @@ t.test('Clear: a null quest list does not end a busy wait', function () {
 ].forEach(function (c) {
     [
         { name: 'a young step', age: 0 },
-        { name: 'past CLEAR_MAX_MS', age: 1 }
+        { name: 'quiet time just short of CLEAR_MAX_MS', age: 1 }
     ].forEach(function (a) {
         t.test('Clear: a list without the last quest does not end a busy wait: ' + c.name + ', ' + a.name, function () {
             var w = homeWorld();
@@ -593,7 +594,11 @@ t.test('Clear: a null quest list does not end a busy wait', function () {
             w.quests = quests;
             w.g1.state.task = { type: w.code.attack };
             var r = startRun(w, [WAVE], { step: w.S.RunStep.Clear });
-            if (a.age) w.t = r.since + w.S.modules.adventures.away.CLEAR_MAX_MS + a.age;
+            // A running battle does not feed the quiet clock, so it stays short
+            // of the limit while the fight goes on.
+            if (a.age) {
+                w.st.current().quiet = { since: r.since, last: w.t, ms: w.S.modules.adventures.away.CLEAR_MAX_MS - 1 };
+            }
             keepsWait(w, function () {
                 w.quests = c.quests;
             }, function () {
@@ -653,7 +658,7 @@ t.test('settleRound: a retry refused unreadable went out once and stays a failur
     assert.deepStrictEqual(failed, ['1.1']);
 });
 
-t.test('Depart: a marked send whose verify ran into a ghost is not sent again', function () {
+t.test('Depart: a marked send whose verify ran into a ghost is not sent again, and ends NotObserved at ORDER_WAIT_MS', function () {
     var w = homeWorld({ mapOpen: true });
     w.auto.travel = false;
     startRun(w, [WAVE], { step: w.S.RunStep.Depart });
@@ -665,8 +670,11 @@ t.test('Depart: a marked send whose verify ran into a ghost is not sent again', 
     tick(w);
     tick(w);
     play(w);
-    assertPaused(w, w.S.RunPause.DepartFailed, /retry refused: specialist unreadable/);
-    assert.strictEqual(w.zoneSends.length, 2);
+    assertStep(w, 'Depart');
+    assert.strictEqual(w.zoneSends.length, 2, 'no second send');
+    W.ticksFor(w, w.S.modules.adventures.loader.ORDER_WAIT_MS + 10000);
+    assertPaused(w, w.S.RunPause.NotObserved);
+    assert.strictEqual(w.zoneSends.length, 2, 'still no second send');
 });
 
 t.test('Attack: a line refused unreadable is paced again and goes out on the clean read', function () {
@@ -764,15 +772,18 @@ t.test('Start at home: the generals play no part, so a ghost does not stop it', 
 
 // ---- memory only ------------------------------------------------------------------
 
-t.test('listBadSince, listBadLast and missing never reach the run file', function () {
+t.test('missing, quiet and the read wait never reach the run file', function () {
     var w = islandWorld();
     var r = startRun(w, [WAVE], { step: w.S.WaveStep.Gate });
     w.ghost(w.g2);
     tick(w);
     ld(w).missingLong(r, '1.2');
+    ld(w).quietClock(r, true);
     var rs = w.st.current();
-    assert.strictEqual(typeof rs.listBadSince, 'number');
+    assert.strictEqual(rs.listBadSince, undefined, 'the bad-read window is gone');
+    assert.ok(rs.busy && rs.busy.read === true, 'the read wait is in memory');
     assert.ok(rs.missing['1.2'], 'the record exists in memory');
+    assert.ok(rs.quiet, 'the quiet clock exists in memory');
     w.st.save();
-    assert.ok(!/listBad|"missing"/.test(w.fs.disk[RUN_FILE]), w.fs.disk[RUN_FILE]);
+    assert.ok(!/listBad|"missing"|"quiet"|"busy"/.test(w.fs.disk[RUN_FILE]), w.fs.disk[RUN_FILE]);
 });

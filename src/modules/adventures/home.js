@@ -16,14 +16,14 @@
  * out twice (map start, each departure, the population buff, each training
  * order) carries a persisted send marker, so a reload or a kernel Pause
  * right after a send waits for the effect and then pauses instead of
- * sending again. A read that fails holds the step and pauses after a while;
- * an unreadable source is never taken for an empty one.
+ * sending again. A failed read holds the step, with no limit: an unreadable
+ * source is never taken for an empty one.
  *
  * The troops at home are counted before the load (free pool plus every
  * general plus what is still queued), so after the map the lost troops are
  * exactly that count minus the same count now. Population and Retrain
  * recompute what is missing from the game on every pass, so an order that
- * went through drops out of the plan by itself.
+ * reached the queue drops out of the plan by itself.
  *
  * Bundle slot: module file; top level only assigns
  * S.modules.adventures.home; state, loader, executor and every core are read
@@ -36,8 +36,6 @@
 
     // Starting values, to be tuned in game.
     var GAP_MS                 = 180000;    // the game wants this long between two maps
-    var GATHER_CAP_MS          = 1800000;   // a general not listed at home after this long pauses
-    var MAP_OPEN_MS            = 60000;     // a started map must be listed within this long
     var PRODUCTION_WAIT_MAX_MS = 21600000;  // the home load waits this long for queued troops
 
     var CATEGORY = 'adventures';
@@ -94,17 +92,11 @@
     // ---- Gathering ----------------------------------------------------------
 
     // Holds until every loadout general is listed at home, idle and not
-    // travelling, then goes to next. A listed general that is busy is waited
-    // for with no limit, since he will get ready and the game's remaining time
-    // runs short. Only a general not listed has a deadline, GATHER_CAP_MS after
-    // the step began, because he has nothing to wait on. A step this old can
-    // meet one bad read, so an unreadable list holds instead of pausing at once.
+    // travelling, then goes to next. Both a busy general and one not listed
+    // are waited for with no limit: he gets ready or comes back by himself, and
+    // the game's remaining time runs short, so nothing is built on it. A list
+    // that cannot prove his absence never reaches this step, listHold stops it.
     function gather(r, inv, next, why) {
-        if (!S.core.specialists.listReadable()) {
-            ld().holdRead(r, 'specialist list');
-            return;
-        }
-        ld().clearHold(r);
         var keys = ld().keysOf(r);
         var missing = null;
         var busy = null;
@@ -120,11 +112,8 @@
             st().go(next, why);
             return;
         }
-        // A read that lacks a general says nothing about a busy wait, and
-        // before the deadline missingLong does not run.
-        if (missing !== null) ld().keepBusy();
-        if (missing !== null && now() > r.since + GATHER_CAP_MS && ld().missingLong(r, missing)) {
-            st().pause(S.RunPause.GeneralMissing, missing + ' is not on the home island', { general: missing });
+        if (missing !== null) {
+            ld().waitBusy(r, missing, ld().who(inv, missing) + ' not here yet');
             return;
         }
         if (busy !== null) ld().waitBusy(r, busy, ld().who(inv, busy) + ' busy');
@@ -158,7 +147,10 @@
     function validate(r) {
         var c = S.modules.adventures.executor.check({ label: r.label, loadout: r.loadoutPath, waves: r.paths },
             { camps: false });
-        if (c.listOk === false) return;
+        if (c.listOk === false) {
+            ld().waitRead(r, 'specialist list');
+            return;
+        }
         for (var i = 0; i < c.warnings.length; i++) log('warning: ' + c.warnings[i].message);
         if (!c.ok) {
             var msg = c.problems.length ? c.problems[0].message : 'loadout cannot be read';
@@ -282,16 +274,18 @@
             // A start the game confirmed but whose map is not listed yet. The
             // wait runs from the send, or from a Resume, never sends again.
             var from = m && typeof m.sentAt === 'number' ? Math.max(m.sentAt, r.since) : r.since;
-            if (now() - from > MAP_OPEN_MS) {
+            if (now() - from > ld().ORDER_WAIT_MS) {
                 st().pause(S.RunPause.MapFailed, 'map started but not listed among your adventures');
+                return;
             }
+            ld().waitSent(r, 'map start');
             return;
         }
-        var s = ld().staleMark(r, 'map', MAP_OPEN_MS);
+        var s = ld().staleMark(r, 'map', 'map start');
         if (s === 'wait') return;
         if (s === 'stale') {
             st().pause(S.RunPause.NotObserved,
-                'map start sent before a reload is not seen; check the star menu, then Resume');
+                'map start sent but not seen; check the star menu, then Resume');
             return;
         }
         var next = ld().settleRound(r, RS.StartMap, function (f) {
@@ -311,11 +305,6 @@
             st().go(RS.StartMap, 'no island zone id');
             return;
         }
-        if (!S.core.specialists.listReadable()) {
-            ld().holdRead(r, 'specialist list');
-            return;
-        }
-        ld().clearHold(r);
         var keys = ld().keysOf(r);
         var toSend = [];
         var busy = null;
@@ -354,7 +343,7 @@
         if (!toSend.length) return;
 
         for (i = 0; i < toSend.length; i++) {
-            var s = ld().staleMark(r, DEPART + toSend[i], ld().MARK_SETTLE_MS);
+            var s = ld().staleMark(r, DEPART + toSend[i], 'departure of ' + toSend[i], { seen: true });
             if (s === 'wait') return;
             if (s === 'stale') {
                 st().pause(S.RunPause.NotObserved, 'departure of ' + toSend[i] +
@@ -378,24 +367,15 @@
             ld().seenOnVerified(name));
     }
 
-    // Every general is on its way. The arrival deadline is the longest
-    // remaining travel time plus slack, or the cap when none is readable. A
-    // step change drops waitUntil, so the deadline travels to the island in
-    // the 'arrive' mark.
+    // Every general is on its way. The game's remaining time is logged only: it
+    // runs short, so the arrival is waited for by what the island shows. An
+    // 'arrive' mark left in an older run file is read by nothing.
     function departed(r, travelling, n) {
-        var longest = null;
         var raw = [];
         for (var i = 0; i < travelling.length; i++) {
-            var rem = S.core.specialists.orders.remaining(travelling[i].spec);
-            raw.push(travelling[i].key + '=' + rem);
-            if (typeof rem !== 'number') continue;
-            rem = Math.min(rem, ld().REMAINING_MAX_MS);
-            if (longest === null || rem > longest) longest = rem;
+            raw.push(travelling[i].key + '=' + S.core.specialists.orders.remaining(travelling[i].spec));
         }
-        var deadline = longest !== null ? now() + longest + ld().TRAVEL_SLACK_MS : now() + ld().TRAVEL_CAP_MS;
         if (raw.length) log('remaining travel (raw): ' + raw.join(', '));
-        ld().mark(r, 'arrive').sentAt = deadline;
-        st().save();
         st().go(S.RunStep.Jump, n + ' general(s) departed');
     }
 
@@ -509,12 +489,15 @@
             }
             if (pm.seen) {
                 // Free population may update after the buff stock does; it
-                // gets a settle time, from the send or from a Resume.
-                if (now() - Math.max(pm.sentAt, r.since) < ld().MARK_SETTLE_MS) return;
+                // gets the wait of an order, from the send or from a Resume.
+                if (now() - Math.max(pm.sentAt, r.since) < ld().ORDER_WAIT_MS) {
+                    ld().waitSent(r, 'population buff');
+                    return;
+                }
                 st().pause(S.RunPause.RetrainFailed, 'population buff verified but free population did not rise');
                 return;
             }
-            var s = ld().staleMark(r, 'population', ld().MARK_SETTLE_MS);
+            var s = ld().staleMark(r, 'population', 'population buff');
             if (s === 'wait') return;
             if (s === 'stale') {
                 st().pause(S.RunPause.NotObserved,
@@ -553,7 +536,8 @@
 
     // Orders every missing unit in its own queue (barracks or elite
     // barracks). An order whose units reached the queue drops out of the
-    // recomputed plan, and its mark with it.
+    // recomputed plan, and its mark with it. A verified order keeps its mark
+    // until then, so a queue that lags gets no second order.
     function retrain(r, inv) {
         var RS = S.RunStep;
         var m = missing(r, inv);
@@ -577,11 +561,11 @@
         }
         for (i = 0; i < m.orders.length; i++) {
             var u = m.orders[i].unit;
-            var s = ld().staleMark(r, ORDER + u, ld().MARK_SETTLE_MS);
+            var s = ld().staleMark(r, ORDER + u, 'order of ' + u, { seen: true });
             if (s === 'wait') return;
             if (s === 'stale') {
                 st().pause(S.RunPause.NotObserved, 'order of ' + u +
-                    ' sent before a reload is not seen in the queue; check the barracks, then Resume');
+                    ' sent but not seen in the queue; check the barracks, then Resume');
                 return;
             }
         }
@@ -598,9 +582,7 @@
     function orderOne(r, round, o) {
         var name = ORDER + o.unit;
         ld().attempt(round, name, ld().wrapSend(r, name, S.core.production.order(o.unit, o.count)),
-            function (result, cur) {
-                if (result.status === S.ActionResult.Verified) ld().dropMark(cur, name);
-            });
+            ld().seenOnVerified(name));
     }
 
     // Counts the run and starts the next one at Muster, or ends the series.
@@ -657,9 +639,9 @@
     }
 
     // One home step of the running run. Holds (no send, no pause) while
-    // another zone is viewed or the specialist list lost entries, because
-    // the steps read a general absent from the list as a fact. A throw
-    // leaves the step as it is for the next call.
+    // another zone is viewed or the specialist list lost entries or cannot
+    // be read, because the steps read a general absent from the list as a
+    // fact. A throw leaves the step as it is for the next call.
     function plan() {
         var r = st().run();
         if (!r || r.status !== S.RunStatus.Running) return;
@@ -679,8 +661,6 @@
 
     S.modules.adventures.home = {
         GAP_MS:                 GAP_MS,
-        GATHER_CAP_MS:          GATHER_CAP_MS,
-        MAP_OPEN_MS:            MAP_OPEN_MS,
         PRODUCTION_WAIT_MAX_MS: PRODUCTION_WAIT_MAX_MS,
         plan:                   plan
     };

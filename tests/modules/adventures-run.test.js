@@ -24,6 +24,10 @@ var LOADOUT = W.LOADOUT;
 var WAVE = 'C:/b/w1.txt';
 var KEYS = { '1.1': true, '1.2': true };
 
+// A wait with no limit is held far past every limit it used to have.
+var LONG_MS = 3600000;
+var PASS_MS = 10000;
+
 var plain = W.plain;
 var writeJson = W.writeJson;
 var tick = W.tick;
@@ -149,6 +153,22 @@ function drive(w, o) {
 
 function at(name) {
     return function (w, n) { return n === name; };
+}
+
+// Passes over this much clock, each with its queue played, so an order sent
+// during a wait reaches the world and its count.
+function passesFor(w, ms) {
+    var end = w.t + ms;
+    while (w.t < end) {
+        W.ticksFor(w, Math.min(PASS_MS, end - w.t));
+        play(w);
+    }
+}
+
+// The wait the run menu names.
+function waiting(w, re) {
+    var b = w.st.current().busy;
+    assert.ok(b && re.test(b.text), b ? b.text : 'no wait');
 }
 
 function assertStep(w, name) {
@@ -316,25 +336,20 @@ t.test('series: x2 from home runs every step once, in order, with no pause; map 
 
 // ---- 2. Muster ------------------------------------------------------------------
 
-t.test('Muster: a general on another zone waits, then pauses GeneralMissing past GATHER_CAP_MS and the grace', function () {
+t.test('Muster: a general on another zone waits with no limit, named, and goes on once he is home', function () {
     var w = homeWorld();
     w.lists[HOME].splice(w.lists[HOME].indexOf(w.g2), 1);
     w.place(w.g2, 9);
-    var r = series(w);
-    var cap = w.S.modules.adventures.home.GATHER_CAP_MS;
+    series(w);
     tick(w);
-    w.t = r.since + cap;
-    tick(w);
+    W.ticksFor(w, LONG_MS);
     assertStep(w, 'Muster');
-    w.t += 1;
+    waiting(w, /1\.2 not here yet/);
+    assert.ok(logged(w, /1\.2 not here yet, waited 60 min/), 'the wait is logged');
+    w.lists[9].length = 0;
+    w.place(w.g2, HOME);
     tick(w);
-    assertStep(w, 'Muster');
-    W.ticksFor(w, w.S.modules.adventures.loader.MISSING_GRACE_MS - 1);
-    assertStep(w, 'Muster');
-    w.t += 1;
-    tick(w);
-    assertPaused(w, w.S.RunPause.GeneralMissing, /1\.2 is not on the home island/);
-    assert.strictEqual(w.st.run().pause.general, '1.2');
+    assertStep(w, 'Validate');
 });
 
 t.test('Muster: a busy general never pauses', function () {
@@ -343,7 +358,7 @@ t.test('Muster: a busy general never pauses', function () {
     w.g2.state.task = { type: w.code.move, remaining: 5000 };
     tick(w);
     assert.ok(logged(w, /Bert \(1\.2\) busy, waited 0 min, remaining 5000/), 'the busy general is logged');
-    w.t = r.since + w.S.modules.adventures.home.GATHER_CAP_MS * 3;
+    w.t = r.since + LONG_MS;
     tick(w);
     assertStep(w, 'Muster');
     w.g2.state.task = null;
@@ -358,23 +373,24 @@ t.test('Muster: generals home and idle go on to Validate', function () {
     assertStep(w, 'Validate');
 });
 
-t.test('gather: one unreadable list after a long busy wait holds and does not pause', function () {
+t.test('gather: one unreadable list after a long busy wait keeps the wait and does not pause', function () {
     var w = homeWorld();
     series(w);
     w.g2.state.task = { type: w.code.move };
     tick(w);
-    w.t += w.S.modules.adventures.home.GATHER_CAP_MS * 2;
+    w.t += LONG_MS;
     tick(w);
     var zone = w.gi.mCurrentPlayerZone;
     var list = zone.GetSpecialists_vector;
     zone.GetSpecialists_vector = function () { return null; };
     tick(w);
     assertStep(w, 'Muster');
-    assert.strictEqual(typeof w.st.run().waitUntil, 'number', 'the hold has its own window');
+    waiting(w, /Bert \(1\.2\) busy/);
+    assert.strictEqual(w.st.run().waitUntil, null, 'a read wait has no window');
     zone.GetSpecialists_vector = list;
     tick(w);
     assertStep(w, 'Muster');
-    assert.strictEqual(w.st.run().waitUntil, null, 'a clean read ends the hold');
+    waiting(w, /Bert \(1\.2\) busy/);
     w.g2.state.task = null;
     tick(w);
     assertStep(w, 'Validate');
@@ -409,20 +425,22 @@ t.test('Snapshot: total plus queued per loadout unit; units outside the loadout 
     assert.ok(logged(w, /snapshot: /));
 });
 
-t.test('Snapshot: held while the queue is unreadable, NotObserved after READ_MAX_MS', function () {
+t.test('Snapshot: held with no limit while the queue is unreadable, counted once it reads', function () {
     var w = homeWorld();
-    w.gi.mCurrentPlayerZone.GetProductionQueue = function () { return null; };
-    var r = series(w, { step: w.S.RunStep.Snapshot });
+    var zone = w.gi.mCurrentPlayerZone;
+    var queue = zone.GetProductionQueue;
+    zone.GetProductionQueue = function () { return null; };
+    series(w, { step: w.S.RunStep.Snapshot });
     tick(w);
     assertStep(w, 'Snapshot');
-    assert.strictEqual(w.st.run().snapshot, null);
-    w.t = r.since + w.S.modules.adventures.loader.READ_MAX_MS;
-    tick(w);
+    W.ticksFor(w, LONG_MS);
     assertStep(w, 'Snapshot');
-    w.t += 1;
-    tick(w);
-    assertPaused(w, w.S.RunPause.NotObserved, /production queue of Rifle not readable/);
+    waiting(w, /production queue of Rifle not readable/);
     assert.strictEqual(w.st.run().snapshot, null);
+    zone.GetProductionQueue = queue;
+    tick(w);
+    assertStep(w, 'Supply');
+    assert.ok(w.st.run().snapshot, 'counted');
 });
 
 // ---- 5. Home load ---------------------------------------------------------------
@@ -543,7 +561,7 @@ t.test('StartMap: a reload after the send and before the verify sends no second 
 
 // ---- 7. Depart ------------------------------------------------------------------
 
-t.test('Depart: one sendToZone per general, then Jump with the arrival deadline', function () {
+t.test('Depart: one sendToZone per general, then Jump with no arrival deadline', function () {
     var w = homeWorld({ mapOpen: true });
     series(w, { step: w.S.RunStep.Depart, zoneId: ZONE });
     var passes = drive(w, { until: at('Jump') });
@@ -552,8 +570,7 @@ t.test('Depart: one sendToZone per general, then Jump with the arrival deadline'
     assert.strictEqual(sendsOf(w, '1.1').length, 1);
     assert.strictEqual(sendsOf(w, '1.2').length, 1);
     assert.strictEqual(w.zoneSends[0].zoneId, ZONE);
-    var arrive = w.st.run().marks.arrive;
-    assert.ok(arrive && typeof arrive.sentAt === 'number', 'the arrival deadline travels in the arrive mark');
+    assert.strictEqual(w.st.run().marks.arrive, undefined, 'travel time sets no deadline');
 });
 
 t.test('Depart: a reload mid-send sends no second sendToZone', function () {
@@ -634,7 +651,7 @@ t.test('Depart: three generals ready one at a time never pause', function () {
     });
 });
 
-t.test('Depart: a verified send that never shows still pauses after MAX_ROUNDS', function () {
+t.test('Depart: a verified send that never shows stays one send and pauses NotObserved after ORDER_WAIT_MS', function () {
     var w = homeWorld({ mapOpen: true });
     series(w, { step: w.S.RunStep.Depart, zoneId: ZONE });
     // The send verified, then a later read shows him at home and idle.
@@ -645,18 +662,21 @@ t.test('Depart: a verified send that never shows still pauses after MAX_ROUNDS',
         g.state.task = null;
         g.state.travelling = false;
     }
-    for (var i = 0; i < 2; i++) {
-        tick(w);
-        play(w);
-        back(w.g1);
-        back(w.g2);
-        w.t += loaderOf(w).READ_LAG_MS;
-    }
     tick(w);
-    assertPaused(w, w.S.RunPause.NotObserved, /departure verified but not observed after 2 rounds/);
-    assert.strictEqual(w.st.run().rounds, 2);
-    assert.strictEqual(sendsOf(w, '1.1').length, 2);
-    assert.strictEqual(sendsOf(w, '1.2').length, 2);
+    play(w);
+    back(w.g1);
+    back(w.g2);
+    var end = w.st.run().marks['depart:1.1'].sentAt + loaderOf(w).ORDER_WAIT_MS;
+    passesFor(w, end - 1 - w.t);
+    assertStep(w, 'Depart');
+    waiting(w, /departure of 1\.1 sent, waiting to see it/);
+    w.t = end;
+    tick(w);
+    assertPaused(w, w.S.RunPause.NotObserved, /departure of 1\.1 sent but not seen/);
+    assert.strictEqual(w.st.run().pause.general, '1.1');
+    assert.strictEqual(w.st.run().rounds, 0);
+    assert.strictEqual(sendsOf(w, '1.1').length, 1);
+    assert.strictEqual(sendsOf(w, '1.2').length, 1);
 });
 
 t.test('Depart: a failed send still pauses DepartFailed while another general is ready', function () {
@@ -682,27 +702,36 @@ t.test('Depart: a failed send still pauses DepartFailed while another general is
 
 // ---- 8. Jump and Arrive -----------------------------------------------------------
 
-t.test('Jump: a zone that does not load is visited once more, then JumpFailed after 2 x JUMP_MS', function () {
+t.test('Jump: a zone that does not load is visited again at JUMP_MS, then JUMP_RETRY_MS; only a gone adventure pauses', function () {
     var w = homeWorld({ mapOpen: true });
-    var JUMP_MS = w.S.modules.adventures.away.JUMP_MS;
+    var away = w.S.modules.adventures.away;
     w.auto.visit = false;
     series(w, { step: w.S.RunStep.Jump, zoneId: ZONE });
     tick(w);
     assert.strictEqual(w.visits.length, 1);
-    w.t += JUMP_MS;
+    w.t += away.JUMP_MS;
     tick(w);
     assert.strictEqual(w.visits.length, 1);
     w.t += 1;
     tick(w);
     assert.strictEqual(w.visits.length, 2);
     assert.ok(logged(w, /visiting again/));
-    w.t += JUMP_MS;
+    w.t += away.JUMP_RETRY_MS;
     tick(w);
+    assert.strictEqual(w.visits.length, 2);
+    w.t += 1;
+    tick(w);
+    assert.strictEqual(w.visits.length, 3);
+    W.ticksFor(w, LONG_MS);
+    assertStep(w, 'Jump');
+    waiting(w, /zone 7 not loaded/);
+    w.adventures = [];
+    tick(w);
+    W.ticksFor(w, loaderOf(w).MISSING_GRACE_MS - 1);
     assertStep(w, 'Jump');
     w.t += 1;
     tick(w);
-    assertPaused(w, w.S.RunPause.JumpFailed, /did not load/);
-    assert.strictEqual(w.visits.length, 2);
+    assertPaused(w, w.S.RunPause.JumpFailed, /adventure no longer open/);
 });
 
 t.test('Jump: a zone that loads goes on to Arrive', function () {
@@ -726,21 +755,19 @@ t.test('Arrive: waits per general key, not by count', function () {
     assertStep(w, 'StarAll');
 });
 
-t.test('Arrive: a general still missing past the stored deadline pauses GeneralMissing after the grace', function () {
+t.test('Arrive: a general still missing waits with no limit, past a stale arrive mark, and goes on once he is here', function () {
     var w = homeWorld();
     onIsland(w, [w.g1]);
     var r = series(w, { step: w.S.RunStep.Arrive, zoneId: ZONE });
     r.marks.arrive = { sentAt: w.t + 5000, seen: false, sentOnce: false };
     tick(w);
     assertStep(w, 'Arrive');
-    w.t += 5001;
-    tick(w);
+    W.ticksFor(w, LONG_MS);
     assertStep(w, 'Arrive');
-    W.ticksFor(w, w.S.modules.adventures.loader.MISSING_GRACE_MS - 1);
-    assertStep(w, 'Arrive');
-    w.t += 1;
+    waiting(w, /1\.2 not here yet/);
+    w.place(w.g2, ZONE);
     tick(w);
-    assertPaused(w, w.S.RunPause.GeneralMissing, /1\.2 did not arrive/);
+    assertStep(w, 'StarAll');
 });
 
 t.test('Arrive: a listed busy general far past the deadline stays Running, then goes to StarAll', function () {
@@ -751,7 +778,7 @@ t.test('Arrive: a listed busy general far past the deadline stays Running, then 
     var r = series(w, { step: w.S.RunStep.Arrive, zoneId: ZONE });
     r.marks.arrive = { sentAt: w.t + 5000, seen: false, sentOnce: false };
     tick(w);
-    w.t += loaderOf(w).TRAVEL_CAP_MS * 2;
+    w.t += LONG_MS;
     tick(w);
     assertStep(w, 'Arrive');
     w.arrive();
@@ -759,39 +786,37 @@ t.test('Arrive: a listed busy general far past the deadline stays Running, then 
     assertStep(w, 'StarAll');
 });
 
-t.test('Arrive: a missing general next to a busy one still pauses GeneralMissing past the deadline', function () {
+t.test('Arrive: a missing general next to a busy one waits with no limit and the wait names him', function () {
     var w = homeWorld();
     onIsland(w, [w.g1]);
     w.g1.state.task = { type: w.code.move };
     var r = series(w, { step: w.S.RunStep.Arrive, zoneId: ZONE });
     r.marks.arrive = { sentAt: w.t + 5000, seen: false, sentOnce: false };
     tick(w);
-    w.t += 5001;
-    tick(w);
+    W.ticksFor(w, LONG_MS);
     assertStep(w, 'Arrive');
-    W.ticksFor(w, loaderOf(w).MISSING_GRACE_MS - 1);
-    assertStep(w, 'Arrive');
-    w.t += 1;
+    waiting(w, /1\.2 not here yet/);
+    w.g1.state.task = null;
+    w.place(w.g2, ZONE);
     tick(w);
-    assertPaused(w, w.S.RunPause.GeneralMissing, /1\.2 did not arrive/);
+    assertStep(w, 'StarAll');
 });
 
-t.test('Arrive: nothing busy, armies unreadable past the deadline holds READ_MAX_MS, then NotObserved', function () {
+t.test('Arrive: nothing busy, armies unreadable holds with no limit and goes on once they read', function () {
     var w = homeWorld();
     onIsland(w);
-    w.H.host.game.zone.GetArmy = function () { return null; };
+    var zone = w.H.host.game.zone;
+    var army = zone.GetArmy;
+    zone.GetArmy = function () { return null; };
     var r = series(w, { step: w.S.RunStep.Arrive, zoneId: ZONE });
     r.marks.arrive = { sentAt: w.t + 5000, seen: false, sentOnce: false };
     tick(w);
-    w.t += 5001;
-    tick(w);
+    W.ticksFor(w, LONG_MS);
     assertStep(w, 'Arrive');
-    w.t += loaderOf(w).READ_MAX_MS;
+    waiting(w, /armies not readable/);
+    zone.GetArmy = army;
     tick(w);
-    assertStep(w, 'Arrive');
-    w.t += 1;
-    tick(w);
-    assertPaused(w, w.S.RunPause.NotObserved, /generals arrived but their armies are not readable/);
+    assertStep(w, 'StarAll');
 });
 
 // ---- 9. StarAll -----------------------------------------------------------------
@@ -828,18 +853,22 @@ t.test('StarAll: a general that keeps its army at the star pauses StarFailed or 
         r.pause.reason + ': ' + r.pause.message);
 });
 
-t.test('StarAll: an unlisted general with an unreadable inventory is not counted as starred (M1)', function () {
+t.test('StarAll: an unlisted general with an unreadable inventory is not counted as starred and holds with no limit (M1)', function () {
     var w = homeWorld();
     w.g1.state.grid = 0;
     onIsland(w, [w.g1]);
-    w.H.host.game.zone.GetArmy = function () { return null; };
-    var r = series(w, { step: w.S.RunStep.StarAll, zoneId: ZONE });
+    var zone = w.H.host.game.zone;
+    var army = zone.GetArmy;
+    zone.GetArmy = function () { return null; };
+    series(w, { step: w.S.RunStep.StarAll, zoneId: ZONE });
     tick(w);
+    W.ticksFor(w, LONG_MS);
     assertStep(w, 'StarAll');
-    w.t = r.since + w.S.modules.adventures.loader.READ_MAX_MS + 1;
-    tick(w);
-    assertPaused(w, w.S.RunPause.NotObserved, /generals not readable/);
+    waiting(w, /generals not readable/);
     assert.strictEqual(w.orders.filter(function (o) { return o.code === w.code.star; }).length, 0);
+    zone.GetArmy = army;
+    tick(w);
+    assertStep(w, 'Horseshoe');
 });
 
 // ---- 10. Horseshoe ----------------------------------------------------------------
@@ -909,6 +938,11 @@ t.test('watcher: claims nothing while home is viewed', function () {
 
 // ---- 12. Clear --------------------------------------------------------------------
 
+// The pause text of Clear for a limit read from the module.
+function timeoutText(limit) {
+    return new RegExp('last quest not finished after ' + Math.round(limit / 60000) + ' min');
+}
+
 t.test('Clear: waits for the last quest and idle generals; a camp still standing only warns', function () {
     var w = homeWorld();
     // Nothing left to pack, so the clear map goes on to the last quest.
@@ -926,16 +960,18 @@ t.test('Clear: waits for the last quest and idle generals; a camp still standing
     assert.ok(logged(w, /camps still standing after the last quest: 100, 200/, 'warn'));
 });
 
-t.test('Clear: ClearTimeout after CLEAR_MAX_MS', function () {
+t.test('Clear: ClearTimeout after CLEAR_MAX_MS of quiet', function () {
     var w = homeWorld();
+    var limit = w.S.modules.adventures.away.CLEAR_MAX_MS;
     onIsland(w);
-    var r = series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
-    w.t = r.since + w.S.modules.adventures.away.CLEAR_MAX_MS;
+    series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
     tick(w);
+    W.ticksFor(w, limit - 1);
     assertStep(w, 'Clear');
+    waiting(w, /last quest not finished, \d+ of \d+ min quiet/);
     w.t += 1;
     tick(w);
-    assertPaused(w, w.S.RunPause.ClearTimeout, /last quest not finished after 30 min/);
+    assertPaused(w, w.S.RunPause.ClearTimeout, timeoutText(limit));
 });
 
 t.test('Clear: quest done, a general busy far past CLEAR_MAX_MS stays Running', function () {
@@ -954,30 +990,43 @@ t.test('Clear: quest done, a general busy far past CLEAR_MAX_MS stays Running', 
     assertStep(w, 'LastQuest');
 });
 
-t.test('Clear: last quest unfinished still pauses ClearTimeout', function () {
+t.test('Clear: a running battle is not quiet time; the quest unfinished pauses ClearTimeout after it', function () {
     var w = homeWorld();
+    var limit = w.S.modules.adventures.away.CLEAR_MAX_MS;
     onIsland(w, null, {});
-    var r = series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
+    series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
     w.g1.state.task = { type: w.code.attack };
-    w.t = r.since + w.S.modules.adventures.away.CLEAR_MAX_MS + 1;
     tick(w);
-    assertPaused(w, w.S.RunPause.ClearTimeout, /last quest not finished after 30 min/);
-});
-
-t.test('Clear: a null quest list past CLEAR_MAX_MS holds, then NotObserved', function () {
-    var w = homeWorld();
-    onIsland(w, null, {});
-    var r = series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
-    w.quests = null;
-    w.t = r.since + w.S.modules.adventures.away.CLEAR_MAX_MS + 1;
-    tick(w);
+    W.ticksFor(w, limit * 3);
     assertStep(w, 'Clear');
-    w.t += loaderOf(w).READ_MAX_MS;
+    waiting(w, /last quest not finished, 0 of \d+ min quiet/);
+    w.g1.state.task = null;
     tick(w);
+    W.ticksFor(w, limit - 1);
     assertStep(w, 'Clear');
     w.t += 1;
     tick(w);
-    assertPaused(w, w.S.RunPause.NotObserved, /quest list not readable after 60 s/);
+    assertPaused(w, w.S.RunPause.ClearTimeout, timeoutText(limit));
+});
+
+t.test('Clear: a null quest list holds with no limit and is not quiet time', function () {
+    var w = homeWorld();
+    var limit = w.S.modules.adventures.away.CLEAR_MAX_MS;
+    onIsland(w, null, {});
+    series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
+    var quests = w.quests;
+    w.quests = null;
+    tick(w);
+    W.ticksFor(w, limit * 3);
+    assertStep(w, 'Clear');
+    waiting(w, /quest list not readable/);
+    w.quests = quests;
+    tick(w);
+    W.ticksFor(w, limit - 1);
+    assertStep(w, 'Clear');
+    w.t += 1;
+    tick(w);
+    assertPaused(w, w.S.RunPause.ClearTimeout, timeoutText(limit));
 });
 
 // An empty pool and a pool whose last quest was skipped as unreadable both
@@ -986,20 +1035,18 @@ t.test('Clear: a null quest list past CLEAR_MAX_MS holds, then NotObserved', fun
     { name: 'an empty list', quests: [] },
     { name: 'a list of other quests', quests: [{ key: 'q1', name: 'Side', finished: false, last: false }] }
 ].forEach(function (c) {
-    t.test('Clear: a list without the last quest holds, then NotObserved: ' + c.name, function () {
+    t.test('Clear: a list without the last quest waits CLEAR_MAX_MS of quiet, then NotObserved: ' + c.name, function () {
         var w = homeWorld();
         onIsland(w, null, {});
-        var r = series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
+        series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
         w.quests = c.quests;
-        w.t = r.since + w.S.modules.adventures.away.CLEAR_MAX_MS + 1;
         tick(w);
+        W.ticksFor(w, w.S.modules.adventures.away.CLEAR_MAX_MS - 1);
         assertStep(w, 'Clear');
-        w.t += loaderOf(w).READ_MAX_MS;
-        tick(w);
-        assertStep(w, 'Clear');
+        waiting(w, /last quest not listed, \d+ of \d+ min quiet/);
         w.t += 1;
         tick(w);
-        assertPaused(w, w.S.RunPause.NotObserved, /last quest not readable after 60 s/);
+        assertPaused(w, w.S.RunPause.NotObserved, /last quest not listed/);
     });
 });
 
@@ -1130,11 +1177,19 @@ t.test('PackStar: an occupied grid and a grid the client refuses are skipped', f
     assert.deepStrictEqual(moveText(w), ['1.1->501', '1.2->502']);
 });
 
-t.test('PackStar: no placeable grid pauses NotPlaceable; no move and no raise', function () {
+t.test('PackStar: no placeable grid and nobody on the map waits PLACE_QUIET_MS, then NotPlaceable; no move and no raise', function () {
     var w = packWorld();
     w.sent.placeable = 1;
-    series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: PACK_KEYS });
-    drive(w, { max: 20 });
+    // Without the carrier on its grid, so no holder can raise first.
+    series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: KEYS });
+    tick(w);
+    play(w);
+    passesFor(w, w.S.modules.adventures.away.PLACE_QUIET_MS - 1);
+    assertStep(w, 'PackStar');
+    waiting(w, /Anna \(1\.1\) has no placeable grid, \d+ of \d+ min quiet/);
+    assert.strictEqual(w.st.run().rounds, 0);
+    w.t += 1;
+    tick(w);
     assertPaused(w, w.S.RunPause.NotPlaceable, /Anna \(1\.1\) has no placeable grid/);
     assert.strictEqual(movesOf(w).length, 0);
     assert.deepStrictEqual(w.raises, []);
@@ -1256,18 +1311,19 @@ t.test('Clear: troops left after the first pack go back to PackStar once; a gene
     assert.strictEqual(countOf(w, 'Clear', 'LastQuest'), 1);
 });
 
-t.test('Clear: an unreadable free pool holds READ_MAX_MS, then pauses NotObserved', function () {
+t.test('Clear: an unreadable free pool holds with no limit and goes on once it reads', function () {
     var w = packWorld();
-    w.H.host.game.zone.GetArmy = function () { return null; };
+    var zone = w.H.host.game.zone;
+    var army = zone.GetArmy;
+    zone.GetArmy = function () { return null; };
     series(w, { step: w.S.RunStep.Clear, zoneId: ZONE, keys: PACK_KEYS });
     tick(w);
+    W.ticksFor(w, LONG_MS);
     assertStep(w, 'Clear');
-    w.t += w.S.modules.adventures.loader.READ_MAX_MS;
+    waiting(w, /free troops and armies not readable/);
+    zone.GetArmy = army;
     tick(w);
-    assertStep(w, 'Clear');
-    w.t += 1;
-    tick(w);
-    assertPaused(w, w.S.RunPause.NotObserved, /free troops and armies not readable/);
+    assertStep(w, 'PackStar');
 });
 
 t.test('LastQuest: claimed after Pack with allowLast, once across a reload', function () {
@@ -1331,19 +1387,34 @@ t.test('LastQuest: a failing claim pauses QuestFailed; home and Resume hold, the
     assert.strictEqual(w.closes.length, 0);
 });
 
-[['an empty', []], ['a null', null]].forEach(function (c) {
-    t.test('LastQuest: ' + c[0] + ' quest list on the island holds, then NotObserved; no claim, no close', function () {
-        var w = packWorld();
-        w.quests = c[1];
-        series(w, { step: w.S.RunStep.LastQuest, zoneId: ZONE, keys: PACK_KEYS });
-        tick(w);
-        assertStep(w, 'LastQuest');
-        w.t += w.S.modules.adventures.loader.READ_MAX_MS + 1;
-        tick(w);
-        assertPaused(w, w.S.RunPause.NotObserved, /last quest not readable or not listed/);
-        assert.strictEqual(w.claims.length, 0);
-        assert.strictEqual(w.closes.length, 0);
-    });
+t.test('LastQuest: an empty quest list on the island holds, then NotObserved; no claim, no close', function () {
+    var w = packWorld();
+    w.quests = [];
+    series(w, { step: w.S.RunStep.LastQuest, zoneId: ZONE, keys: PACK_KEYS });
+    tick(w);
+    assertStep(w, 'LastQuest');
+    w.t += w.S.modules.adventures.loader.READ_MAX_MS + 1;
+    tick(w);
+    assertPaused(w, w.S.RunPause.NotObserved, /last quest not readable or not listed/);
+    assert.strictEqual(w.claims.length, 0);
+    assert.strictEqual(w.closes.length, 0);
+});
+
+t.test('LastQuest: a null quest list on the island holds with no limit; no claim, no close, then one claim', function () {
+    var w = packWorld();
+    var quests = w.quests;
+    w.quests = null;
+    series(w, { step: w.S.RunStep.LastQuest, zoneId: ZONE, keys: PACK_KEYS });
+    tick(w);
+    passesFor(w, LONG_MS);
+    assertStep(w, 'LastQuest');
+    waiting(w, /quest list not readable/);
+    assert.strictEqual(w.claims.length, 0);
+    assert.strictEqual(w.closes.length, 0);
+    w.quests = quests;
+    drive(w, { until: at('Close') });
+    assertStep(w, 'Close');
+    assert.strictEqual(claimsOf(w, 'q9').length, 1);
 });
 
 // ---- 14. Close, Recall, JumpHome, ArriveHome ----------------------------------------
@@ -1481,7 +1552,7 @@ t.test('Population: stacks of 20+20 for a shortfall of 30 send 20, then 10', fun
     assert.ok(logged(w, /topped up 20/));
 });
 
-t.test('Population: a verified buff without a rise pauses RetrainFailed after one buff (M4)', function () {
+t.test('Population: a verified buff without a rise pauses RetrainFailed after one buff and ORDER_WAIT_MS (M4)', function () {
     var w = homeWorld({ free: { Rifle: 10 }, pop: 0, popNoEffect: true });
     twoStacks(w);
     series(w, { step: w.S.RunStep.Population, run: { snapshot: { Rifle: 40 } } });
@@ -1489,8 +1560,7 @@ t.test('Population: a verified buff without a rise pauses RetrainFailed after on
     assertPaused(w, w.S.RunPause.RetrainFailed, /verified but free population did not rise/);
     assert.deepStrictEqual(popBuffs(w), [20]);
     var r = w.st.run();
-    assert.ok(r.pause.at - r.marks.population.sentAt >= w.S.modules.adventures.loader.MARK_SETTLE_MS,
-        'paused only after the settle time');
+    assert.ok(r.pause.at - r.marks.population.sentAt >= loaderOf(w).ORDER_WAIT_MS, 'paused only after the wait');
 });
 
 t.test('Population: a joint resource shortage pauses RetrainShort with the full list; nothing is spent', function () {
@@ -1724,7 +1794,7 @@ t.test('Kernel pause: StartMap sends one map start and goes on once the map is l
     assert.strictEqual(mapStarts(w).length, 1);
 });
 
-t.test('Kernel pause: StartMap with the map withheld pauses NotObserved after MAP_OPEN_MS', function () {
+t.test('Kernel pause: StartMap with the map withheld pauses NotObserved after ORDER_WAIT_MS', function () {
     var w = homeWorld();
     w.auto.map = false;
     series(w, { step: w.S.RunStep.StartMap });
@@ -1735,7 +1805,7 @@ t.test('Kernel pause: StartMap with the map withheld pauses NotObserved after MA
     drive(w, { max: 200 });
     assertPaused(w, w.S.RunPause.NotObserved, /map start sent/);
     var r = w.st.run();
-    assert.ok(r.pause.at - r.marks.map.sentAt >= w.S.modules.adventures.home.MAP_OPEN_MS);
+    assert.ok(r.pause.at - r.marks.map.sentAt >= loaderOf(w).ORDER_WAIT_MS);
     assert.strictEqual(mapStarts(w).length, 1);
 });
 
@@ -1751,7 +1821,7 @@ t.test('Kernel pause: Population sends one buff and goes on once free population
     assert.deepStrictEqual(popBuffs(w), [6]);
 });
 
-t.test('Kernel pause: Population with the rise withheld pauses NotObserved after MARK_SETTLE_MS', function () {
+t.test('Kernel pause: Population with the rise withheld pauses NotObserved after ORDER_WAIT_MS', function () {
     var w = homeWorld({ free: { Rifle: 10 }, pop: 4, popNoEffect: true });
     series(w, { step: w.S.RunStep.Population, run: { snapshot: { Rifle: 20 } } });
     tick(w);
@@ -1761,7 +1831,7 @@ t.test('Kernel pause: Population with the rise withheld pauses NotObserved after
     drive(w, { max: 200 });
     assertPaused(w, w.S.RunPause.NotObserved, /population buff sent/);
     var r = w.st.run();
-    assert.ok(r.pause.at - r.marks.population.sentAt >= w.S.modules.adventures.loader.MARK_SETTLE_MS);
+    assert.ok(r.pause.at - r.marks.population.sentAt >= loaderOf(w).ORDER_WAIT_MS);
     assert.deepStrictEqual(popBuffs(w), [6]);
 });
 
@@ -1777,7 +1847,7 @@ t.test('Kernel pause: Retrain sends one order per unit and goes on once the queu
     assert.deepStrictEqual(ordersOf(w), ['Knight 4', 'Rifle 10']);
 });
 
-t.test('Kernel pause: Retrain with the queue withheld pauses NotObserved after MARK_SETTLE_MS', function () {
+t.test('Kernel pause: Retrain with the queue withheld pauses NotObserved after ORDER_WAIT_MS', function () {
     var w = homeWorld({ free: { Rifle: 10 } });
     var send = w.gi.mClientMessages.SendMessagetoServer;
     w.gi.mClientMessages.SendMessagetoServer = function (id, zone, data) {
@@ -1792,7 +1862,7 @@ t.test('Kernel pause: Retrain with the queue withheld pauses NotObserved after M
     drive(w, { max: 200 });
     assertPaused(w, w.S.RunPause.NotObserved, /order of Rifle/);
     var r = w.st.run();
-    assert.ok(r.pause.at - r.marks['order:Rifle'].sentAt >= w.S.modules.adventures.loader.MARK_SETTLE_MS);
+    assert.ok(r.pause.at - r.marks['order:Rifle'].sentAt >= loaderOf(w).ORDER_WAIT_MS);
     assert.deepStrictEqual(ordersOf(w), ['Rifle 10']);
 });
 
@@ -1866,16 +1936,32 @@ t.test('loader: anyAttacking is true only while an own fighter has an Attack tas
     assert.strictEqual(ld.anyAttacking(), false, 'the attack ended');
 });
 
-t.test('loader: waitRead holds before READ_MAX_MS and pauses NotObserved after it', function () {
+t.test('loader: waitRead holds with no limit, logs once a minute and keeps its since', function () {
     var w = homeWorld();
     var ld = loaderOf(w);
     var r = series(w);
-    w.t = r.since + ld.READ_MAX_MS;
+    var rs = w.st.current();
+    function lines() {
+        return w.H.logs().filter(function (l) { return /the thing not readable, waited/.test(l.args.join(' ')); }).length;
+    }
+    w.t = r.since + ld.READ_MAX_MS * 100;
+    var since = w.t;
     ld.waitRead(r, 'the thing');
-    assertStep(w, 'Muster');
+    waiting(w, /^the thing not readable$/);
+    assert.strictEqual(rs.busy.read, true);
+    assert.strictEqual(lines(), 0, 'a momentary read logs nothing');
+    w.t += ld.BUSY_LOG_MS - 1;
+    ld.waitRead(r, 'the thing');
+    assert.strictEqual(lines(), 0);
     w.t += 1;
     ld.waitRead(r, 'the thing');
-    assertPaused(w, w.S.RunPause.NotObserved, /the thing not readable after \d+ s/);
+    assert.strictEqual(lines(), 1);
+    w.t += ld.BUSY_LOG_MS;
+    ld.waitRead(r, 'the thing');
+    assert.strictEqual(lines(), 2);
+    assert.strictEqual(rs.busy.since, since);
+    assert.strictEqual(r.waitUntil, null, 'no window');
+    assertStep(w, 'Muster');
 });
 
 t.test('series: a malformed request count runs one run and ends Done', function () {
@@ -1988,7 +2074,7 @@ t.test('waitBusy: logs once a minute under a moved clock, shows the remaining ti
 t.test('waitBusy: go, pause and a pass without a wait clear the record; an absent field is tolerated', function () {
     var w = homeWorld();
     onIsland(w, null, {});
-    var r = series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
+    var r = series(w, { step: w.S.RunStep.Clear, zoneId: ZONE, run: { marks: plain(CLAIMED) } });
     var rs = w.st.current();
     var quest = lastQuest(w);
     quest.finished = true;
@@ -2004,11 +2090,18 @@ t.test('waitBusy: go, pause and a pass without a wait clear the record; an absen
     w.st.resume();
     tick(w);
     assert.ok(rs.busy, 'the wait began again');
-    quest.finished = false;
+    // Clear names a wait on every pass, so the pass with no wait is Close
+    // inside its settle window, once its read works again.
+    var open = w.adventures;
+    w.st.go(w.S.RunStep.Close, 'test');
+    w.adventures = null;
     tick(w);
-    assertStep(w, 'Clear');
+    assert.ok(rs.busy, 'a wait on Close');
+    w.adventures = open;
+    tick(w);
+    assertStep(w, 'Close');
     assert.strictEqual(rs.busy, null, 'a pass that no longer waits');
-    quest.finished = true;
+    w.st.go(w.S.RunStep.Clear, 'test');
     delete rs.busy;
     delete rs.busySeen;
     assert.strictEqual(w.st.waitsLong(r), true);

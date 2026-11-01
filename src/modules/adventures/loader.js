@@ -22,25 +22,31 @@
  * as run.lines) cover every order that must not go out twice: the marker
  * is written and saved before the packet goes out, so a reload right after
  * a send still knows it was sent. A marked attempt uses the mark name as
- * its round key. A mark sent but never seen is never sent again on its
- * own: it waits a settle time for the step's own observation and then the
- * step pauses until the user has looked.
+ * its round key. A marked order is never sent again on its own: the action's
+ * retry is off, and a mark sent but never seen waits ORDER_WAIT_MS for the
+ * step's own observation, after which the step pauses until the user has
+ * looked.
  *
  * The game may show a verified effect some seconds after the verify. A pass
  * can come right after a round ends, so a step that would count, retry or
- * pause on such a read waits READ_LAG_MS first. Only those paths wait; a
- * read that already shows the effect moves on at once.
+ * pause on such a read waits READ_LAG_MS first, and the last round of a step
+ * waits ORDER_WAIT_MS before it counts. Only those paths wait; a read that
+ * already shows the effect moves on at once.
  *
  * The per-general helpers that the home and away steps share (read waits,
- * loadout key order, names, the departure test) live here as well. waitBusy()
- * is the one wait for a general that is present and busy, and hold() the
- * deadline of a step that may already have waited a long time.
+ * loadout key order, names, the departure test) live here as well. A wait
+ * names what it waits for and has no limit of its own: waitBusy() is the one
+ * wait for a general or an order, and waitRead() the one for a read that
+ * failed. hold() is the deadline for a fact that only the user can fix.
+ * quietClock() sums the time of a wait that does end in a pause, counting only
+ * the passes that really watched the island.
  *
  * A specialist list that lost entries says nothing about what it does not
- * show. listHold() stops a step on such a read, missingLong() lets a general
- * that a clean read lacks stay gone for a while before anyone pauses, and
- * unreadable() tells a refusal over such a read from a real one. All three
- * work from memory only and survive no restart: a new client reads afresh.
+ * show. listHold() holds a step on such a read with no limit, missingLong()
+ * lets a general that a clean read lacks stay gone for a while before anyone
+ * pauses, and unreadable() tells a refusal over such a read from a real one.
+ * All three work from memory only and survive no restart: a new client reads
+ * afresh.
  *
  * A wave that is short may only look short: troops can sit with a general
  * who is fighting or walking, and they reach the pool when he is done. So the
@@ -61,14 +67,12 @@
     var MAX_ROUNDS        = 2;         // action rounds per step before a pause
     var MAX_UNLOAD_CYCLES = 2;         // Supply -> Unload -> Supply cycles per load at home
     var READ_LAG_MS       = 10000;     // a verified effect may read this late; the old gap between two looks
-    var READ_MAX_MS       = 60000;     // an unreadable read pauses after this long
+    var READ_MAX_MS       = 60000;     // a hold pauses after this long
     var MISSING_GRACE_MS  = READ_MAX_MS;  // a general stays gone this long before a pause
-    var MISSING_GAP_MS    = 30000;     // a longer silence restarts the two windows above
-    var MARK_SETTLE_MS    = 30000;     // a sent, unseen mark waits this long for its effect
-    var REMAINING_MAX_MS  = 3600000;   // clamp of one remaining-time reading
-    var TRAVEL_SLACK_MS   = 300000;    // the game's remaining time runs short; this only guards a general not listed when the travel ends
-    var TRAVEL_CAP_MS     = 1800000;   // travel wait when no remaining time is readable
-    var BUSY_LOG_MS       = 60000;     // a busy wait logs this seldom
+    var MISSING_GAP_MS    = 30000;     // a longer silence restarts that grace and is not counted as watched time
+    var MARK_SETTLE_MS    = 30000;     // a step that closes the adventure waits this long before it sends
+    var ORDER_WAIT_MS     = 180000;    // a marked order or a last round waits this long to show its effect
+    var BUSY_LOG_MS       = 60000;     // a wait logs this seldom
 
     var CATEGORY = 'adventures';
 
@@ -112,17 +116,9 @@
         return null;
     }
 
-    function notReadable(what) {
-        return what + ' not readable after ' + Math.round(READ_MAX_MS / 1000) + ' s';
-    }
-
-    // An unreadable read holds the step, and pauses NotObserved once the step
-    // has waited READ_MAX_MS since r.since.
-    function waitRead(r, what) {
-        if (now() - r.since > READ_MAX_MS) st().pause(S.RunPause.NotObserved, notReadable(what));
-    }
-
     // A hold on the step's own deadline (r.waitUntil), set on the first pass.
+    // Only for a fact that the user alone can fix: every other wait ends by
+    // itself, so it has no business with a deadline.
     function hold(r, text) {
         keepBusy();
         if (typeof r.waitUntil !== 'number') {
@@ -139,12 +135,6 @@
         st().save();
     }
 
-    // waitRead's wording on hold's window, for a step that may have waited a
-    // long time, where waitRead would pause on the first bad read.
-    function holdRead(r, what) {
-        hold(r, notReadable(what));
-    }
-
     // This pass says nothing about a busy wait (a read failed or lacks a
     // general), so it must not end it. Otherwise a read that flaps restarts the
     // record, logs every other pass and falls back to the fast polls.
@@ -152,8 +142,8 @@
         st().current().busySeen = true;
     }
 
-    // The one wait for a general that is present and busy: no limit, it ends
-    // when a pass no longer waits. It neither moves the step nor saves, so
+    // The one wait for a general or an order: no limit, it ends when a pass no
+    // longer waits. It neither moves the step nor saves, so
     // r.since stays put, the next pass does not read the wait as progress and
     // the run file is not rewritten each pass. One record per run and step: a
     // change of general keeps since and noted, so the log stays at one line a
@@ -169,6 +159,7 @@
         }
         b.key = key;
         b.text = text;
+        b.read = false;
         keepBusy();
         if (b.noted !== null && t - b.noted < BUSY_LOG_MS) return;
         b.noted = t;
@@ -179,35 +170,64 @@
             (typeof rem === 'number' ? ', remaining ' + rem + ' (raw)' : ''));
     }
 
-    // Holds the step on a read that lost entries, and pauses NotObserved once
-    // such reads have gone on for READ_MAX_MS. Measured from the first bad
-    // read and not from r.since, so a step that has run for a while is not
-    // paused by one bad tick. Plan calls stop while another zone is viewed or
-    // the kernel is paused, so bad reads further than MISSING_GAP_MS apart
-    // are separate events and start a new window. The pause clears the window
-    // so a Resume gets a fresh one. Sends nothing and saves nothing.
-    function listHold(r, inv) {
+    // A read that failed holds the step with no limit: the wait is the read
+    // itself, and only a good read can tell what to do next. No save and no
+    // step change. Reads are mostly momentary, so a new record holds its first
+    // log line back for BUSY_LOG_MS, and a passing bad read leaves a busy text
+    // and its since alone. A read that stays bad takes the record over, because
+    // the menu must name the real cause and the log must keep its line a
+    // minute; since stays, and a later real wait restores its text. The shared
+    // noted keeps the log to one line a minute across those changes.
+    function waitRead(r, what) {
+        var text = what + ' not readable';
         var rs = st().current();
-        if (!inv || inv.listOk !== false) {
-            rs.listBadSince = null;
-            rs.listBadLast = null;
-            return false;
-        }
-        keepBusy();
         var t = now();
-        if (typeof rs.listBadSince !== 'number' || t - rs.listBadLast > MISSING_GAP_MS) {
-            rs.listBadSince = t;
-            rs.listBadLast = t;
-            return true;
+        var b = rs.busy;
+        if (!b || b.runId !== r.id || b.step !== r.step) {
+            rs.busy = { runId: r.id, step: r.step, key: null, text: text, since: t, noted: t, read: true };
+            keepBusy();
+            return;
         }
-        rs.listBadLast = t;
-        if (t - rs.listBadSince > READ_MAX_MS) {
-            rs.listBadSince = null;
-            rs.listBadLast = null;
-            st().pause(S.RunPause.NotObserved, 'specialist list incomplete for ' +
-                Math.round(READ_MAX_MS / 1000) + ' s');
+        if (!b.read && t - b.noted < BUSY_LOG_MS) {
+            keepBusy();
+            return;
         }
+        waitBusy(r, null, text);
+        rs.busy.read = true;
+    }
+
+    // The one wording of an order that went out and waits for its effect.
+    function waitSent(r, what) {
+        waitBusy(r, null, what + ' sent, waiting to see it');
+    }
+
+    // Holds the step, with no limit, on a read that lost entries or found no
+    // list at all: either way absence means nothing, so no step may act on it.
+    // Sends nothing and saves nothing.
+    function listHold(r, inv) {
+        if (!inv || (inv.listOk !== false && inv.listRead !== false)) return false;
+        waitRead(r, inv.listRead === false ? 'specialist list' : 'complete specialist list');
         return true;
+    }
+
+    // Summed time of a wait that ends in a pause, from rs.quiet: { ms, gap }.
+    // ms grows only while quiet is true. Passes stop while another zone is
+    // viewed, so a bare difference would count that time and pause on the
+    // return; a silence over MISSING_GAP_MS is reported as gap and not counted.
+    // A new step starts a new record, and its first pass is a gap too. Memory
+    // only: a restart gives a fresh window, which errs to waiting.
+    function quietClock(r, quiet) {
+        var rs = st().current();
+        var t = now();
+        var q = rs.quiet;
+        if (!q || q.since !== r.since) {
+            rs.quiet = { since: r.since, last: t, ms: 0 };
+            return { ms: 0, gap: true };
+        }
+        var gap = t - q.last > MISSING_GAP_MS;
+        if (quiet && !gap) q.ms += t - q.last;
+        q.last = t;
+        return { ms: q.ms, gap: gap };
     }
 
     // Whether a general that a read lacks has now been gone long enough to
@@ -363,11 +383,13 @@
 
     // First Refused or Failed result: { key, status, reason } or null. An
     // unreadable refusal is no failure: its round counts as one without
-    // effect, which settleRound and roundsExhausted bound.
+    // effect, which settleRound and roundsExhausted bound. A marked order that
+    // was not observed in time is none either: nothing refused it, and the
+    // mark decides how long it may still show.
     function firstFailure(round) {
         for (var k in round.expected) {
             if (!has(round.expected, k) || !has(round.results, k)) continue;
-            if (unreadable(round.results[k])) continue;
+            if (unreadable(round.results[k]) || round.results[k].unseen) continue;
             if (round.results[k].status !== S.ActionResult.Verified) {
                 return { key: k, status: round.results[k].status, reason: round.results[k].reason };
             }
@@ -382,14 +404,19 @@
     // onDone for an attempt of this round. The result counts only while the
     // round is still the current one of the same run and the zone it was
     // started on is viewed; a result that spans a zone change says nothing
-    // about the zone the step observes.
+    // about the zone the step observes. unseen stays only on a marked round:
+    // the mark is what bounds its wait. Without one nothing would end it, and a
+    // raise never seen would read as packed and go out again for ever, so an
+    // unmarked round keeps its failure.
     function record(round, key, after) {
         return function (result) {
             var rs = st().current();
             var r = rs.run;
             if (rs.round !== round || !r || r.id !== round.runId) return;
             if (S.core.zone.id() !== round.zoneId) return;
-            round.results[key] = { status: result.status, reason: result.reason || '' };
+            var stored = { status: result.status, reason: result.reason || '' };
+            if (result.unseen === true && marked(r, key)) stored.unseen = true;
+            round.results[key] = stored;
             // A later attempt added to this round writes this again when it ends.
             if (complete(round)) round.doneAt = now();
             if (after) after(result, r);
@@ -425,16 +452,23 @@
     // Shared round handling of an acting step. Returns 'new' when the caller
     // should start a new round, 'paused' when it paused, 'wait' while a round
     // without failure may still show its effect late: counting it now could
-    // send the same order twice or end in a false rounds pause. A failed round
-    // has no effect to wait for and pauses at once.
+    // send the same order twice or end in a false rounds pause. The round that
+    // would end the step waits ORDER_WAIT_MS in the same way. A failed round
+    // has no effect to wait for and pauses at once. doneAt is memory, so a
+    // restart forgets the wait together with the round and the step re-plans.
     function settleRound(r, step, onFailure, what) {
         dropOrphan(r);
         var round = currentRound(r, step);
         if (!round || !complete(round)) return 'new';     // none yet, or dropped above
-        if (!firstFailure(round) && roundSettling(round)) return 'wait';
+        var f = firstFailure(round);
+        if (!f && roundSettling(round)) return 'wait';
+        if (!f && r.rounds + 1 >= MAX_ROUNDS && typeof round.doneAt === 'number' &&
+                now() - round.doneAt < ORDER_WAIT_MS) {
+            waitSent(r, what);
+            return 'wait';
+        }
         r.rounds++;
         st().save();
-        var f = firstFailure(round);
         if (f) {
             onFailure(f);
             return 'paused';
@@ -491,6 +525,28 @@
         return { ok: true, lines: ld.lines };
     }
 
+    // Grids of the attack and buff targets of the waves before end (all waves
+    // without it), deduped, with a label. A file that no longer loads adds
+    // nothing.
+    function campsOf(r, end) {
+        var out = [];
+        var seenGrid = {};
+        var L = S.BattleLine;
+        var stop = typeof end === 'number' ? Math.min(end, r.paths.length) : r.paths.length;
+        for (var i = 0; i < stop; i++) {
+            var f = S.core.battles.load(r.paths[i]);
+            if (!f || !f.ok) continue;
+            for (var j = 0; j < f.lines.length; j++) {
+                var l = f.lines[j];
+                if (l.kind !== L.Attack && l.kind !== L.Buff) continue;
+                if (typeof l.target !== 'number' || has(seenGrid, String(l.target))) continue;
+                seenGrid[String(l.target)] = true;
+                out.push({ grid: l.target, text: l.targetName ? l.targetName + ' (' + l.target + ')' : String(l.target) });
+            }
+        }
+        return out;
+    }
+
     // ---- Loading ------------------------------------------------------------
 
     // First supply line whose general's army differs or whose general is
@@ -533,10 +589,9 @@
     // turns busy again be waited for, instead of pausing on that one read.
     function holdShort(r, inv, steps, shortText) {
         if (!inv.ok) {
-            holdRead(r, 'troops');
+            waitRead(r, 'troops');
             return true;
         }
-        clearHold(r);
         var key = firstBusy(inv);
         if (key) {
             waitBusy(r, key, who(inv, key) + ' busy, troops short: ' + shortText);
@@ -731,6 +786,8 @@
     // def with its send wrapped: the mark is written and saved before the
     // packet goes out, so a reload right after the send still knows it went
     // out. Written on the current run only while it is still the same run.
+    // This is the one place for "must not go out twice", so the action's own
+    // retry goes off here: a slow effect would otherwise be sent again.
     function wrapSend(r, name, def) {
         if (!def || typeof def.send !== 'function') return def;
         var send = def.send;
@@ -746,22 +803,29 @@
             }
             return send(b);
         };
+        def.retries = 0;
         return def;
     }
 
     // Whether a mark sent but not seen blocks a new send: null when there is
-    // nothing to wait for (no mark, not sent, seen, or the current round that
-    // expects it decides through settleRound), 'wait' within settleMs of the
-    // send, 'stale' after it. An orphaned round is dropped first, so a send
-    // whose round was lost always waits and then goes stale; it is never
-    // sent again without a Resume.
-    function staleMark(r, name, settleMs) {
+    // nothing to wait for (no mark, not sent, seen, or the round that expects
+    // it failed and decides through settleRound), 'wait' for ORDER_WAIT_MS from
+    // the send, 'stale' after it. what names the order in the wait. opts.seen
+    // counts a seen mark too, for an order whose effect only a later read can
+    // show; a seen mark from before the step's start is not counted, because
+    // Resume keeps seen marks and must be able to send. An orphaned round is
+    // dropped first, so a send whose round was lost always waits and then goes
+    // stale; it is never sent again without a Resume.
+    function staleMark(r, name, what, opts) {
         dropOrphan(r);
         var rec = marked(r, name);
-        if (!rec || typeof rec.sentAt !== 'number' || rec.seen) return null;
+        if (!rec || typeof rec.sentAt !== 'number') return null;
+        if (rec.seen && !(opts && opts.seen && rec.sentAt >= r.since)) return null;
         var round = currentRound(r, r.step);
-        if (round && has(round.expected, name)) return null;
-        return now() - rec.sentAt < settleMs ? 'wait' : 'stale';
+        if (round && has(round.expected, name) && (!complete(round) || firstFailure(round))) return null;
+        if (now() - rec.sentAt >= ORDER_WAIT_MS) return 'stale';
+        waitSent(r, what);
+        return 'wait';
     }
 
     S.modules.adventures.loader = {
@@ -771,9 +835,7 @@
         READ_MAX_MS:       READ_MAX_MS,
         MISSING_GRACE_MS:  MISSING_GRACE_MS,
         MARK_SETTLE_MS:    MARK_SETTLE_MS,
-        REMAINING_MAX_MS:  REMAINING_MAX_MS,
-        TRAVEL_SLACK_MS:   TRAVEL_SLACK_MS,
-        TRAVEL_CAP_MS:     TRAVEL_CAP_MS,
+        ORDER_WAIT_MS:     ORDER_WAIT_MS,
         BUSY_LOG_MS:       BUSY_LOG_MS,
         now:               now,
         gen:               gen,
@@ -782,10 +844,11 @@
         waitRead:          waitRead,
         hold:              hold,
         clearHold:         clearHold,
-        holdRead:          holdRead,
         keepBusy:          keepBusy,
         waitBusy:          waitBusy,
+        waitSent:          waitSent,
         listHold:          listHold,
+        quietClock:        quietClock,
         missingLong:       missingLong,
         keysOf:            keysOf,
         who:               who,
@@ -808,6 +871,7 @@
         settleRound:       settleRound,
         dropShown:         dropShown,
         linesOf:           linesOf,
+        campsOf:           campsOf,
         firstMismatch:     firstMismatch,
         supply:            supply,
         unload:            unload,

@@ -287,3 +287,58 @@ t.test('the step handler is registered with the kernel queue', function () {
     });
     assert.strictEqual(replaced.length, 1);
 });
+
+// ---- retries: 0 (an order that must not go out twice) -----------------------
+
+t.test('retries 0 sends once and ends not observed with unseen', function () {
+    var b = boot();
+    var world = { sends: 0, done: false };
+    var r = run(b, def(world, { timeoutMs: 2 * gap(b), retries: 0 }));
+    assert.strictEqual(r.results.length, 1);
+    assert.strictEqual(r.results[0].status, b.S.ActionResult.Failed);
+    assert.strictEqual(r.results[0].sends, 1);
+    assert.strictEqual(r.results[0].unseen, true);
+    assert.strictEqual(r.results[0].reason, 'not observed within ' + (2 * gap(b)) + ' ms');
+    assert.strictEqual(world.sends, 1);
+});
+
+t.test('the default retry also ends unseen when never observed', function () {
+    var b = boot();
+    var world = { sends: 0, done: false };
+    var r = run(b, def(world, { timeoutMs: gap(b) }));
+    assert.strictEqual(r.results[0].status, b.S.ActionResult.Failed);
+    assert.strictEqual(r.results[0].unseen, true);
+    assert.strictEqual(world.sends, 2);
+});
+
+t.test('a verified result carries no unseen', function () {
+    var b = boot();
+    var world = { sends: 0, done: false };
+    var r = run(b, def(world, {
+        retries: 0,
+        send: function () { world.sends++; world.done = true; return true; }
+    }));
+    assert.strictEqual(r.results[0].status, b.S.ActionResult.Verified);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(r.results[0], 'unseen'), false);
+});
+
+t.test('a refused or send-failed result carries no unseen', function () {
+    var b = boot();
+    var world = { sends: 0 };
+    var refused = run(b, def(world, { retries: 0, precheck: function () { return 'busy'; } }));
+    assert.strictEqual(refused.results[0].status, b.S.ActionResult.Refused);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(refused.results[0], 'unseen'), false);
+    var failed = run(b, def(world, { retries: 0, send: function () { world.sends++; return false; } }));
+    assert.strictEqual(failed.results[0].status, b.S.ActionResult.Failed);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(failed.results[0], 'unseen'), false);
+});
+
+t.test('retries 0: a failed send ends Failed without a retry', function () {
+    var b = boot();
+    var world = { sends: 0 };
+    var r = run(b, def(world, { retries: 0, send: function () { world.sends++; return false; } }));
+    assert.strictEqual(r.results[0].status, b.S.ActionResult.Failed);
+    assert.strictEqual(r.results[0].reason, 'send failed');
+    assert.strictEqual(r.results[0].sends, 1);
+    assert.strictEqual(world.sends, 1);
+});

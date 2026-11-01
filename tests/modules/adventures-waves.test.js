@@ -302,7 +302,7 @@ t.test('Position: a general on its grid that is not idle yet holds the step; idl
     assert.strictEqual(stepName(w), 'Supply');
 });
 
-t.test('Position: not placeable goes to Settle without a send, quiet for 20 s pauses NotPlaceable', function () {
+t.test('Position: not placeable goes to Settle without a send, quiet for SETTLE_QUIET_MS pauses NotPlaceable', function () {
     var w = attackWorld();
     w.g2.state.grid = 55;
     w.sent.placeable = 3;
@@ -316,9 +316,11 @@ t.test('Position: not placeable goes to Settle without a send, quiet for 20 s pa
     tick(w);
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
     assert.strictEqual(w.st.run().settledAt, w.t);
-    W.ticksFor(w, 10000);
+    W.ticksFor(w, 20000);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running, 'the old 20 s limit is gone');
+    W.ticksFor(w, w.ex.SETTLE_QUIET_MS - 30000);
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
-    W.ticksFor(w, 10000);
+    W.ticksFor(w, 20000);
     r = w.st.run();
     assert.strictEqual(r.status, w.S.RunStatus.Paused);
     assert.strictEqual(r.pause.reason, w.S.RunPause.NotPlaceable);
@@ -426,7 +428,9 @@ function assertSupply(w) {
 
 // Pauses once the island has been quiet long enough.
 function assertNotPlaceable(w, re) {
-    W.ticksFor(w, 30000);
+    W.ticksFor(w, w.ex.SETTLE_QUIET_MS - 30000);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running, 'still waiting just before the quiet time');
+    W.ticksFor(w, 60000);
     var r = w.st.run();
     assert.strictEqual(r.status, w.S.RunStatus.Paused, 'status ' + r.status + ' at ' + stepName(w));
     assert.strictEqual(r.pause.reason, w.S.RunPause.NotPlaceable, r.pause.reason + ': ' + r.pause.message);
@@ -506,7 +510,7 @@ t.test('Position: a failed hop pauses PositionFailed', function () {
     assert.ok(!settled(w), 'no Settle');
 });
 
-t.test('Position: a hop not shown on the map stays bounded', function () {
+t.test('Position: a hop not shown on the map stays bounded: the last round waits ORDER_WAIT_MS, then pauses', function () {
     var w = starWorld([500, 501]);
     w.auto.walk = true;
     startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
@@ -519,7 +523,14 @@ t.test('Position: a hop not shown on the map stays bounded', function () {
         w.t += w.S.modules.adventures.loader.READ_LAG_MS;
     }
     tick(w);
+    var wait = ldr(w).ORDER_WAIT_MS;
     var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Running, 'the last round waits for its effect, status ' + r.status);
+    assert.ok(/positioning sent, waiting to see it/.test(w.st.current().busy.text), w.st.current().busy.text);
+    W.ticksFor(w, wait - 30000);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running, 'still waiting just before ORDER_WAIT_MS');
+    W.ticksFor(w, 60000);
+    r = w.st.run();
     assert.strictEqual(r.status, w.S.RunStatus.Paused, 'status ' + r.status);
     assert.strictEqual(r.pause.reason, w.S.RunPause.NotObserved, r.pause.reason + ': ' + r.pause.message);
     assert.ok(/positioning verified but not observed after 2 rounds/.test(r.pause.message), r.pause.message);
@@ -864,7 +875,7 @@ t.test('Supply: a general idle then busy again inside the hold causes no pause',
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
 });
 
-t.test('Supply: short on an unreadable free pool holds, NotObserved after READ_MAX_MS', function () {
+t.test('Supply: short on an unreadable free pool holds with no limit until the read is back', function () {
     var w = attackWorld();
     w.g2.state.army = {};
     startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Supply });
@@ -882,12 +893,18 @@ t.test('Supply: short on an unreadable free pool holds, NotObserved after READ_M
     var w2 = attackWorld();
     w2.g2.state.army = {};
     startRun(w2, ['C:/b/w1.txt'], { step: w2.S.WaveStep.Supply });
+    var army2 = w2.H.host.game.zone.GetArmy;
     w2.H.host.game.zone.GetArmy = function () { return null; };
     tick(w2);
-    W.ticksFor(w2, ldr(w2).READ_MAX_MS + 20000);
+    W.ticksFor(w2, 3 * ldr(w2).READ_MAX_MS);
     var r = w2.st.run();
-    assert.strictEqual(r.status, w2.S.RunStatus.Paused);
-    assert.strictEqual(r.pause.reason, w2.S.RunPause.NotObserved, r.pause.reason + ': ' + r.pause.message);
+    assert.strictEqual(r.status, w2.S.RunStatus.Running, 'no pause over a bad read: ' + (r.pause && r.pause.reason));
+    assert.strictEqual(w2.st.run().step, w2.S.WaveStep.Supply);
+    assert.ok(/not readable/.test(w2.st.current().busy.text), w2.st.current().busy.text);
+    assert.strictEqual(w2.raises.length + w2.unloads.length + w2.orders.length, 0, 'nothing sent while blind');
+    w2.H.host.game.zone.GetArmy = army2;
+    tick(w2);
+    assert.strictEqual(stepName(w2), 'Load', 'the read back moves it on');
 });
 
 t.test('Supply: a wave general\'s surplus is unloaded and the wave loads', function () {
@@ -1025,16 +1042,18 @@ t.test('Settle: a path that appears goes back to Reach and on to Attack', functi
     assert.strictEqual(stepName(w), 'Attack');
 });
 
-t.test('Settle: still unreachable after 20 s of quiet pauses Unreachable naming line, general and target', function () {
+t.test('Settle: still unreachable after SETTLE_QUIET_MS of quiet pauses Unreachable naming line, general and target', function () {
     var w = attackWorld();
     w.sent.pathLen = 0;
     startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Reach });
     tick(w);
     tick(w);
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
-    W.ticksFor(w, 10000);
+    W.ticksFor(w, 20000);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running, 'the old 20 s limit is gone');
+    W.ticksFor(w, w.ex.SETTLE_QUIET_MS - 30000);
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
-    W.ticksFor(w, 10000);
+    W.ticksFor(w, 20000);
     var r = w.st.run();
     assert.strictEqual(r.status, w.S.RunStatus.Paused);
     assert.strictEqual(r.pause.reason, w.S.RunPause.Unreachable);
@@ -1042,6 +1061,71 @@ t.test('Settle: still unreachable after 20 s of quiet pauses Unreachable naming 
     assert.strictEqual(r.pause.target, 100);
     assert.ok(/no path/.test(r.pause.message), r.pause.message);
     assert.strictEqual(w.orders.length, 0);
+});
+
+t.test('Settle: a battle that runs never pauses, however long it lasts', function () {
+    var fighting = AC.general({ uid: '1.6', grid: 60 });
+    var w = attackWorld({ extra: [fighting] });
+    fighting.state.task = { type: w.code.attack };
+    w.sent.pathLen = 0;
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Reach });
+    tick(w);
+    assert.strictEqual(stepName(w), 'Settle');
+    W.ticksFor(w, 2 * w.ex.SETTLE_MAX_MS);
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Running, 'status ' + r.status + ' after 30 min of battle');
+    assert.strictEqual(stepName(w), 'Settle');
+    assert.strictEqual(r.settledAt, null);
+    // The battle ends: the quiet time counts from there, not from the start.
+    fighting.state.task = null;
+    W.ticksFor(w, w.ex.SETTLE_QUIET_MS - 30000);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running, 'quiet time restarted at the end of the battle');
+    W.ticksFor(w, 60000);
+    assert.strictEqual(w.st.run().pause.reason, w.S.RunPause.Unreachable);
+});
+
+t.test('Settle: a quest that stays pending ends SettleTimeout after SETTLE_MAX_MS with no battle', function () {
+    var w = attackWorld();
+    w.sent.pathLen = 0;
+    // A claim that fails for ever: the watcher keeps one quest pending.
+    w.S.modules.adventures.watcher.pending = function () { return [{ key: 'q1' }]; };
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Reach });
+    tick(w);
+    assert.strictEqual(stepName(w), 'Settle');
+    W.ticksFor(w, w.ex.SETTLE_QUIET_MS + 60000);
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Running, 'a pending quest is not a settled island: ' + (r.pause && r.pause.reason));
+    assert.strictEqual(r.settledAt, null);
+    W.ticksFor(w, w.ex.SETTLE_MAX_MS - w.ex.SETTLE_QUIET_MS - 120000);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running, 'still inside 15 quiet minutes');
+    W.ticksFor(w, 120000);
+    r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Paused, 'status ' + r.status);
+    assert.strictEqual(r.pause.reason, w.S.RunPause.SettleTimeout, r.pause.reason + ': ' + r.pause.message);
+    assert.ok(/still after 15 min with no battle/.test(r.pause.message), r.pause.message);
+});
+
+t.test('Settle: a view elsewhere restarts settledAt and the time away does not count', function () {
+    var w = attackWorld();
+    w.sent.pathLen = 0;
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Reach });
+    tick(w);
+    tick(w);
+    var first = w.st.run().settledAt;
+    assert.strictEqual(typeof first, 'number');
+    // Nobody looked for a whole quiet time: the passes stop in another zone.
+    w.H.host.game.gi.mCurrentViewedZoneID = ZONE + 1;
+    w.t += w.ex.SETTLE_QUIET_MS + 10000;
+    w.H.host.game.gi.mCurrentViewedZoneID = ZONE;
+    tick(w);
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Running, 'status ' + r.status);
+    assert.strictEqual(r.settledAt, w.t, 'restarted at the first pass back');
+    assert.ok(r.settledAt > first);
+    W.ticksFor(w, w.ex.SETTLE_QUIET_MS - 30000);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    W.ticksFor(w, 60000);
+    assert.strictEqual(w.st.run().pause.reason, w.S.RunPause.Unreachable);
 });
 
 // ---- Attack -----------------------------------------------------------------

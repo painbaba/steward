@@ -15,18 +15,20 @@
  * Every acting step checks, in this order: the observed exit (the effect
  * is in the game, so the step moves on); a sent but unseen marker (wait
  * for its effect, then pause, never send it again on its own); the last
- * action round (a failure pauses, a second round without the effect
- * pauses); and only then a new round. Each order that must not go out
- * twice (claiming the last quest, closing the adventure, each recall, the
- * horseshoe) goes through a persisted marker written before the packet.
+ * action round (a failure pauses, a last round without the effect waits
+ * for it, then pauses); and only then a new round. Each order that must not
+ * go out twice (claiming the last quest, closing the adventure, each recall,
+ * the horseshoe) goes through a persisted marker written before the packet.
  *
- * A zone change has no event, so a jump polls for the zone to load,
- * visits once more after JUMP_MS and pauses after a second window.
+ * A zone change has no event, so a jump polls for the zone to load, with no
+ * limit: it visits once more after JUMP_MS and then every JUMP_RETRY_MS. Only
+ * an adventure that left the own list ends the jump in a pause.
  *
  * The last quest is the reward of the map, so the run never treats it as
- * claimed without proof: a verified claim, or the adventure gone from the
- * own list. The adventure is closed only after a verified claim, and only
- * when its name still points at the run's zone.
+ * claimed without proof: a verified claim, the adventure gone from the own
+ * list, or, after a claim went out, a readable quest list that has lacked
+ * the quest for the whole grace. The adventure is closed only after such a
+ * claim, and only when its name still points at the run's zone.
  *
  * Bundle slot: module file; top level only assigns
  * S.modules.adventures.away; state, loader and every core are read at call
@@ -38,8 +40,10 @@
     if (!S.modules.adventures) S.modules.adventures = {};
 
     // Starting values, to be tuned in game.
-    var JUMP_MS      = 60000;      // a visited zone that has not loaded is visited once more
-    var CLEAR_MAX_MS = 1800000;    // the last quest gets this long after the last wave
+    var JUMP_MS        = 60000;    // a visited zone that has not loaded is visited once more
+    var JUMP_RETRY_MS  = 300000;   // a further visit restarts a slow load, so later visits stay far apart
+    var CLEAR_MAX_MS   = 300000;   // quiet time the last quest gets
+    var PLACE_QUIET_MS = 300000;   // quiet time a holder gets to find a free field
 
     var CATEGORY = 'adventures';
 
@@ -89,12 +93,23 @@
         return null;
     }
 
+    // The progress of a quiet clock against its limit, for a wait's text.
+    function quietText(q, limit) {
+        return Math.floor(q.ms / 60000) + ' of ' + Math.round(limit / 60000) + ' min quiet';
+    }
+
     // ---- Jumps --------------------------------------------------------------
 
-    // Visits targetId until loaded() holds. The marker's sentAt is the time
-    // of the last visit; sentOnce means "visited again" and is written only
-    // by the retry, so a resumed jump (sentAt cleared, sentOnce kept) pauses
-    // after one window instead of two.
+    // A visit the client refuses only warns: the zone may still load, and the
+    // next visit comes in its own time.
+    function visit(zoneId) {
+        if (!S.core.zone.visit(zoneId)) warn('cannot visit zone ' + zoneId);
+    }
+
+    // Visits targetId until loaded() holds, with no limit. The marker's sentAt
+    // is the time of the last visit; sentOnce means "visited again" and is
+    // written only by the retry, so a resumed jump (sentAt cleared, sentOnce
+    // kept) visits at once and then keeps the long interval.
     function jump(r, targetId, loaded, name, next, why) {
         if (loaded()) {
             ld().markSeen(r, name);
@@ -111,26 +126,36 @@
             rec.sentAt = now();
             st().save();
             log('visiting zone ' + targetId);
-            if (!S.core.zone.visit(targetId)) st().pause(S.RunPause.JumpFailed, 'cannot visit zone ' + targetId);
-            return;
+            visit(targetId);
+        } else {
+            var interval = rec.sentOnce ? JUMP_RETRY_MS : JUMP_MS;
+            if (now() - rec.sentAt > interval) {
+                rec.sentOnce = true;
+                rec.sentAt = now();
+                st().save();
+                log('zone ' + targetId + ' not loaded after ' + Math.round(interval / 1000) + ' s, visiting again');
+                visit(targetId);
+            }
         }
-        if (now() - rec.sentAt <= JUMP_MS) return;
-        if (rec.sentOnce) {
-            st().pause(S.RunPause.JumpFailed, 'zone ' + targetId + ' did not load');
-            return;
-        }
-        rec.sentOnce = true;
-        rec.sentAt = now();
-        st().save();
-        log('zone ' + targetId + ' not loaded after ' + Math.round(JUMP_MS / 1000) + ' s, visiting again');
-        if (!S.core.zone.visit(targetId)) st().pause(S.RunPause.JumpFailed, 'cannot visit zone ' + targetId);
+        ld().waitBusy(r, null, 'zone ' + targetId + ' not loaded');
     }
 
+    // Visiting a zone that no longer exists never ends, so an adventure gone
+    // from the own list pauses. One read that lacks it proves nothing during
+    // a zone load, so it has to stay gone for the grace.
     function jumpStep(r) {
-        jump(r, r.zoneId, function () {
+        function loaded() {
             return typeof r.zoneId === 'number' && S.core.zone.id() === r.zoneId &&
                 S.core.zone.isAdventure() && S.core.specialists.listReadable();
-        }, 'visit', S.RunStep.Arrive, 'adventure loaded');
+        }
+        if (typeof r.zoneId === 'number' && !loaded()) {
+            var own = S.core.adventures.own();
+            if (own && goneFrom(own, r.zoneId) && ld().missingLong(r, 'adventure')) {
+                st().pause(S.RunPause.JumpFailed, 'adventure no longer open');
+                return;
+            }
+        }
+        jump(r, r.zoneId, loaded, 'visit', S.RunStep.Arrive, 'adventure loaded');
     }
 
     function jumpHome(r) {
@@ -144,11 +169,9 @@
     // ---- Arrival ------------------------------------------------------------
 
     // Waits per general, not by count: every loadout key must be listed here
-    // and idle. A general that is listed needs no deadline, because the game's
-    // remaining time runs short; the deadline only bounds a general not
-    // listed, who has nothing to wait on. It is the one Depart stored in the
-    // 'arrive' marker (a deadline, never a send time); without it, since +
-    // TRAVEL_CAP_MS.
+    // and idle. There is no deadline: the game's remaining time runs short, so
+    // no limit can be built on it, and a general not listed yet is on his way
+    // or has to be looked at by the user, who sees the named wait.
     function arrive(r, inv) {
         var keys = ld().keysOf(r);
         var missing = null;
@@ -162,22 +185,15 @@
             st().go(S.RunStep.StarAll, 'every general arrived');
             return;
         }
-        var rec = ld().marked(r, 'arrive');
-        var deadline = rec && typeof rec.sentAt === 'number' ? rec.sentAt : r.since + ld().TRAVEL_CAP_MS;
-        var over = now() > deadline;
-        // A read that lacks a general says nothing about a busy wait, and
-        // before the deadline missingLong does not run.
-        if (missing !== null) ld().keepBusy();
-        if (over && missing !== null && ld().missingLong(r, missing)) {
-            st().pause(S.RunPause.GeneralMissing, ld().who(inv, missing) + ' did not arrive', { general: missing });
+        if (missing !== null) {
+            ld().waitBusy(r, missing, ld().who(inv, missing) + ' not here yet');
             return;
         }
         if (busy !== null) {
-            ld().clearHold(r);
             ld().waitBusy(r, busy, ld().who(inv, busy) + ' busy');
             return;
         }
-        if (over && missing === null) ld().hold(r, 'generals arrived but their armies are not readable');
+        ld().waitRead(r, 'armies');
     }
 
     // ---- Star ---------------------------------------------------------------
@@ -266,30 +282,9 @@
 
     // ---- End of map ---------------------------------------------------------
 
-    // Grids of the attack and buff targets over every wave, deduped, with a
-    // label. A file that no longer loads adds nothing; the list only names
-    // camps in a warning.
-    function campsOf(r) {
-        var out = [];
-        var seenGrid = {};
-        var L = S.BattleLine;
-        for (var i = 0; i < r.paths.length; i++) {
-            var f = S.core.battles.load(r.paths[i]);
-            if (!f || !f.ok) continue;
-            for (var j = 0; j < f.lines.length; j++) {
-                var l = f.lines[j];
-                if (l.kind !== L.Attack && l.kind !== L.Buff) continue;
-                if (typeof l.target !== 'number' || has(seenGrid, String(l.target))) continue;
-                seenGrid[String(l.target)] = true;
-                out.push({ grid: l.target, text: l.targetName ? l.targetName + ' (' + l.target + ')' : String(l.target) });
-            }
-        }
-        return out;
-    }
-
     function standingText(r) {
         S.core.buildings.invalidate();
-        var camps = campsOf(r);
+        var camps = ld().campsOf(r);
         var standing = [];
         for (var i = 0; i < camps.length; i++) {
             var b = S.core.buildings.byGrid(camps[i].grid);
@@ -342,6 +337,15 @@
         return out;
     }
 
+    // The planned raises whose holder stands on a map grid, in plan order.
+    function placedRaises(p, inv) {
+        var out = [];
+        for (var i = 0; i < p.raises.length; i++) {
+            if (ld().onMap(ld().gen(inv, p.raises[i].key))) out.push(p.raises[i]);
+        }
+        return out;
+    }
+
     // The map is clear when its last quest is finished and no loadout general
     // is still fighting. Once the quest is done a busy general is waited on
     // with no limit, so only the quest itself can time out. A camp still
@@ -358,13 +362,10 @@
             if (g && !ld().ready(g)) { firstKey = keys[i]; break; }
         }
         if (questDone && firstKey === null && !ld().anyAttacking()) {
-            // r.since is old here, so waitRead would pause at once; the hold
-            // gives the read its own window from the first unreadable pass.
             if (!inv.ok) {
-                ld().hold(r, 'free troops and armies not readable at the end of the map');
+                ld().waitRead(r, 'free troops and armies');
                 return;
             }
-            ld().clearHold(r);
             // Troops freed by the last battles, or generals that were still
             // fighting during the first pack, are packed before the claim.
             if (packPlan(r, inv).raises.length) {
@@ -377,20 +378,28 @@
             return;
         }
         if (questDone) {
-            ld().clearHold(r);
             ld().waitBusy(r, firstKey, firstKey !== null ? ld().who(inv, firstKey) + ' busy' : 'a fighter is busy');
             return;
         }
-        // A read without the last quest says nothing about it: the list can
-        // be unreadable, read empty or have skipped an entry. So it neither
-        // ends a busy wait nor reads as a quest not finished: while the quest
-        // was done the step can have grown older than CLEAR_MAX_MS.
-        if (!last) ld().keepBusy();
-        if (now() - r.since <= CLEAR_MAX_MS) return;
-        if (!last) {
-            ld().holdRead(r, list ? 'last quest' : 'quest list');
+        // An unreadable list says nothing about the quest, so it does not feed
+        // the clock either.
+        if (list === null) {
+            ld().waitRead(r, 'quest list');
             return;
         }
+        // Only a running battle can still finish the quest, so the limit is
+        // quiet time. Moving or idle generals count as quiet on purpose: a
+        // general left waiting on a quest nothing works on must not hold the
+        // run unseen.
+        var q = ld().quietClock(r, !ld().anyAttacking());
+        var over = q.ms >= CLEAR_MAX_MS;
+        if (!last) {
+            ld().waitBusy(r, null, 'last quest not listed, ' + quietText(q, CLEAR_MAX_MS));
+            if (over) st().pause(S.RunPause.NotObserved, 'last quest not listed');
+            return;
+        }
+        ld().waitBusy(r, null, 'last quest not finished, ' + quietText(q, CLEAR_MAX_MS));
+        if (!over) return;
         var min = Math.round(CLEAR_MAX_MS / 60000);
         var camps = standingText(r) || 'none';
         st().pause(S.RunPause.ClearTimeout, 'last quest not finished after ' + min + ' min; camps standing: ' + camps);
@@ -402,22 +411,26 @@
     // is waited on first, with no limit, because it may show its new grid
     // while not yet idle, and so a restart or a kernel Pause never orders it
     // twice.
-    // A missing holder is settled before the last round is: past its
-    // read-lag hold, settleRound counts a finished round every time it runs,
-    // so a hold after it would count the same round on each pass and end in a
-    // false rounds pause.
+    // A missing holder and a holder with no field are settled before the last
+    // round is: past its read-lag hold, settleRound counts a finished round
+    // every time it runs, so a hold after it would count the same round on each
+    // pass and end in a false rounds pause. A round with a real failure still
+    // goes to settleRound first, because that failure is the news.
+    // A holder with no field does not stop the holders already placed: they
+    // raise first, and a battle may yet free a field for him, so he waits for
+    // quiet time. Pack judges this the same way, so the two steps cannot bounce.
     function packStar(r, inv) {
         if (!inv.ok) {
-            ld().holdRead(r, 'free troops and armies');
+            ld().waitRead(r, 'free troops and armies');
             return;
         }
-        ld().clearHold(r);
         var walking = movingKey(r);
         if (walking !== null) {
             ld().waitBusy(r, walking, ld().who(inv, walking) + ' walking to its grid');
             return;
         }
-        var need = offMap(packPlan(r, inv), inv);
+        var p = packPlan(r, inv);
+        var need = offMap(p, inv);
         if (!need.length) {
             st().go(S.RunStep.Pack, 'holders on the map');
             return;
@@ -429,15 +442,26 @@
                 { general: c.missing });
             return;
         }
+        var blocked = c.blocked !== null && !c.moves.length;
+        var last = ld().currentRound(r, S.RunStep.PackStar);
+        if (blocked && !(last && ld().complete(last) && ld().firstFailure(last))) {
+            var who = ld().who(inv, c.blocked);
+            if (placedRaises(p, inv).length) {
+                st().go(S.RunStep.Pack, who + ' has no field, packing the placed holders first');
+                return;
+            }
+            var q = ld().quietClock(r, !ld().anyAttacking());
+            ld().waitBusy(r, c.blocked, who + ' has no placeable grid, ' + quietText(q, PLACE_QUIET_MS));
+            if (q.ms >= PLACE_QUIET_MS) {
+                st().pause(S.RunPause.NotPlaceable, who + ' has no placeable grid (' + c.tried + ' tried)',
+                    { general: c.blocked });
+            }
+            return;
+        }
         var next = ld().settleRound(r, S.RunStep.PackStar, function (f) {
             st().pause(S.RunPause.PackFailed, 'place ' + f.key + ' failed: ' + f.reason, { general: f.key });
         }, 'place');
         if (next !== 'new') return;
-        if (c.blocked !== null) {
-            st().pause(S.RunPause.NotPlaceable, ld().who(inv, c.blocked) + ' has no placeable grid (' +
-                c.tried + ' tried)', { general: c.blocked });
-            return;
-        }
         var round = ld().startRound(r, S.RunStep.PackStar, []);
         var text = [];
         for (var i = 0; i < c.moves.length; i++) {
@@ -451,7 +475,9 @@
     // Each verified round re-enters the step to plan again from the game;
     // every verified raise shrinks the free pool or the room, so this ends.
     // A planned holder off the map goes back to PackStar, so no raise is
-    // ever sent to a general at the star.
+    // ever sent to a general at the star. The one exception to going back is
+    // PackStar's own: no field for him, nothing to place and holders already
+    // placed. Then only those raise, and he stays at the star.
     function pack(r, inv) {
         if (!inv.ok) {
             ld().waitRead(r, 'free troops and armies');
@@ -474,24 +500,32 @@
             st().go(S.RunStep.Pack, 'packed ' + n + ' holder(s)');
             return;
         }
+        var raises = p.raises;
         var away = offMap(p, inv);
         if (away.length) {
-            st().go(S.RunStep.PackStar, ld().who(inv, away[0]) + ' is not on the map');
-            return;
+            var c = ld().chooseGrids(inv, away);
+            raises = placedRaises(p, inv);
+            if (c.moves.length || c.missing !== null || !raises.length) {
+                st().go(S.RunStep.PackStar, ld().who(inv, away[0]) + ' is not on the map');
+                return;
+            }
         }
         var next = ld().settleRound(r, S.RunStep.Pack, function (f) {
             st().pause(S.RunPause.PackFailed, 'pack ' + f.key + ' refused: ' + f.reason, { general: f.key });
         }, 'pack');
         if (next !== 'new') return;
         round = ld().startRound(r, S.RunStep.Pack, []);
-        for (var i = 0; i < p.raises.length; i++) {
-            ld().attempt(round, p.raises[i].key, S.core.army.raise(p.raises[i].key, p.raises[i].target));
+        for (var i = 0; i < raises.length; i++) {
+            ld().attempt(round, raises[i].key, S.core.army.raise(raises[i].key, raises[i].target));
         }
     }
 
     // Claims the last quest (the map's reward). Moves on only on proof: a
-    // verified claim, or the adventure gone from a readable own list. Off the
-    // island or with the quest unreadable it holds, then pauses.
+    // verified claim, the adventure gone from a readable own list, or, after a
+    // claim went out, a readable list without the quest for the whole grace,
+    // because one read can skip an entry. Off the island, or with a readable
+    // list that lacks the quest and no claim sent, it holds, then pauses: only
+    // the user can fix those. An unreadable list only waits.
     function lastQuest(r) {
         var rec = ld().marked(r, 'lastQuest');
         if (rec && rec.seen) {
@@ -513,21 +547,33 @@
             return;
         }
         var list = S.core.quests.list();
-        var last = list ? lastQuestOf(list) : null;
+        if (list === null) {
+            ld().waitRead(r, 'quest list');
+            return;
+        }
+        var last = lastQuestOf(list);
+        // A claim already sent is settled before the quest's own state is
+        // read: the send itself can make the quest read not finished or take
+        // it off the list.
+        var s = ld().staleMark(r, 'lastQuest', 'last quest claim');
+        if (s === 'wait') {
+            if (!last && ld().missingLong(r, 'lastQuest')) {
+                log('last quest left the list after the claim');
+                ld().markSeen(r, 'lastQuest');
+                st().go(S.RunStep.Close, 'last quest claimed');
+            }
+            return;
+        }
+        if (s === 'stale') {
+            st().pause(S.RunPause.NotObserved, 'last quest claim sent but not seen; check the quest book, then Resume');
+            return;
+        }
         if (!last) {
             ld().hold(r, 'last quest not readable or not listed; if it was claimed by hand, close the ' +
                 'adventure by hand, then Resume');
             return;
         }
         ld().clearHold(r);
-        // A claim already sent is settled before the quest's own state is
-        // read: the send itself can make the quest read not finished.
-        var s = ld().staleMark(r, 'lastQuest', ld().MARK_SETTLE_MS);
-        if (s === 'wait') return;
-        if (s === 'stale') {
-            st().pause(S.RunPause.NotObserved, 'last quest claim sent but not seen; check the quest book, then Resume');
-            return;
-        }
         var next = ld().settleRound(r, S.RunStep.LastQuest, function (f) {
             st().pause(S.RunPause.QuestFailed, 'claim last quest failed: ' + f.reason);
         }, 'last quest claim');
@@ -572,7 +618,7 @@
             return;
         }
         if (now() - r.since < ld().MARK_SETTLE_MS) return;
-        var s = ld().staleMark(r, 'close', ld().MARK_SETTLE_MS);
+        var s = ld().staleMark(r, 'close', 'close');
         if (s === 'wait') return;
         if (s === 'stale') {
             st().pause(S.RunPause.NotObserved, 'close sent but the adventure is still listed; check the star menu, ' +
@@ -593,28 +639,42 @@
 
     // Sends home every loadout general still on the island, each as he gets
     // ready, with no limit on a busy one. Once the island is no longer viewed
-    // (closing it may move the view) the generals return on their own.
+    // (closing it may move the view) the generals are taken to return on their
+    // own, which is assumed, not proven. A zone id that cannot be read says
+    // nothing about the view, so it holds. A general the list lacks is gone at
+    // once when his return went out. With no mark he may only be a skipped
+    // entry, so he gets the grace, and after it he counts as gone with no pause.
     function recall(r, inv) {
-        if (S.core.zone.id() !== r.zoneId || !S.core.specialists.listReadable()) {
+        var id = S.core.zone.id();
+        if (typeof id !== 'number') {
+            ld().waitRead(r, 'zone id');
+            return;
+        }
+        if (id !== r.zoneId) {
             log('adventure no longer viewed; generals return on their own');
             st().go(S.RunStep.JumpHome, 'island left');
             return;
         }
         var homeId = S.core.zone.homeId();
         if (typeof homeId !== 'number') {
-            ld().holdRead(r, 'home zone id');
+            ld().waitRead(r, 'home zone id');
             return;
         }
-        ld().clearHold(r);
         var keys = ld().keysOf(r);
         var need = [];
         var open = [];
         var busy = null;
+        var absent = null;
         for (var i = 0; i < keys.length; i++) {
             var name = 'recall:' + keys[i];
             var g = ld().gen(inv, keys[i]);
-            if (!g) continue;
             var rec = ld().marked(r, name);
+            if (!g) {
+                if (rec && (rec.seen || rec.sentOnce)) continue;
+                // Runs for every such key on every pass, or its grace stops.
+                if (!ld().missingLong(r, keys[i]) && absent === null) absent = keys[i];
+                continue;
+            }
             if (rec && rec.seen) continue;
             // A recall that went out and shows as travel is seen, even when
             // its round's result was lost.
@@ -627,12 +687,13 @@
             else if (busy === null) busy = keys[i];
         }
         if (busy !== null) ld().waitBusy(r, busy, ld().who(inv, busy) + ' busy on the adventure');
+        else if (absent !== null) ld().waitBusy(r, absent, ld().who(inv, absent) + ' not listed');
         if (!need.length) {
-            if (busy === null) st().go(S.RunStep.JumpHome, 'generals sent home');
+            if (busy === null && absent === null) st().go(S.RunStep.JumpHome, 'generals sent home');
             return;
         }
         for (i = 0; i < need.length; i++) {
-            var s = ld().staleMark(r, 'recall:' + need[i], ld().MARK_SETTLE_MS);
+            var s = ld().staleMark(r, 'recall:' + need[i], 'return of ' + ld().who(inv, need[i]));
             if (s === 'wait') return;
             if (s === 'stale') {
                 st().pause(S.RunPause.NotObserved, 'return of ' + ld().who(inv, need[i]) + ' sent but not seen; check the ' +
@@ -702,9 +763,11 @@
     }
 
     S.modules.adventures.away = {
-        JUMP_MS:      JUMP_MS,
-        CLEAR_MAX_MS: CLEAR_MAX_MS,
-        plan:         plan
+        JUMP_MS:        JUMP_MS,
+        JUMP_RETRY_MS:  JUMP_RETRY_MS,
+        CLEAR_MAX_MS:   CLEAR_MAX_MS,
+        PLACE_QUIET_MS: PLACE_QUIET_MS,
+        plan:           plan
     };
 
 }(Steward));

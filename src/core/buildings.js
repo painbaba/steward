@@ -53,6 +53,12 @@
 
     function invalidate() { snapshot = null; }
 
+    // True when the viewed zone's building list holds anything. byGrid returns
+    // null for a missing zone and the reader flattens failures to [], so a
+    // building's absence only means something on a non-empty list. The caller
+    // invalidates first and checks that the viewed zone is the one it means.
+    function readable() { return ensureSnapshot().length > 0; }
+
     function name(b) {
         if (!b) return '';
         try { return b.GetBuildingName_string ? b.GetBuildingName_string() : ''; }
@@ -358,6 +364,7 @@
         listMines:          listMines,
         collectiblesByName: collectiblesByName,
         invalidate:         invalidate,
+        readable:           readable,
 
         // accessors
         name:         name,

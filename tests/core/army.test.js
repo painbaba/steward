@@ -843,3 +843,17 @@ t.test('raise and unload keep the not own reason for a real foreign general', fu
     assert.strictEqual(runDef(s, s.army.raise('g1', { Rifle: 8 })).reason, 'not own');
     assert.strictEqual(runDef(s, s.army.unload('g1')).reason, 'not own');
 });
+
+t.test('inventory: listRead is true on a normal read', function () {
+    var s = setup({ free: { Rifle: 1 }, fighters: [A.fighter({ uid: 'g1', army: { Rifle: 2 } })] });
+    assert.strictEqual(s.army.inventory().listRead, true);
+});
+
+t.test('inventory: listRead is false on a list that cannot be read, listOk stays true', function () {
+    var s = setup({ free: { Rifle: 1 }, fighters: [] });
+    s.H.host.game.gi.mCurrentPlayerZone.GetSpecialists_vector = function () { return null; };
+    var inv = s.army.inventory();
+    assert.strictEqual(inv.listRead, false);
+    assert.strictEqual(inv.listOk, true);
+    assert.strictEqual(inv.ok, false);
+});

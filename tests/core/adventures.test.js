@@ -314,3 +314,40 @@ t.test('manager is null when the class is missing', function () {
     assert.strictEqual(s.adv.manager(), null);
     assert.strictEqual(s.H.logs().length, 0);
 });
+
+// ---- own: a read that failed is null, never a shorter list ---------------------
+
+t.test('own is null when an entry throws, so a bad read never hides an adventure', function () {
+    var s = setup();
+    var advs = [
+        { adventureName: 'AdvA', zoneID: 11 },
+        { adventureName: 'AdvB', zoneID: 12 }
+    ];
+    withManager(s, {
+        getAdventures: function () { return advs; },
+        isMyAdventure: function (adv) {
+            if (adv.adventureName === 'AdvA') throw new Error('entry');
+            return true;
+        }
+    });
+    assert.strictEqual(s.adv.own(), null);
+    assert.deepStrictEqual(plain(s.adv.ownOpen()), []);
+    assert.strictEqual(s.adv.zoneIdOf('AdvB'), null);
+});
+
+t.test('own is null when the read has no length', function () {
+    var s = setup();
+    withManager(s, { getAdventures: function () { return {}; }, isMyAdventure: function () { return true; } });
+    assert.strictEqual(s.adv.own(), null);
+    assert.deepStrictEqual(plain(s.adv.ownOpen()), []);
+    assert.strictEqual(s.adv.zoneIdOf('AdvA'), null);
+    withManager(s, { getAdventures: function () { return null; }, isMyAdventure: function () { return true; } });
+    assert.strictEqual(s.adv.own(), null);
+});
+
+t.test('own is an empty list for an empty vector', function () {
+    var s = setup();
+    withManager(s, { getAdventures: function () { return []; }, isMyAdventure: function () { return true; } });
+    assert.deepStrictEqual(plain(s.adv.own()), []);
+    assert.deepStrictEqual(plain(s.adv.ownOpen()), []);
+});

@@ -18,6 +18,8 @@
  *   check(base)  true when the expected effect is observed
  *   describe(base)  optional extra text for the final log line
  *   timeoutMs    verify window per send
+ *   retries      how many more sends may follow the first (default RETRIES);
+ *                0 for an action that must not go out twice
  * Every callback is wrapped in try/catch and re-finds host objects itself, so
  * a def never acts on a stale specialist.
  *
@@ -27,8 +29,11 @@
  * report a failed read as null (or { ok: false }) so a def can tell "read
  * failed" from "empty", and a def treats a failed read as not observed.
  *
- * Each send is followed by checks until the window is used up, then one retry
- * (which first checks whether the effect arrived late), then a named failure.
+ * Each send is followed by checks until the window is used up, then the retry
+ * the def allows (which first checks whether the effect arrived late), then a
+ * named failure. A failure because the effect was never seen carries
+ * unseen: true on its result, so a caller can tell it from a refusal or a send
+ * that failed; the action may still have gone out.
  * The window counts the polls that actually ran, not wall time: a check that
  * the modal guard or a queue backlog deferred does not use up the window.
  *
@@ -48,8 +53,8 @@
     S.ActionResult.Refused  = 'ActionRefused';
     S.ActionResult.Failed   = 'ActionFailed';
 
-    // At most one retry, so an action is sent at most twice and never a
-    // third time.
+    // By default at most one retry, so an action is sent at most twice and
+    // never a third time.
     var RETRIES = 1;
 
     var STEP = 'core.attempt';
@@ -62,6 +67,10 @@
     function pollGap() {
         var ms = S.kernel.TIMEOUTS && S.kernel.TIMEOUTS.QUEUE_ACTION_GAP_MS;
         return (typeof ms === 'number' && ms > 0) ? ms : 1;
+    }
+
+    function retriesOf(def) {
+        return (typeof def.retries === 'number' && def.retries >= 0) ? def.retries : RETRIES;
     }
 
     function categoryOf(def) {
@@ -95,7 +104,7 @@
         return S.kernel.queue.add(STEP, [state], pollGap()) === true;
     }
 
-    function finish(state, status, reason) {
+    function finish(state, status, reason, unseen) {
         var def = state.def;
         state.phase = 'done';
         var result = {
@@ -104,6 +113,7 @@
             reason: reason || '',
             sends:  state.sends
         };
+        if (unseen === true) result.unseen = true;
         var text = result.label + ': ' + status + ' after ' + state.sends + ' send(s)';
         if (result.reason) text += ' (' + result.reason + ')';
         var extra = call(state, 'describe', state.base);
@@ -158,7 +168,7 @@
         var sent = call(state, 'send', state.base);
         state.sends++;
         if (!sent.ok || sent.value !== true) {
-            if (state.sends <= RETRIES) {
+            if (state.sends <= retriesOf(state.def)) {
                 S.kernel.warn(categoryOf(state.def), labelOf(state.def) + ': send failed, retrying');
                 enqueue(state);
             } else {
@@ -178,12 +188,12 @@
         }
         state.polls++;
         if (state.polls * pollGap() >= state.def.timeoutMs) {
-            if (state.sends <= RETRIES) {
+            if (state.sends <= retriesOf(state.def)) {
                 S.kernel.warn(categoryOf(state.def), labelOf(state.def) + ': not observed, retrying');
                 state.phase = 'send';
                 enqueue(state);
             } else {
-                finish(state, S.ActionResult.Failed, 'not observed within ' + state.def.timeoutMs + ' ms');
+                finish(state, S.ActionResult.Failed, 'not observed within ' + state.def.timeoutMs + ' ms', true);
             }
             return;
         }

@@ -153,3 +153,25 @@ t.test('amountPerCycle reads amountRemoved from the economy definition', functio
     t.assert.strictEqual(B.amountPerCycle('b'), null);
     t.assert.strictEqual(B.amountPerCycle('c'), null);
 });
+
+// ---- readable ----------------------------------------------------------------
+
+t.test('readable is false with no street map and on an empty vector', function () {
+    var H = harness.boot();
+    var B = H.Steward.core.buildings;
+    H.host.game.gi.mCurrentPlayerZone = {};
+    B.invalidate();
+    t.assert.strictEqual(B.readable(), false);
+    H.host.game.gi.mCurrentPlayerZone = H.zone.zone().zone;
+    B.invalidate();
+    t.assert.strictEqual(B.readable(), false);
+});
+
+t.test('readable is true once the zone lists a building', function () {
+    var H = harness.boot();
+    var B = H.Steward.core.buildings;
+    H.host.game.gi.mCurrentPlayerZone = H.zone.zone()
+        .building(H.zone.building({ name: 'IronMine', grid: 12 })).zone;
+    B.invalidate();
+    t.assert.strictEqual(B.readable(), true);
+});

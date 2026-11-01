@@ -16,6 +16,10 @@
  *   w.ghost(g1, 3);                                      // a ghost for 3 ticks
  *   W.ticksFor(w, 60000);                                // the clock, tick by tick
  *
+ * Set w.campsUnreadable = true to make the building list of the viewed zone
+ * read as unreadable (core.buildings.readable() false), so no camp counts as
+ * gone.
+ *
  * Nothing here edits the shared stubs; host fakes are installed on the booted
  * harness only.
  */
@@ -69,6 +73,7 @@ function patchCore(w) {
         return { grid: grid, GetStreetGridEntry: function () { return grid + 1000; } };
     };
     S.core.buildings.isEnemy = function (b) { return !!b && w.camps[b.grid] === true; };
+    S.core.buildings.readable = function () { return w.campsUnreadable !== true; };
 
     S.core.buffs.camp = function (name, grid) {
         var done = false;
@@ -214,6 +219,7 @@ function world(o) {
 
     w.st.now = function () { return w.t; };
     gi.mCurrentViewedZoneID = home ? HOME : ZONE;
+    gi.mCurrentPlayer.mIsAdventureZone = !home;
     gi.isOnHomzone = function () { return gi.mCurrentViewedZoneID === HOME; };
     H.host.game.zone.GetArmy = function () { return A.armyOf(w.free); };
     gi.mCurrentPlayer.getAvailableBuffs_vector = function () { return buffVector(w.stock); };

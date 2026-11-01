@@ -29,6 +29,8 @@
  *
  * A wave is never skipped. Every failed check or timeout pauses with the
  * wave, general, target and reason; Resume re-enters Gate of the same wave.
+ * A line whose camp was beaten earlier in the run is dropped, which is no
+ * skipped wave: its fight is over, and the rest of the wave still runs.
  * After the last wave is confirmed the run hands over to the end of the
  * map (RunStep.PackStar); the series steps run elsewhere.
  *
@@ -45,8 +47,8 @@
 
     // Starting values, to be tuned in game.
     var GATE_MISSING_MS   = 60000;     // a field general absent this long pauses
-    var SETTLE_QUIET_MS   = 20000;     // island quiet this long before a blocker pauses
-    var SETTLE_MAX_MS     = 900000;    // Settle gives up after this long
+    var SETTLE_QUIET_MS   = 300000;    // island quiet this long before a blocker pauses
+    var SETTLE_MAX_MS     = 900000;    // Settle gives up after this summed time with no battle
     var PACE_MS           = 500;       // pacer poll gap
 
     var CATEGORY = 'adventures';
@@ -89,6 +91,18 @@
         return r.lines[key];
     }
 
+    // Whether a camp's absence means anything right now: the run's island is
+    // viewed and its building list reads. Refreshes the list first. An
+    // unreadable list must never read as beaten. The zone id alone does not
+    // say the island is there: nothing shows the id and the client's player
+    // and zone objects change together, and the home island's list holds no
+    // camp of the adventure. A drop is kept in the run, so a false one lasts.
+    function campsReadable(r) {
+        S.core.buildings.invalidate();
+        return S.core.zone.id() === r.zoneId && S.core.zone.isAdventure() &&
+            S.core.buildings.readable();
+    }
+
     // A line that went out once and whose target camp is gone from the map
     // it was sent on: the attack (or a later one on the same camp) won, so
     // it is marked seen instead of blocking Reach or being sent again.
@@ -97,8 +111,7 @@
         if (!r.lines || !has(r.lines, l.key)) return false;
         var rec = r.lines[l.key];
         if (rec.seen || rec.sentOnce !== true) return false;
-        S.core.buildings.invalidate();
-        if (S.core.zone.id() !== r.zoneId || S.core.buildings.byGrid(l.target)) return false;
+        if (!campsReadable(r) || S.core.buildings.byGrid(l.target)) return false;
         rec.seen = true;
         st().save();
         S.kernel.warn(CATEGORY, st().waveLabel() + ': camp ' + targetText(l) + ' of ' + who(l, inv) +
@@ -129,6 +142,40 @@
             if (isSent(r, lines[i].key)) out.sent++;
         }
         return out;
+    }
+
+    // Whether the run already fought over this line's camp. r.lines is emptied
+    // at Confirm, so for earlier waves the wave files are the record; a run
+    // started at wave N treats the files before it as seen.
+    function seenEarlier(r, lines, l) {
+        for (var i = 0; i < lines.length; i++) {
+            var o = lines[i];
+            if (o === l || !isSeqKind(o) || o.target !== l.target) continue;
+            if (r.lines && has(r.lines, o.key) && r.lines[o.key].sentOnce === true) return true;
+        }
+        var camps = ld().campsOf(r, r.waveIndex);
+        for (var j = 0; j < camps.length; j++) {
+            if (camps[j].grid === l.target) return true;
+        }
+        return false;
+    }
+
+    // A line that never went out and whose camp is gone, beaten by an earlier
+    // line of the run: nothing is left to attack. The line counts as seen with
+    // no sentAt, so it leaves open, field and supply: his general is not moved
+    // or loaded, and his troops count as a donor's. A camp no line of the run
+    // named stays a blocker, it may be a bug in the wave file. Returns true
+    // when it dropped the line.
+    function dropBeaten(r, lines, l, inv) {
+        if (!isSeqKind(l)) return false;
+        var rec = r.lines && has(r.lines, l.key) ? r.lines[l.key] : null;
+        if (rec && (rec.seen || rec.sentOnce)) return false;
+        if (S.core.buildings.byGrid(l.target) || !campsReadable(r) || !seenEarlier(r, lines, l)) return false;
+        lineRec(r, l.key).seen = true;
+        st().save();
+        S.kernel.warn(CATEGORY, st().waveLabel() + ': camp ' + targetText(l) + ' of ' + who(l, inv) +
+            ' beaten earlier in the run; line dropped');
+        return true;
     }
 
     // The views every step works on. open: lines still to act on (a speed
@@ -420,7 +467,8 @@
 
     // First open Attack or Buff line that cannot be attacked now, as a
     // blocker, or null. A missing camp of a line sent before is that line's
-    // win, not a blocker.
+    // win, not a blocker, and a camp can also fall to an earlier line after
+    // Gate looked. A camp standing that is no longer an enemy stays a blocker.
     function reachBlock(r, w, inv) {
         S.core.buildings.invalidate();
         for (var i = 0; i < w.open.length; i++) {
@@ -428,7 +476,7 @@
             if (!isSeqKind(l)) continue;
             var reason = null;
             var b = S.core.buildings.byGrid(l.target);
-            if (!b && goneAfterSend(r, l, inv)) continue;
+            if (!b && (goneAfterSend(r, l, inv) || dropBeaten(r, w.all, l, inv))) continue;
             if (!b) reason = 'target missing';
             else if (!S.core.buildings.isEnemy(b)) reason = 'target not enemy';
             else if (l.kind === S.BattleLine.Attack) {
@@ -479,19 +527,29 @@
             st().go(back, 'settled: ' + (was ? was.general + ' ' + was.reason + ' cleared' : 'blocker cleared'));
             return;
         }
+        // Two clocks. settledAt says the island has nothing left that could
+        // clear the blocker, and a view elsewhere restarts it, since nobody
+        // watched that time. The summed clock counts every pass with no battle:
+        // islandSettled stays false while a quest stays pending, and the
+        // watcher retries a failing claim for ever, so a count of battles alone
+        // could hang unseen. A running battle never pauses here.
+        var q = ld().quietClock(r, !ld().anyAttacking());
+        var at = !islandSettled() ? null : (r.settledAt === null || q.gap ? now() : r.settledAt);
+        var changed = at !== r.settledAt || !was || was.reason !== blocked.reason;
         r.blocker = blocked;
-        if (!islandSettled()) r.settledAt = null;
-        else if (r.settledAt === null) r.settledAt = now();
-        st().save();
-        if (r.settledAt !== null && now() - r.settledAt >= SETTLE_QUIET_MS) {
+        r.settledAt = at;
+        if (changed) st().save();
+        // No key: a Buff line's key is no specialist.
+        ld().waitBusy(r, null, blocked.general + ': ' + blocked.reason);
+        if (at !== null && now() - at >= SETTLE_QUIET_MS) {
             st().pause(fromPosition ? S.RunPause.NotPlaceable : S.RunPause.Unreachable,
                 blocked.general + ': ' + blocked.reason + ' with no battle running and no quest waiting' +
                 ' (it may be a bug in the wave file)', { general: blocked.general, target: blocked.target });
             return;
         }
-        if (now() - r.since > SETTLE_MAX_MS) {
+        if (q.ms > SETTLE_MAX_MS) {
             st().pause(S.RunPause.SettleTimeout, blocked.general + ': ' + blocked.reason + ' still after ' +
-                Math.round(SETTLE_MAX_MS / 60000) + ' min', { general: blocked.general, target: blocked.target });
+                Math.round(SETTLE_MAX_MS / 60000) + ' min with no battle', { general: blocked.general, target: blocked.target });
         }
     }
 
@@ -529,8 +587,7 @@
                     ' not seen: ' + res.reason, l, inv);
                 return true;
             }
-            S.core.buildings.invalidate();
-            if (S.core.zone.id() === r.zoneId && !S.core.buildings.byGrid(l.target)) {
+            if (campsReadable(r) && !S.core.buildings.byGrid(l.target)) {
                 rec.seen = true;
                 st().save();
                 S.kernel.warn(CATEGORY, st().waveLabel() + ': camp ' + targetText(l) + ' of ' + who(l, inv) +
@@ -655,6 +712,9 @@
             }
             var inv = S.core.army.inventory();
             if (ld().listHold(r, inv)) return;
+            if (step === S.WaveStep.Gate) {
+                for (var i = 0; i < file.lines.length; i++) dropBeaten(r, file.lines, file.lines[i], inv);
+            }
             fn(r, view(r, file.lines), inv);
         } catch (e) {
             S.kernel.error(CATEGORY, st().waveLabel() + ': step ' + stepName(step) + ' threw:', e);
