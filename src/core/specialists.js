@@ -338,6 +338,9 @@
     function isExplorer(spec)       { return classify(spec) === S.SpecialistType.Explorer; }
     function isGeologist(spec)      { return classify(spec) === S.SpecialistType.Geologist; }
 
+    // The host returns names as HTML display strings.
+    function cleanName(raw) { return (typeof raw === 'string') ? S.kernel.text.plain(raw) : raw; }
+
     function specName(spec) {
         if (!spec) return '';
         // ArgumentError #1063 (wrong number of arguments) varies by
@@ -345,19 +348,19 @@
         // Try both, in order of "no args" first since that's the more common
         // shape per the live spike output.
         try { if (typeof spec.getName === 'function') {
-            var n = spec.getName();
+            var n = cleanName(spec.getName());
             if (n) return n;
         } } catch (e) { /* try next */ }
         try { if (typeof spec.getName === 'function') {
-            var n2 = spec.getName(false);
+            var n2 = cleanName(spec.getName(false));
             if (n2) return n2;
         } } catch (e) { /* try next */ }
         try { if (typeof spec.GetName === 'function') {
-            var n3 = spec.GetName();
+            var n3 = cleanName(spec.GetName());
             if (n3) return n3;
         } } catch (e) { /* try next */ }
         try { if (typeof spec.GetName === 'function') {
-            var n4 = spec.GetName(false);
+            var n4 = cleanName(spec.GetName(false));
             if (n4) return n4;
         } } catch (e) { /* try next */ }
 
@@ -371,14 +374,25 @@
                 if (desc && typeof desc.getName_string === 'function') {
                     var key = desc.getName_string();
                     if (key) {
-                        return (S.core.locale && S.core.locale.spe)
-                            ? S.core.locale.spe(key)
-                            : key;
+                        return cleanName((S.core.locale && S.core.locale.spe) ? S.core.locale.spe(key) : key);
                     }
                 }
             }
         } catch (e) { /* fall through */ }
         return '';
+    }
+
+    // Looks up a hand-edited settings map keyed by specialist name. The exact
+    // key wins. Otherwise keys are cleaned the way name() is, which also
+    // accepts keys saved with entities or the host's raw markup.
+    function namedOverride(map, name) {
+        if (!map || !name) return undefined;
+        var has = Object.prototype.hasOwnProperty;
+        if (has.call(map, name)) return map[name];
+        for (var key in map) {
+            if (has.call(map, key) && S.kernel.text.plain(key) === name) return map[key];
+        }
+        return undefined;
     }
 
     // Stable per-instance string key derived from the dUniqueID. Use this
@@ -659,8 +673,10 @@
 
     function byName(targetName, opts) {
         var src = all(opts);
+        var wanted = S.kernel.text.plain(targetName);
         for (var i = 0; i < src.length; i++) {
-            if (specName(src[i]) === targetName) return src[i];
+            var n = specName(src[i]);
+            if (n && (n === targetName || n === wanted)) return src[i];
         }
         return null;
     }
@@ -950,6 +966,7 @@
     S.core.specialists.recall           = recall;
 
     S.core.specialists.name             = specName;
+    S.core.specialists.namedOverride    = namedOverride;
     S.core.specialists.uniqueIdKey      = uniqueIdKey;
 
 }(Steward));

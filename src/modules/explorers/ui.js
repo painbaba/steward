@@ -26,13 +26,6 @@
         S.kernel.settings.write('explorers', s);
     }
 
-    // Strip <b>...</b> / <font>...</font> wrappers the host uses for display
-    // names so users can match against plain strings in settings.json.
-    function stripHtml(s) {
-        if (typeof s !== 'string') return '';
-        return s.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '');
-    }
-
     function notify(text) {
         try { if (typeof showGameAlert === 'function') showGameAlert('Steward: ' + text); }
         catch (e) { /* best effort */ }
@@ -94,10 +87,10 @@
             var name = c.name(spec) || '?';
             var picked = '?';
             try { picked = c.pickTask(spec) || '?'; } catch (e) { picked = 'threw'; }
-            var override = s.overrides && s.overrides[stripHtml(name)];
+            var override = c.namedOverride(s.overrides, name);
             S.kernel.log('explorers',
                 '  [' + (c.status(spec) === S.SpecialistStatus.Idle ? 'idle' : 'busy') + ']',
-                stripHtml(name),
+                name,
                 '→ pickTask:', picked,
                 override ? ('(override: ' + override + ')') : '');
         }
@@ -227,10 +220,10 @@
 
         var c = S.core.specialists;
 
-        // Alphabetical by display name (HTML stripped). Stable across renders.
+        // Alphabetical by display name. Stable across renders.
         explorers.sort(function (a, b) {
-            var na = stripHtml(c.name(a) || '').toLowerCase();
-            var nb = stripHtml(c.name(b) || '').toLowerCase();
+            var na = (c.name(a) || '').toLowerCase();
+            var nb = (c.name(b) || '').toLowerCase();
             if (na < nb) return -1;
             if (na > nb) return 1;
             return 0;
@@ -247,8 +240,7 @@
         // One BS3 row per explorer.
         for (var i = 0; i < explorers.length; i++) {
             var spec = explorers[i];
-            var rawName = c.name(spec) || '?';
-            var name = stripHtml(rawName);
+            var name = c.name(spec) || '?';
             var st = c.status(spec);
             var isIdle = (st === S.SpecialistStatus.Idle);
 
@@ -262,7 +254,7 @@
                     if (iconId) portrait = getImageTag(iconId, '20px') + ' ';
                 }
             } catch (e) { /* ignore */ }
-            var nameCell = portrait + name;
+            var nameCell = portrait + h.escape(name);
 
             // Status with a leading dot (CSS coloured via row class).
             // Append the remaining time for busy explorers when the
@@ -286,7 +278,7 @@
                 var nt = c.pickTask(spec);
                 if (nt) next = c.taskLabel(nt);
             } catch (e) { /* keep '?' */ }
-            if (overrides[name]) next = next + ' *';
+            if (c.namedOverride(overrides, name)) next = next + ' *';
 
             var rowClass = isIdle ? 'steward-row-idle' : 'steward-row-busy';
             $panel.append(h.gridRow(
@@ -297,7 +289,6 @@
 
     S.modules.explorers.readSettings   = readSettings;
     S.modules.explorers.writeSettings  = writeSettings;
-    S.modules.explorers.stripHtml      = stripHtml;
     S.modules.explorers.renderSection  = renderSection;
     S.modules.explorers.summary        = summary;
     S.modules.explorers.showOverrides  = showOverrides;

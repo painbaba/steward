@@ -130,19 +130,6 @@
         };
     }
 
-    // The window stores names as HTML (colour spans etc.).
-    function stripName(html) {
-        if (typeof html !== 'string') return '';
-        return html
-            .replace(/<[^>]*>/g, '')
-            .replace(/&lt;/g, '<')
-            .replace(/&gt;/g, '>')
-            .replace(/&quot;/g, '"')
-            .replace(/&#39;/g, "'")
-            .replace(/&amp;/g, '&')
-            .replace(/^\s+|\s+$/g, '');
-    }
-
     function isPlainObject(v) {
         return v !== null && typeof v === 'object' && Object.prototype.toString.call(v) === '[object Object]';
     }
@@ -205,16 +192,17 @@
                     problems.push(problem(P.BadLine, key, 'buff line ' + key + ' has no target camp'));
                     continue;
                 }
+                // The battle window stores names as HTML (colour spans etc.).
                 line = {
                     key:        key,
                     kind:       kind,
                     grid:       null,
                     target:     isNum(raw.target) && raw.target > 0 ? raw.target : null,
-                    targetName: typeof raw.targetName === 'string' ? stripName(raw.targetName) : null,
+                    targetName: typeof raw.targetName === 'string' ? S.kernel.text.plain(raw.targetName) : null,
                     army:       {},
                     timeMs:     isNum(raw.time) ? raw.time : null,
                     order:      isNum(raw.order) ? raw.order : null,
-                    name:       stripName(raw.name),
+                    name:       S.kernel.text.plain(raw.name),
                     buffName:   typeof raw.name === 'string' ? raw.name : null
                 };
             } else {
@@ -232,11 +220,11 @@
                     kind:       raw.grid <= 0 ? L.Star : (hasTarget ? L.Attack : L.Move),
                     grid:       raw.grid,
                     target:     hasTarget ? raw.target : null,
-                    targetName: typeof raw.targetName === 'string' ? stripName(raw.targetName) : null,
+                    targetName: typeof raw.targetName === 'string' ? S.kernel.text.plain(raw.targetName) : null,
                     army:       copyArmy(raw.army),
                     timeMs:     isNum(raw.time) ? raw.time : null,
                     order:      isNum(raw.order) ? raw.order : null,
-                    name:       stripName(raw.name),
+                    name:       S.kernel.text.plain(raw.name),
                     buffName:   null
                 };
             }
@@ -354,7 +342,6 @@
         validate:       validate,
         load:           load,
         problem:        problem,
-        stripName:      stripName,
         isGeneralLine:  isGeneralLine,
         supplyWave:     supplyWave,
         loadoutKeys:    loadoutKeys,

@@ -276,3 +276,91 @@ t.test('plan dispatches nothing for a type whose byType fails', function () {
     });
     t.assert.ok(warns.length >= 1, 'a geologists warning should be logged');
 });
+
+var TAGGED = '<b>A &amp; B</b>';
+
+function planTagged(H, overrides, max) {
+    var cfg = onlyEnable('IronOre', max || 1);
+    cfg.overrides = overrides;
+    var z = H.zone.zone()
+        .deposits('IronOre', [])
+        .specialists([H.specs.geologist({ name: TAGGED, uid: 'g1' })])
+        .mountOnPlayer((H.host.game.gi.mCurrentPlayer = {}));
+    H.host.game.gi.mCurrentPlayerZone = z.zone;
+    H.settings.write('geologists', cfg);
+    H.module('geologists').plan({ zone: { isHome: true } });
+    return H.queued();
+}
+
+t.test('plan applies an override keyed by the clean, entity or raw name', function () {
+    ['A & B', 'A &amp; B', TAGGED].forEach(function (key) {
+        var other = {};
+        other[key] = ['Stone'];
+        var H = harness.boot();
+        t.assert.strictEqual(planTagged(H, other).length, 0, key);
+
+        var allowed = {};
+        allowed[key] = ['IronOre'];
+        H = harness.boot();
+        t.assert.strictEqual(planTagged(H, allowed).length, 1, key);
+    });
+});
+
+t.test('plan queues the clean name as the dispatch label', function () {
+    var H = harness.boot();
+    var q = planTagged(H, {});
+    t.assert.strictEqual(q.length, 1);
+    t.assert.strictEqual(q[0].params[1], 'A & B');
+});
+
+// renderSection with the helpers a headless context lacks replaced; gridRow
+// records its cells, deposit rows included.
+function renderRows(H, settingsObj) {
+    var real = H.Steward.kernel.ui.helpers;
+    var h = {};
+    var k;
+    for (k in real) {
+        if (Object.prototype.hasOwnProperty.call(real, k)) h[k] = real[k];
+    }
+    var rows = [];
+    function blank() { return H.host.$(); }
+    h.formRow = blank;
+    h.toggle = blank;
+    h.input = blank;
+    h.dropdown = blank;
+    h.settings = function () { return settingsObj; };
+    h.gridRow = function (cells) {
+        rows.push(cells);
+        return { addClass: function () { return this; } };
+    };
+    H.Steward.modules.geologists.renderSection(H.host.$(), h);
+    return rows;
+}
+
+function mountNamed(H, name) {
+    var z = H.zone.zone()
+        .deposits('IronOre', [])
+        .specialists([H.specs.geologist({ name: name, uid: 'g1' })])
+        .mountOnPlayer((H.host.game.gi.mCurrentPlayer = {}));
+    H.host.game.gi.mCurrentPlayerZone = z.zone;
+}
+
+t.test('the name cell escapes the decoded name', function () {
+    var H = harness.boot();
+    mountNamed(H, 'A &amp; &lt;B&gt;');
+    var rows = renderRows(H, { overrides: {}, deposits: {} });
+    var row = rows[rows.length - 1];
+    t.assert.strictEqual(row[0][1], 'A &amp; &lt;B&gt;');
+});
+
+t.test('the override star shows for an entity-form key only', function () {
+    var H = harness.boot();
+    mountNamed(H, 'A &amp; &lt;B&gt;');
+    var rows = renderRows(H, { overrides: { 'A &amp; &lt;B&gt;': ['IronOre'] }, deposits: {} });
+    var row = rows[rows.length - 1];
+    t.assert.ok(/ \*$/.test(row[0][1]), String(row[0][1]));
+    t.assert.ok(/^A &amp; &lt;B&gt;/.test(row[0][1]), String(row[0][1]));
+    rows = renderRows(H, { overrides: {}, deposits: {} });
+    row = rows[rows.length - 1];
+    t.assert.ok(!/ \*$/.test(row[0][1]), String(row[0][1]));
+});

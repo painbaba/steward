@@ -103,6 +103,8 @@ The numeric prefixes inside `src/kernel/` matter: `00_namespace.js` runs before 
 
 `17_files.js` follows the same rule and sits before `20_logger.js`, because the logger resolves its own log file through the file API.
 
+`16_text.js` holds the host-string cleaner and has no kernel dependencies, so it sits before everything that reads names.
+
 ## Lifecycle
 
 ```

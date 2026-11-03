@@ -117,6 +117,10 @@ var list   = Steward.core.specialists.geologists();
 if (Steward.core.specialists.dropped() !== before) return; // count is not reliable this tick
 ```
 
+## Rule 3.6: specialist names are plain text
+
+`Steward.core.specialists.name(spec)` returns plain text, so never strip it again. Escape it before it reaches `html()` (`h.escape`, as in the gridRow cells). Identify specialists by `uniqueIdKey` and not by name. Read name-keyed settings with `namedOverride(map, name)`, which also accepts keys saved with entities or markup.
+
 ## Rule 4: use the locale wrapper
 
 ```js

@@ -35,11 +35,6 @@
         S.kernel.settings.write('geologists', s);
     }
 
-    function stripHtml(s) {
-        if (typeof s !== 'string') return '';
-        return s.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '');
-    }
-
     function notify(text) {
         try { if (typeof showGameAlert === 'function') showGameAlert('Steward: ' + text); }
         catch (e) { /* best effort */ }
@@ -139,7 +134,7 @@
             for (var r = 0; r < topN; r++) {
                 var row = ranked[r];
                 if (row.capacityFactor <= 1 && row.timeFactor >= 1) break;  // out of "interesting" picks
-                var nm = stripHtml(c.name(row.geo)) || '?';
+                var nm = c.name(row.geo) || '?';
                 var st = c.status(row.geo);
                 var stTag = (st === S.SpecialistStatus.Idle) ? '[idle]' : '[busy]';
                 S.kernel.log('geologists',
@@ -265,8 +260,8 @@
 
         // Sort alphabetical by display name for stable rendering.
         geos.sort(function (a, b) {
-            var na = stripHtml(c.name(a) || '').toLowerCase();
-            var nb = stripHtml(c.name(b) || '').toLowerCase();
+            var na = (c.name(a) || '').toLowerCase();
+            var nb = (c.name(b) || '').toLowerCase();
             if (na < nb) return -1;
             if (na > nb) return 1;
             return 0;
@@ -282,8 +277,7 @@
 
         for (var i = 0; i < geos.length; i++) {
             var spec = geos[i];
-            var rawName = c.name(spec) || '?';
-            var name = stripHtml(rawName);
+            var name = c.name(spec) || '?';
             var st = c.status(spec);
             var isIdle = (st === S.SpecialistStatus.Idle);
 
@@ -295,8 +289,8 @@
                     if (iconId) portrait = getImageTag(iconId, '20px') + ' ';
                 }
             } catch (e) { /* ignore */ }
-            var nameCell = portrait + name;
-            if (overrides[name]) nameCell = nameCell + ' *';
+            var nameCell = portrait + h.escape(name);
+            if (c.namedOverride(overrides, name)) nameCell = nameCell + ' *';
 
             var statusCell;
             if (isIdle) {
@@ -350,7 +344,6 @@
 
     S.modules.geologists.readSettings  = readSettings;
     S.modules.geologists.writeSettings = writeSettings;
-    S.modules.geologists.stripHtml     = stripHtml;
     S.modules.geologists.renderSection = renderSection;
     S.modules.geologists.summary       = summary;
     S.modules.geologists.showRanking   = showRanking;

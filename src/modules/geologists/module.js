@@ -37,11 +37,6 @@
         return S.modules.geologists.defaultSettings;
     }
 
-    function stripHtml(name) {
-        if (S.modules.geologists.stripHtml) return S.modules.geologists.stripHtml(name);
-        return (typeof name === 'string') ? name.replace(/<[^>]+>/g, '') : '';
-    }
-
     function isReady(ctx) {
         var s = readSettings();
         if (!s || !s.enabled) return false;
@@ -79,8 +74,7 @@
         var out = [];
         for (var i = 0; i < idle.length; i++) {
             var g = idle[i];
-            var key = stripHtml(c.name(g));
-            var ov = overrides && key && overrides[key];
+            var ov = c.namedOverride(overrides, c.name(g));
             if (ov && ov.length) {
                 var allowed = false;
                 for (var j = 0; j < ov.length; j++) {
@@ -168,7 +162,7 @@
                 // best.uid is non-null: the ranking skips entries without one.
                 assigned[best.uid] = true;
 
-                var displayName = stripHtml(c.name(best.geo)) || '?';
+                var displayName = c.name(best.geo) || '?';
                 picks.push([best.uid, displayName, info.name]);
             }
         }

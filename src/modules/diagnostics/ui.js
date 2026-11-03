@@ -347,14 +347,10 @@
         var name = '?';
         try { name = c.name ? c.name(spec) : '?'; }
         catch (e) { /* ignore */ }
-        // Strip the host's HTML wrappers in display names so the log is readable.
-        var cleanName = (typeof name === 'string')
-            ? name.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '')
-            : String(name);
 
         S.kernel.log(ctx.cat, '');
         S.kernel.log(ctx.cat, '====== ' + ctx.label + ' GetType=' + typeNum +
-                              ' (' + cleanName + ')' +
+                              ' (' + name + ')' +
                               (ctx.header ? ' ' + ctx.header : '') + ' ======');
 
         // 1. Top-level spec — gives us the basics + any direct properties.

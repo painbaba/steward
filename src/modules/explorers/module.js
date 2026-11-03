@@ -30,13 +30,6 @@
             : S.modules.explorers.defaultSettings;
     }
 
-    function stripHtml(name) {
-        if (S.modules.explorers && S.modules.explorers.stripHtml) {
-            return S.modules.explorers.stripHtml(name);
-        }
-        return (typeof name === 'string') ? name.replace(/<[^>]+>/g, '') : '';
-    }
-
     // Per-explorer overrides accept ANY known ExplorerTask — both treasure
     // searches and adventure-zone searches. Dispatch packet selection
     // (taskId=1 vs taskId=2) is handled inside core.specialists.send via
@@ -48,13 +41,12 @@
 
         // 1. Per-name override (Steward's settings).
         if (s.overrides) {
-            var rawName = c.name(explorer);
-            var key = stripHtml(rawName);
-            if (key && s.overrides[key]) {
-                var enumVal = s.overrides[key];
+            var name = c.name(explorer);
+            var enumVal = c.namedOverride(s.overrides, name);
+            if (enumVal) {
                 if (c.knownTask(enumVal)) return enumVal;
                 S.kernel.warn('explorers',
-                    'override for', key, 'is not a recognised ExplorerTask value:', enumVal);
+                    'override for', name, 'is not a recognised ExplorerTask value:', enumVal);
             }
         }
 
@@ -115,7 +107,7 @@
             // would queue an action that can never re-find its explorer.
             var uidKey = c.uniqueIdKey(spec);
             if (!uidKey) continue;
-            var name = stripHtml(c.name(spec)) || '?';
+            var name = c.name(spec) || '?';
             S.kernel.queue.add('explorers.dispatch',
                 [uidKey, name, task],
                 i === 0 ? 0 : delay);

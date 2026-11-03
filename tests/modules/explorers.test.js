@@ -147,3 +147,73 @@ t.test('dispatch of a key that is really absent on a clean read still warns', fu
     t.assert.strictEqual(warns.length, 1);
     t.assert.ok(/could not re-find/.test(String(warns[0].args[0])), String(warns[0].args[0]));
 });
+
+// An override value pickTask would not choose for a vanilla explorer.
+function planNames(H, name, overrides) {
+    mount(H, [explorer(H, { name: name, uid: 'e1' })]);
+    H.settings.write('explorers', { enabled: true, dispatchDelay: 0, overrides: overrides });
+    H.module('explorers').plan({ zone: { isHome: true } });
+    return H.queued();
+}
+
+t.test('plan applies an override keyed by the clean, entity or raw name', function () {
+    var keys = ['A & B', 'A &amp; B', '<b>A &amp; B</b>'];
+    keys.forEach(function (key) {
+        var H = harness.boot();
+        var ov = {};
+        ov[key] = H.Steward.ExplorerTask.AdventureZoneLong;
+        var q = planNames(H, '<b>A &amp; B</b>', ov);
+        t.assert.strictEqual(q.length, 1, key);
+        t.assert.strictEqual(q[0].params[2], H.Steward.ExplorerTask.AdventureZoneLong, key);
+    });
+});
+
+t.test('plan queues the clean name as the dispatch label', function () {
+    var H = harness.boot();
+    var q = planNames(H, "<b>Ghost #2</b> <font size='-3'>(Ghost General)</font>", {});
+    t.assert.strictEqual(q.length, 1);
+    t.assert.strictEqual(q[0].params[1], 'Ghost #2 (Ghost General)');
+});
+
+// renderSection with the helpers a headless context lacks replaced; gridRow
+// records its cells. Returns the recorded rows.
+function renderRows(H, settingsObj) {
+    var real = H.Steward.kernel.ui.helpers;
+    var h = {};
+    var k;
+    for (k in real) {
+        if (Object.prototype.hasOwnProperty.call(real, k)) h[k] = real[k];
+    }
+    var rows = [];
+    function blank() { return H.host.$(); }
+    h.formRow = blank;
+    h.toggle = blank;
+    h.input = blank;
+    h.dropdown = blank;
+    h.settings = function () { return settingsObj; };
+    h.gridRow = function (cells) {
+        rows.push(cells);
+        return { addClass: function () { return this; } };
+    };
+    H.Steward.modules.explorers.renderSection(H.host.$(), h);
+    return rows;
+}
+
+t.test('the name cell escapes the decoded name', function () {
+    var H = harness.boot();
+    mount(H, [explorer(H, { name: 'A &amp; &lt;B&gt;', uid: 'e1' })]);
+    var rows = renderRows(H, { overrides: {} });
+    var row = rows[rows.length - 1];
+    t.assert.strictEqual(row[0][1], 'A &amp; &lt;B&gt;');
+});
+
+t.test('the override star shows for an entity-form key only', function () {
+    var H = harness.boot();
+    mount(H, [explorer(H, { name: 'A &amp; &lt;B&gt;', uid: 'e1' })]);
+    var rows = renderRows(H, { overrides: { 'A &amp; &lt;B&gt;': H.Steward.ExplorerTask.AdventureZoneLong } });
+    var row = rows[rows.length - 1];
+    t.assert.ok(/ \*$/.test(row[3][1]), String(row[3][1]));
+    rows = renderRows(H, { overrides: {} });
+    row = rows[rows.length - 1];
+    t.assert.ok(!/ \*$/.test(row[3][1]), String(row[3][1]));
+});
