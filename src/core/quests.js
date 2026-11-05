@@ -10,6 +10,14 @@
  * that verifies by absence must never mistake an unreadable pool for a
  * claimed quest. This is the failure contract of core/actions.js.
  *
+ * A claim is verified by the server's result callback for the current send
+ * (game.createResponder, a ServerState::ResponderSimple), or by the quest key
+ * leaving the same zone's pool. A claimed quest stays in the pool for a while,
+ * so absence alone often comes too late. A fault, a result for an earlier
+ * send, a missing response or "no longer finished" are never success.
+ *
+ * Pool entries without an isFinished method are not quests and are skipped.
+ *
  * Claiming the last quest of an adventure closes the adventure, so claim()
  * refuses it unless the caller passes allowLast.
  *
@@ -63,6 +71,24 @@
         return null;
     }
 
+    // The pool can hold entries that are not quest objects; they have no
+    // isFinished and must neither be listed nor claimed.
+    function isQuest(q) {
+        return !!q && typeof q.isFinished === 'function';
+    }
+
+    // The host responder for a claim, or null when the host has none. Called
+    // as a method on game because createResponder reads its own this.
+    function claimResponder(onResult, onFault) {
+        try {
+            if (typeof game === 'undefined' || !game || typeof game.createResponder !== 'function') return null;
+            return game.createResponder(onResult, onFault) || null;
+        } catch (e) {
+            S.kernel.warn('quests', 'createResponder threw:', e);
+            return null;
+        }
+    }
+
     // True when the quest definition carries the last-quest marker.
     function isLast(q) {
         try {
@@ -83,6 +109,10 @@
         for (var i = 0; i < qs.length; i++) {
             try {
                 var q = qs[i];
+                if (!isQuest(q)) {
+                    S.kernel.debug('quests', 'quest entry ' + i + ' is not a quest, skipped');
+                    continue;
+                }
                 var key = keyOf(q);
                 if (key === null) continue;
                 var name = '';
@@ -112,6 +142,7 @@
         var qs = readPool();
         if (qs === null) return null;
         for (var i = 0; i < qs.length; i++) {
+            if (!isQuest(qs[i])) continue;
             if (keyOf(qs[i]) === key) return qs[i];
         }
         return null;
@@ -126,18 +157,27 @@
 
     // Def that claims the finished quest with this uid key. opts.allowLast
     // lets it claim the adventure's last quest (which closes the adventure).
-    // Verified when the quest has left the pool by its key in the same zone. "No longer
-    // finished" is not a success signal: the send itself puts the quest into
-    // claim mode on the client, which can make isFinished read false. There is
-    // no satisfied(): an absent quest is a refusal, not an earlier success.
+    // Verified when the server's result callback for the current send fires,
+    // or when the quest has left the pool by its key in the same zone. A
+    // fault, a result that belongs to an earlier send or no response at all
+    // do not verify. "No longer finished" is not a success signal either: the
+    // send itself puts the quest into claim mode on the client, which can make
+    // isFinished read false. There is no satisfied(): an absent quest is a
+    // refusal, not an earlier success.
     function claim(key, opts) {
         var allowLast = !!(opts && opts.allowLast);
+        var label = 'claim quest ' + key;
         // Set by send. The retry must not refuse because the quest no longer
         // reads finished after our own SetQuestMode.
         var sentOnce = false;
+        // Per-send token: send numbers each message, a result callback records
+        // its own number only while that send is still the latest one, so a
+        // late answer to an earlier send never verifies a later one.
+        var sendSeq = 0;
+        var ackSeq = 0;
 
         return {
-            label:     'claim quest ' + key,
+            label:     label,
             category:  'quests',
             timeoutMs: CLAIM_TIMEOUT_MS,
 
@@ -169,11 +209,37 @@
                 sentOnce = true;
                 sa.type = CLAIM_TYPE;
                 sa.data = q.GetUniqueId();
-                return S.core.packets.sendMessage(CLAIM_MESSAGE, sa) === true;
+                sendSeq++;
+                var seq = sendSeq;
+                // Both callbacks run inside the host's dispatch loop, so
+                // nothing may escape them.
+                var responder = claimResponder(
+                    function () {
+                        try {
+                            if (seq === sendSeq) ackSeq = seq;
+                            S.kernel.debug('quests', label + ': server result for send ' + seq +
+                                (seq === sendSeq ? '' : ' (stale, ignored)'));
+                        } catch (e) {
+                            S.kernel.error('quests', label + ': result callback threw:', e);
+                        }
+                    },
+                    function (f) {
+                        try {
+                            S.kernel.warn('quests', label + ': server fault for send ' + seq, f);
+                        } catch (e) {
+                            S.kernel.error('quests', label + ': fault callback threw:', e);
+                        }
+                    }
+                );
+                if (!responder) S.kernel.debug('quests', label + ': no host responder, verifying by absence only');
+                return S.core.packets.sendMessage(CLAIM_MESSAGE, sa, responder) === true;
             },
 
             check: function (base) {
                 if (!base || base.found !== true) return false;
+                // The server answered our own latest send; that send carried
+                // the zone id at send time, so no zone guard is needed here.
+                if (sendSeq > 0 && ackSeq === sendSeq) return true;
                 var zoneId = S.core.zone.id();
                 if (typeof zoneId !== 'number' || zoneId !== base.zoneId) return false;
                 var all = list();

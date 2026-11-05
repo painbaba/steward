@@ -4,18 +4,30 @@ var t = require('../runner');
 var harness = require('../harness');
 var AC = require('../stubs/actions');
 
-// A fake quest pool. Each quest: { key, name, finished, special, throwOn }.
-// The pool can be made unreadable through world.broken.
+// A fake quest pool. Each quest: { key, name, finished, special, throwOn, half }.
+// half: true yields an object that is not a quest (only GetUniqueId); throwOn
+// 'finished' makes isFinished throw. The pool can be made unreadable through
+// world.broken.
 function world(H, quests) {
     var w = { quests: quests, broken: false, modes: [] };
     function fake(q) {
+        if (q.half === true) {
+            return {
+                GetUniqueId: function () {
+                    return { toKeyString: function () { return q.key; } };
+                }
+            };
+        }
         return {
             GetUniqueId:       function () {
                 if (q.throwOn === 'uid') throw new Error('uid failed');
                 return { toKeyString: function () { return q.key; } };
             },
             getQuestName_string: function () { return q.name || q.key; },
-            isFinished:          function () { return q.finished === true; },
+            isFinished:          function () {
+                if (q.throwOn === 'finished') throw new Error('finished failed');
+                return q.finished === true;
+            },
             SetQuestMode:        function (mode) { w.modes.push(mode); },
             GetQuestDefinition:  function () { return { specialType_string: q.special || '' }; }
         };
@@ -35,9 +47,15 @@ function world(H, quests) {
     return w;
 }
 
-function boot(quests) {
+// opts.noResponder leaves the host without game.createResponder.
+function boot(quests, opts) {
     var H = harness.boot({ sections: ['kernel', 'core'] });
     H.host.game.gi.mCurrentViewedZoneID = 5;
+    if (!(opts && opts.noResponder)) {
+        H.host.game.createResponder = function (onResult, onFault) {
+            return { onResult: onResult, onFault: onFault };
+        };
+    }
     var sent = AC.wire(H);
     var w = world(H, quests);
     return { H: H, S: H.Steward, Q: H.Steward.core.quests, sent: sent, w: w };
@@ -52,6 +70,11 @@ function run(b, def, onStep) {
 
 function keys(l) {
     return l.map(function (e) { return e.key; }).join(',');
+}
+
+// Fires a callback of the responder that went out with message i.
+function respond(b, i, kind) {
+    b.sent.messages[i].responder[kind]({});
 }
 
 function drop(b, key) {
@@ -190,4 +213,104 @@ t.test('claim is not verified when the zone changes and the quest is absent ther
     // The retry is refused (the quest is not in the new zone's pool); the
     // point is that the absence is never taken as a claim.
     t.assert.strictEqual(r.sends, 1);
+});
+
+t.test('claim verified by the server result while the quest stays in the pool', function () {
+    var b = boot([{ key: 'a', finished: true }]);
+    var r = run(b, b.Q.claim('a'), function () {
+        b.w.quests[0].finished = false;
+        if (b.sent.messages.length === 1) respond(b, 0, 'onResult');
+    });
+    t.assert.strictEqual(r.status, b.S.ActionResult.Verified);
+    t.assert.strictEqual(r.sends, 1);
+    t.assert.strictEqual(b.sent.messages.length, 1);
+    t.assert.ok(b.sent.messages[0].responder !== null);
+});
+
+t.test('claim is not verified by a server fault', function () {
+    var b = boot([{ key: 'a', finished: true }]);
+    var fired = false;
+    var r = run(b, b.Q.claim('a'), function () {
+        if (!fired && b.sent.messages.length === 1) {
+            fired = true;
+            respond(b, 0, 'onFault');
+        }
+    });
+    t.assert.strictEqual(r.status, b.S.ActionResult.Failed);
+    t.assert.strictEqual(r.sends, 2);
+    t.assert.strictEqual(r.unseen, true);
+    var warned = b.H.logs().filter(function (e) {
+        return e.level === 'warn' && e.category === 'quests' && String(e.args[0]).indexOf('server fault') >= 0;
+    });
+    t.assert.ok(warned.length >= 1);
+});
+
+t.test('claim without any response fails after two sends', function () {
+    var b = boot([{ key: 'a', finished: true }]);
+    var r = run(b, b.Q.claim('a'));
+    t.assert.strictEqual(r.status, b.S.ActionResult.Failed);
+    t.assert.strictEqual(r.sends, 2);
+    t.assert.strictEqual(b.sent.messages.length, 2);
+});
+
+t.test('claim ignores a stale result from an earlier send', function () {
+    var b = boot([{ key: 'a', finished: true }]);
+    var fired = false;
+    var r = run(b, b.Q.claim('a'), function () {
+        if (!fired && b.sent.messages.length === 2) {
+            fired = true;
+            respond(b, 0, 'onResult');
+        }
+    });
+    t.assert.strictEqual(r.status, b.S.ActionResult.Failed);
+    t.assert.strictEqual(r.sends, 2);
+
+    var c = boot([{ key: 'a', finished: true }]);
+    fired = false;
+    r = run(c, c.Q.claim('a'), function () {
+        if (!fired && c.sent.messages.length === 2) {
+            fired = true;
+            respond(c, 1, 'onResult');
+        }
+    });
+    t.assert.strictEqual(r.status, c.S.ActionResult.Verified);
+    t.assert.strictEqual(r.sends, 2);
+});
+
+t.test('claim falls back to absence when the host has no createResponder', function () {
+    var b = boot([{ key: 'a', finished: true }], { noResponder: true });
+    var r = run(b, b.Q.claim('a'), function () { drop(b, 'a'); });
+    t.assert.strictEqual(r.status, b.S.ActionResult.Verified);
+    t.assert.strictEqual(r.sends, 1);
+    t.assert.strictEqual(b.sent.messages.length, 1);
+    t.assert.strictEqual(b.sent.messages[0].responder, null);
+});
+
+t.test('list skips an entry that is not a quest without a warning', function () {
+    var b = boot([{ key: 'h', half: true }, { key: 'b', finished: true }]);
+    t.assert.strictEqual(keys(b.Q.list()), 'b');
+    var logs = b.H.logs().filter(function (e) { return e.category === 'quests'; });
+    t.assert.strictEqual(logs.filter(function (e) { return e.level === 'warn'; }).length, 0);
+    var dbg = logs.filter(function (e) {
+        return e.level === 'debug' && String(e.args[0]).indexOf('not a quest') >= 0;
+    });
+    t.assert.strictEqual(dbg.length, 1);
+});
+
+t.test('list still warns when isFinished throws', function () {
+    var b = boot([{ key: 'x', throwOn: 'finished' }, { key: 'b', finished: true }]);
+    t.assert.strictEqual(keys(b.Q.list()), 'b');
+    var warned = b.H.logs().filter(function (e) {
+        return e.level === 'warn' && e.category === 'quests';
+    });
+    t.assert.ok(warned.length >= 1);
+});
+
+t.test('claim refuses a key whose only entry is not a quest', function () {
+    var b = boot([{ key: 'h', half: true }]);
+    var r = run(b, b.Q.claim('h'));
+    t.assert.strictEqual(r.status, b.S.ActionResult.Refused);
+    t.assert.strictEqual(r.reason, 'quest not found');
+    t.assert.strictEqual(b.sent.messages.length, 0);
+    t.assert.strictEqual(b.w.modes.length, 0);
 });

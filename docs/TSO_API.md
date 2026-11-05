@@ -100,7 +100,7 @@ Host calls behind the core write actions (each is wrapped by `Steward.core.packe
 | `SendMessagetoServer(1031, dRaiseArmyVO)` with `armyHolderSpecialistVO` and one `dResourceVO` per unit | `army.raise` (the general must stand on a map grid: `GetGarrison()` is null at the star and the server refuses the raise) |
 | `cMilitaryUtil.SendRaiseArmyToServer(game.gi, spec, null)` | `army.unload` |
 | `SendMessagetoServer(91, dTimedProductionVO)`, one per stack shape; queue 0 is the barracks, 8 the elite barracks | `production.order` |
-| `quest.SetQuestMode(1)`, then `SendMessagetoServer(100, dServerAction)` with `type = 1` and `data = quest.GetUniqueId()` | `quests.claim` |
+| `quest.SetQuestMode(1)`, then `SendMessagetoServer(100, dServerAction, responder)` with `type = 1`, `data = quest.GetUniqueId()` and `responder = game.createResponder(onResult, onFault)` (`ServerState::ResponderSimple`). The claim is verified by the server's result callback for the current send, or by the quest leaving the zone's pool (a claimed quest stays in the pool for a while). A fault, a stale callback or `isFinished` turning false is never a success | `quests.claim` |
 | `AdventureManager.removeAdventure(zoneId)` | `adventures.close` |
 | `game.getResources().GetResourceAmount(name)` and `.GetFree()` | `resources.amount`, `resources.freePopulation` |
 | `unitBase.GetCosts_vector()` | `production.costs` |
