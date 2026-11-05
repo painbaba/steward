@@ -736,6 +736,43 @@ t.test('Validate: a flip before the check holds with no WaveFile pause', functio
     assertStep(w, 'Snapshot');
 });
 
+// A carrier is listed beside the generals, as in the live log.
+function carrierHome() {
+    var w = homeWorld();
+    w.lists[HOME].push(AC.general({ uid: '1.5', name: 'Cara', grid: 30, carrier: true, maxUnits: 10 }));
+    return w;
+}
+
+t.test('Validate: a null read in the check holds, generals lost and a carrier kept', function () {
+    var w = carrierHome();
+    startRun(w, [WAVE], { step: w.S.RunStep.Validate, loadoutKeys: KEYS });
+    w.afterRead(function () { w.nullListRead(1); });
+    tick(w);
+    assertStep(w, 'Validate');
+    tick(w);
+    assertStep(w, 'Snapshot');
+});
+
+t.test('Validate: a null read at the end of the check holds', function () {
+    var w = carrierHome();
+    startRun(w, [WAVE], { step: w.S.RunStep.Validate, loadoutKeys: KEYS });
+    w.afterRead(function () { w.nullListRead(2); });
+    tick(w);
+    assertStep(w, 'Validate');
+    tick(w);
+    assertStep(w, 'Snapshot');
+});
+
+t.test('Validate: a null read in the own inventory of the step holds', function () {
+    var w = homeWorld();
+    startRun(w, [WAVE], { step: w.S.RunStep.Validate });
+    w.nullListRead(1);
+    tick(w);
+    assertStep(w, 'Validate');
+    tick(w);
+    assertStep(w, 'Snapshot');
+});
+
 // ---- starting a run ---------------------------------------------------------------
 
 function template(w) {
@@ -760,6 +797,19 @@ t.test('Start on the island: a ghost starts nothing and says to retry; the clean
     tick(w);
     assert.strictEqual(run.start(id), true);
     assert.strictEqual(w.st.run().step, w.S.WaveStep.Gate);
+});
+
+t.test('Start on the island: an unreadable list says to retry, not cannot start', function () {
+    var w = islandWorld();
+    var id = template(w);
+    var run = w.S.modules.adventures.run;
+    w.nullListRead(1);
+    assert.strictEqual(run.start(id), false);
+    assert.strictEqual(w.st.run(), null);
+    assert.ok(w.alerts.some(function (a) { return /cannot be read right now; try again/.test(a); }), w.alerts.join(' | '));
+    assert.ok(!w.alerts.some(function (a) { return /cannot start/.test(a); }), w.alerts.join(' | '));
+    tick(w);
+    assert.strictEqual(run.start(id), true);
 });
 
 t.test('Start at home: the generals play no part, so a ghost does not stop it', function () {

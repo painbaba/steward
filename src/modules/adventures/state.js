@@ -35,8 +35,9 @@
  * this step: { since, last, ms }), missing (general key -> { since, last } of
  * the reads that lacked it), busy (the busy wait of this run and step: { runId,
  * step, key, text, since, noted, read }, read marking a wait kept alive by a bad
- * read) and busySeen (whether this pass kept that wait going).
- * They describe callbacks and reads of this client session, which do not
+ * read), busySeen (whether this pass kept that wait going), stuckClock (the
+ * watched-wait clock of the zone trip, in the shape of quiet) and zoneWait
+ * (whether the "waiting for zone" line was logged). They describe callbacks and reads of this client session, which do not
  * exist after a restart.
  * resetMemory() is the one place that resets them for a new or loaded run.
  * The round alone is also dropped at bundle load and by dropRound(), because a reload or a
@@ -58,6 +59,12 @@
  * Gate instead, which re-reads the wave file. Unseen send markers (wave
  * lines and series marks) are cleared, so an order that never showed in the
  * game may be sent again.
+ *
+ * A step on the island whose wait does not end may take a zone trip: home
+ * and back, after which the step is entered again. run.resolve holds the
+ * trip in progress and run.stuck the trips taken at one stuck position; both
+ * are persisted, so a trip goes on after a client restart. A step change ends
+ * the trip, and Resume clears both, because the user has looked.
  *
  * now() is the one clock of the run; callers read it through the namespace
  * at call time, so tests can replace it.
@@ -164,6 +171,10 @@
     S.RunPause.ClearTimeout      = 'PauseClearTimeout';
     S.RunPause.RetrainShort      = 'PauseRetrainShort';
     S.RunPause.RetrainFailed     = 'PauseRetrainFailed';
+    S.RunPause.Stuck             = 'PauseStuck';
+
+    // The phases of the zone trip, persisted in run.json as run.resolve.phase.
+    var ResolvePhase = { Home: 'home', Wait: 'wait', Back: 'back' };
 
     var FILE_VERSION = 1;
     var SUBDIR = 'adventures';
@@ -244,6 +255,19 @@
         return i < 0 ? 0 : RUN_STEPS[i][2];
     }
 
+    // Whether the step is flagged long in RUN_STEPS (its long column).
+    function isLongStep(step) {
+        var i = stepIndex(step);
+        return i >= 0 && RUN_STEPS[i][6] === true;
+    }
+
+    // The busy record of the run's current step, or null: a record left by
+    // another run or step is no wait of this one.
+    function busyOf(r) {
+        var b = current().busy;
+        return b && r && b.runId === r.id && b.step === r.step ? b : null;
+    }
+
     // Whether the run waits for something that takes minutes, so the tick is
     // enough to see it end. A blocker covers Settle and the wait for production
     // at home, which are no long steps by themselves, and so does a busy
@@ -251,10 +275,9 @@
     // record may be absent after a script reload.
     function waitsLong(r) {
         if (r.blocker) return true;
-        var b = current().busy;
-        if (b && b.runId === r.id && b.step === r.step && clock() - b.since >= BUSY_FAST_MS) return true;
-        var i = stepIndex(r.step);
-        return i >= 0 && RUN_STEPS[i][6] === true;
+        var b = busyOf(r);
+        if (b && clock() - b.since >= BUSY_FAST_MS) return true;
+        return isLongStep(r.step);
     }
 
     // The property of S.modules.adventures whose plan() runs the step, or
@@ -267,19 +290,59 @@
         return null;
     }
 
+    // Whether the step may take a zone trip when its wait does not end: the
+    // wave steps and the short island steps. The long steps wait for the game
+    // on purpose (the travel to the map, the last quest), so a long watched
+    // wait is no sign of a stale read there; home and any-zone steps are not
+    // on the island.
+    function tripAllowed(step) {
+        if (isWaveStep(step)) return true;
+        return whereOf(step) === ADVENTURE && !isLongStep(step);
+    }
+
+    // Whether the trip count in r.stuck belongs to the stuck position of step:
+    // the same wave, and the same series step (every wave step shares one
+    // position, so a wave that loops Gate -> Supply keeps its count).
+    function sameStuck(r, step) {
+        return !!(r && r.stuck) && r.stuck.wave === r.waveIndex &&
+            position(r.stuck.step) === position(step);
+    }
+
+    // The viewed zone in the shape of the scheduler context, or null while
+    // the game cannot be read (not loaded yet).
+    function viewedZone() {
+        try {
+            return { id: S.core.zone.id(), isHome: S.core.zone.isHome(), isAdventure: S.core.zone.isAdventure() };
+        } catch (e) {
+            return null;
+        }
+    }
+
     // Whether the run's step may run on the zone the scheduler saw
-    // ({ id, isHome }). A wave step runs on the run's island like an
-    // ADVENTURE step. An unknown step runs nowhere.
+    // ({ id, isHome, isAdventure }); a null zone reads the core. A wave step
+    // runs on the run's island like an ADVENTURE step, which needs the island
+    // loaded as an adventure too: the id alone is set before the island is
+    // there. An unknown step runs nowhere.
     function readyOn(r, zone) {
         if (!r) return false;
-        var z = zone || {};
+        // The zone trip travels on purpose, and the step's part is not called
+        // while it lasts, so every zone is right for it.
+        if (r.resolve) return true;
+        var z = zone === null || zone === undefined ? viewedZone() : zone;
+        if (!z) return false;
         var w = isWaveStep(r.step) ? ADVENTURE : whereOf(r.step);
         if (w === ANY) return true;
         if (w === HOME) {
             if (typeof z.isHome === 'boolean') return z.isHome;
-            return !!(S.core.zone && S.core.zone.isHome() === true);
+            var h = viewedZone();
+            return !!(h && h.isHome === true);
         }
-        if (w === ADVENTURE) return typeof r.zoneId === 'number' && z.id === r.zoneId;
+        if (w === ADVENTURE) {
+            if (typeof r.zoneId !== 'number' || z.id !== r.zoneId) return false;
+            if (typeof z.isAdventure === 'boolean') return z.isAdventure;
+            var v = viewedZone();
+            return !!(v && v.isAdventure === true);
+        }
         return false;
     }
 
@@ -289,10 +352,8 @@
     // step. The game may not be loaded when the menu opens.
     function viewHint(r) {
         if (!r || r.status !== S.RunStatus.Running) return '';
-        var zone;
-        try { zone = { id: S.core.zone.id(), isHome: S.core.zone.isHome() }; }
-        catch (e) { return ''; }
-        if (readyOn(r, zone)) return '';
+        var zone = viewedZone();
+        if (!zone || readyOn(r, zone)) return '';
         return !isWaveStep(r.step) && whereOf(r.step) === HOME ? 'go home' : 'view the island';
     }
 
@@ -429,7 +490,7 @@
         if (r.status === S.RunStatus.Paused) {
             return 'Paused: ' + where + ': ' + (r.pause ? r.pause.message : '');
         }
-        return 'Running: ' + where;
+        return 'Running: ' + where + (r.resolve ? ' (zone trip: ' + r.resolve.phase + ')' : '');
     }
 
     // The short head of the run menu: the rows below it carry the step and
@@ -510,6 +571,8 @@
         rs.missing = {};
         rs.busy = null;
         rs.busySeen = false;
+        rs.stuckClock = null;
+        rs.zoneWait = false;
     }
 
     // The only literal of the run object. start holds the facts fixed at
@@ -525,7 +588,9 @@
     // is the free population read before the last population buff, so the
     // next pass can tell whether the buff took effect. settledAt is when the
     // island was first seen quiet in an unbroken row of passes while Settle
-    // holds (null: not quiet).
+    // holds (null: not quiet). resolve is the zone trip in progress ({ phase,
+    // at }, at being when home was loaded; null: none). stuck counts the zone
+    // trips taken at one stuck position ({ step, wave, trips }; null: none).
     function newRun(start) {
         var s = isPlainObject(start) ? start : {};
         var t = clock();
@@ -556,6 +621,8 @@
             marks:       {},
             waitUntil:   null,
             popBase:     null,
+            resolve:     null,
+            stuck:       null,
             pause:       null
         };
     }
@@ -632,6 +699,18 @@
         };
     }
 
+    // A zone trip with a phase the code does not know cannot be continued, so
+    // it is dropped and the step simply runs again.
+    function normResolve(v) {
+        if (!isPlainObject(v) || !isValue(ResolvePhase, v.phase)) return null;
+        return { phase: v.phase, at: num(v.at) };
+    }
+
+    function normStuck(v) {
+        if (!isPlainObject(v) || !isStep(v.step)) return null;
+        return { step: v.step, wave: count(v.wave), trips: count(v.trips) };
+    }
+
     function filePause(r, reason, message) {
         r.status = S.RunStatus.Paused;
         r.pause = {
@@ -686,6 +765,8 @@
         r.marks      = normLines(v.marks);
         r.waitUntil  = num(v.waitUntil);
         r.popBase    = num(v.popBase);
+        r.resolve    = normResolve(v.resolve);
+        r.stuck      = normStuck(v.stuck);
         r.pause      = normPause(v.pause);
         for (k in facts) {
             if (has(facts, k)) r[k] = facts[k];
@@ -694,6 +775,8 @@
             repaired.push('unknown step ' + String(r.step) + ' -> Gate');
             r.step = S.WaveStep.Gate;
         }
+        // A finished run takes no trip; only a running or paused one goes on.
+        if (r.resolve && r.status !== S.RunStatus.Running && r.status !== S.RunStatus.Paused) r.resolve = null;
         if (!isValue(S.RunStatus, r.status)) {
             repaired.push('unknown status ' + String(r.status) + ' -> Paused');
             filePause(r, S.RunPause.NotObserved, 'state file had an unknown status');
@@ -755,7 +838,8 @@
     // Attack -> Confirm, which reads the round's results). Going to the same
     // step re-enters it with fresh rounds and a fresh start time. Every step
     // change drops the waiting deadline and the busy wait; a waiting step sets
-    // its own.
+    // its own. A step change also ends any zone trip, while the trip count
+    // lasts as long as the run stays at the same wave or series step.
     function go(step, why, opts) {
         var rs = current();
         var r = rs.run;
@@ -769,6 +853,8 @@
         // PackStar); otherwise the line names where the run now is.
         var where = isWaveStep(from) ? labelOf(from) : labelOf(step);
         r.step = step;
+        r.resolve = null;
+        if (r.stuck && !sameStuck(r, step)) r.stuck = null;
         r.since = clock();
         r.waitUntil = null;
         rs.busy = null;
@@ -833,9 +919,22 @@
         return cleared;
     }
 
+    // Enters the current step again: a wave step restarts its wave at Gate, a
+    // series step starts over with fresh rounds. The Settle blocker and the
+    // settle cycle count belong to the left attempt, so they go too; otherwise
+    // a stale blocker keeps every later short wait on the fast poll.
+    function reenter(why) {
+        var r = current().run;
+        if (!r) return false;
+        r.blocker = null;
+        r.settleFrom = null;
+        r.cycles = 0;
+        return go(isWaveStep(r.step) ? S.WaveStep.Gate : r.step, why);
+    }
+
     // The user has looked at the game: a line or order that was sent but
-    // never seen may be sent again. A wave step restarts its wave at Gate;
-    // a series step is entered again with fresh rounds.
+    // never seen may be sent again. The step itself is entered again through
+    // reenter(); resume adds the reset of the unseen send markers.
     function resume() {
         var rs = current();
         var r = rs.run;
@@ -849,12 +948,12 @@
             S.kernel.log('adventures', 'resume: sent marker cleared for unseen orders', marks.join(', '));
         }
         r.pause = null;
-        r.blocker = null;
-        r.settleFrom = null;
-        r.cycles = 0;
+        // The user looked, so a trip in progress and the trips counted so far
+        // are no longer needed: the step starts over as if new.
+        r.resolve = null;
+        r.stuck = null;
         r.status = S.RunStatus.Running;
-        if (isWaveStep(r.step)) return go(S.WaveStep.Gate, 'resumed');
-        return go(r.step, 'resumed');
+        return reenter('resumed');
     }
 
     function clear() {
@@ -943,6 +1042,10 @@
         go:            go,
         pause:         pause,
         resume:        resume,
+        reenter:       reenter,
+        ResolvePhase:  ResolvePhase,
+        tripAllowed:   tripAllowed,
+        sameStuck:     sameStuck,
         clear:         clear,
         dropRound:     dropRound,
         passBegins:    passBegins,
@@ -965,7 +1068,8 @@
         partOf:        partOf,
         readyOn:       readyOn,
         viewHint:      viewHint,
-        waitsLong:     waitsLong
+        waitsLong:     waitsLong,
+        busyOf:        busyOf
     };
 
 }(Steward));

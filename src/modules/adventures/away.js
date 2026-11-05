@@ -22,7 +22,9 @@
  *
  * A zone change has no event, so a jump polls for the zone to load, with no
  * limit: it visits once more after JUMP_MS and then every JUMP_RETRY_MS. Only
- * an adventure that left the own list ends the jump in a pause.
+ * an adventure that left the own list ends the jump in a pause. The stuck-step
+ * zone trip reuses the same jump (toHome, toIsland) and brings its own
+ * on-loaded callback.
  *
  * The last quest is the reward of the map, so the run never treats it as
  * claimed without proof: a verified claim, the adventure gone from the own
@@ -106,14 +108,15 @@
         if (!S.core.zone.visit(zoneId)) warn('cannot visit zone ' + zoneId);
     }
 
-    // Visits targetId until loaded() holds, with no limit. The marker's sentAt
-    // is the time of the last visit; sentOnce means "visited again" and is
-    // written only by the retry, so a resumed jump (sentAt cleared, sentOnce
-    // kept) visits at once and then keeps the long interval.
-    function jump(r, targetId, loaded, name, next, why) {
+    // Visits targetId until loaded() holds, with no limit, then marks the jump
+    // seen and calls onLoaded. The marker's sentAt is the time of the last
+    // visit; sentOnce means "visited again" and is written only by the retry,
+    // so a resumed jump (sentAt cleared, sentOnce kept) visits at once and
+    // then keeps the long interval.
+    function jump(r, targetId, loaded, name, onLoaded) {
         if (loaded()) {
             ld().markSeen(r, name);
-            st().go(next, why);
+            onLoaded();
             return;
         }
         if (typeof targetId !== 'number') {
@@ -140,30 +143,44 @@
         ld().waitBusy(r, null, 'zone ' + targetId + ' not loaded');
     }
 
+    // Whether the run's adventure island is viewed, loaded and listing its
+    // generals.
+    function islandLoaded(r) {
+        return typeof r.zoneId === 'number' && S.core.zone.id() === r.zoneId &&
+            S.core.zone.isAdventure() && S.core.specialists.listReadable();
+    }
+
+    // Whether the home zone is viewed, loaded and listing its generals.
+    function homeLoaded() {
+        var homeId = S.core.zone.homeId();
+        return typeof homeId === 'number' && S.core.zone.isHome() && S.core.zone.id() === homeId &&
+            S.core.specialists.listReadable();
+    }
+
     // Visiting a zone that no longer exists never ends, so an adventure gone
     // from the own list pauses. One read that lacks it proves nothing during
     // a zone load, so it has to stay gone for the grace.
-    function jumpStep(r) {
-        function loaded() {
-            return typeof r.zoneId === 'number' && S.core.zone.id() === r.zoneId &&
-                S.core.zone.isAdventure() && S.core.specialists.listReadable();
-        }
-        if (typeof r.zoneId === 'number' && !loaded()) {
+    function toIsland(r, name, onLoaded) {
+        if (typeof r.zoneId === 'number' && !islandLoaded(r)) {
             var own = S.core.adventures.own();
             if (own && goneFrom(own, r.zoneId) && ld().missingLong(r, 'adventure')) {
                 st().pause(S.RunPause.JumpFailed, 'adventure no longer open');
                 return;
             }
         }
-        jump(r, r.zoneId, loaded, 'visit', S.RunStep.Arrive, 'adventure loaded');
+        jump(r, r.zoneId, function () { return islandLoaded(r); }, name, onLoaded);
+    }
+
+    function toHome(r, name, onLoaded) {
+        jump(r, S.core.zone.homeId(), homeLoaded, name, onLoaded);
+    }
+
+    function jumpStep(r) {
+        toIsland(r, 'visit', function () { st().go(S.RunStep.Arrive, 'adventure loaded'); });
     }
 
     function jumpHome(r) {
-        var homeId = S.core.zone.homeId();
-        jump(r, homeId, function () {
-            return typeof homeId === 'number' && S.core.zone.isHome() && S.core.zone.id() === homeId &&
-                S.core.specialists.listReadable();
-        }, 'visitHome', S.RunStep.ArriveHome, 'home loaded');
+        toHome(r, 'visitHome', function () { st().go(S.RunStep.ArriveHome, 'home loaded'); });
     }
 
     // ---- Arrival ------------------------------------------------------------
@@ -767,6 +784,10 @@
         JUMP_RETRY_MS:  JUMP_RETRY_MS,
         CLEAR_MAX_MS:   CLEAR_MAX_MS,
         PLACE_QUIET_MS: PLACE_QUIET_MS,
+        toHome:         toHome,
+        toIsland:       toIsland,
+        homeLoaded:     homeLoaded,
+        islandLoaded:   islandLoaded,
         plan:           plan
     };
 

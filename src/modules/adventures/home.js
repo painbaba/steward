@@ -91,32 +91,39 @@
 
     // ---- Gathering ----------------------------------------------------------
 
+    // Key of the first loadout general this read does not list, or null.
+    function firstAbsent(r, inv) {
+        var keys = ld().keysOf(r);
+        for (var i = 0; i < keys.length; i++) {
+            if (!ld().gen(inv, keys[i])) return keys[i];
+        }
+        return null;
+    }
+
+    function waitAbsent(r, inv, key) {
+        ld().waitBusy(r, key, ld().who(inv, key) + ' not here yet');
+    }
+
     // Holds until every loadout general is listed at home, idle and not
     // travelling, then goes to next. Both a busy general and one not listed
     // are waited for with no limit: he gets ready or comes back by himself, and
     // the game's remaining time runs short, so nothing is built on it. A list
     // that cannot prove his absence never reaches this step, listHold stops it.
     function gather(r, inv, next, why) {
+        var absent = firstAbsent(r, inv);
+        if (absent !== null) {
+            waitAbsent(r, inv, absent);
+            return;
+        }
         var keys = ld().keysOf(r);
-        var missing = null;
-        var busy = null;
         for (var i = 0; i < keys.length; i++) {
             var g = ld().gen(inv, keys[i]);
-            if (!g) {
-                if (missing === null) missing = keys[i];
-            } else if (!g.idle || g.travelling) {
-                if (busy === null) busy = keys[i];
+            if (!g.idle || g.travelling) {
+                ld().waitBusy(r, keys[i], ld().who(inv, keys[i]) + ' busy');
+                return;
             }
         }
-        if (missing === null && busy === null) {
-            st().go(next, why);
-            return;
-        }
-        if (missing !== null) {
-            ld().waitBusy(r, missing, ld().who(inv, missing) + ' not here yet');
-            return;
-        }
-        if (busy !== null) ld().waitBusy(r, busy, ld().who(inv, busy) + ' busy');
+        st().go(next, why);
     }
 
     // ---- Before the map -----------------------------------------------------
@@ -143,8 +150,19 @@
     // The template's files are checked again now that the generals are home,
     // since they may have been edited while the run waited. Camps are not
     // checked: they belong to an island that is not open yet. A check over a
-    // list that lost entries proves nothing, so the step runs again.
-    function validate(r) {
+    // list that lost entries proves nothing, so the step runs again. A loadout
+    // general who is not listed is waited for with no limit, as at Muster: his
+    // absence is the game's state, and only a fault in the files pauses. He is
+    // looked for first, because every pass of a wait would otherwise read all
+    // the files and log a start check. One who leaves between that look and the
+    // check shows up as a problem on a loadout key, so it is filtered by code;
+    // a key outside the loadout, like a wave naming a stranger, stays a fault.
+    function validate(r, inv) {
+        var gone = firstAbsent(r, inv);
+        if (gone !== null) {
+            waitAbsent(r, inv, gone);
+            return;
+        }
         var c = S.modules.adventures.executor.check({ label: r.label, loadout: r.loadoutPath, waves: r.paths },
             { camps: false });
         if (c.listOk === false) {
@@ -152,14 +170,27 @@
             return;
         }
         for (var i = 0; i < c.warnings.length; i++) log('warning: ' + c.warnings[i].message);
-        if (!c.ok) {
-            var msg = c.problems.length ? c.problems[0].message : 'loadout cannot be read';
-            st().pause(S.RunPause.WaveFile, msg + ' (' + c.problems.length + ' problem(s))');
+        var fatal = [];
+        for (var j = 0; j < c.problems.length; j++) {
+            var p = c.problems[j];
+            if (p.code === S.BattleProblem.MissingGeneral && has(r.loadoutKeys || {}, p.key)) {
+                if (gone === null) gone = p.key;
+            } else {
+                fatal.push(p);
+            }
+        }
+        if (!c.ok && (fatal.length || gone === null)) {
+            var msg = fatal.length ? fatal[0].message : 'loadout cannot be read';
+            st().pause(S.RunPause.WaveFile, msg + ' (' + fatal.length + ' problem(s))');
             return;
         }
         if (!sameKeys(c.loadoutKeys, r.loadoutKeys)) {
             st().pause(S.RunPause.WaveFile,
                 'the loadout names other generals than at start; Stop and start the run again');
+            return;
+        }
+        if (gone !== null) {
+            waitAbsent(r, inv, gone);
             return;
         }
         st().go(S.RunStep.Snapshot, 'template checked');

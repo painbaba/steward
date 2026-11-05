@@ -67,8 +67,9 @@
  *
  * The `events` tab hosts read-only event tools.
  *
- * `misc` sections render on the Settings screen, not as a dashboard tab, and
- * are for modules unrelated to running the game.
+ * `misc` sections render on the Settings screen, not as a dashboard tab, for
+ * tools and module settings that need no dashboard tab (the diagnostics probes,
+ * the adventures stuck-step limit).
  *
  * The Status tab is reserved (rendered by the kernel's UI shell, not by a
  * module). Mail/Trades is deliberately omitted until that subsystem ships.

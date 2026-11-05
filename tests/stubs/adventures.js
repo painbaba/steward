@@ -178,7 +178,11 @@ function homeStock(o, popName) {
 //   - w.ghost(g, passes) makes g a bridge ghost for the next passes ticks
 //     (default 1), play() in between included;
 //   - w.ghostAfterRead(g) does the same from the moment the next inventory
-//     read ends, for a flip inside a pass.
+//     read ends, for a flip inside a pass;
+//   - w.afterRead(fn) runs fn once the next inventory read ends, for any
+//     change inside a pass (ghostAfterRead is one such fn);
+//   - w.nullListRead(n) makes the n-th specialist list read from now return
+//     null, the way the client does for a moment; earlier reads pass through.
 function world(o) {
     o = o || {};
     var fs = o.fs || airfs.make();
@@ -265,14 +269,32 @@ function world(o) {
         w.ghosts.push({ restore: SP.ghost(g), left: passes || 1 });
     };
 
-    w.ghostAfterRead = function (g) {
+    w.afterRead = function (fn) {
         var army = S.core.army;
         var inventory = army.inventory;
         army.inventory = function () {
             army.inventory = inventory;
             var inv = inventory.apply(army, arguments);
-            w.ghost(g);
+            fn();
             return inv;
+        };
+    };
+
+    w.ghostAfterRead = function (g) {
+        w.afterRead(function () { w.ghost(g); });
+    };
+
+    w.nullListRead = function (n) {
+        var zone = gi.mCurrentPlayerZone;
+        var real = zone.GetSpecialists_vector;
+        var left = n;
+        zone.GetSpecialists_vector = function () {
+            left--;
+            if (left === 0) {
+                zone.GetSpecialists_vector = real;
+                return null;
+            }
+            return real.apply(this, arguments);
         };
     };
 
@@ -458,7 +480,11 @@ function installHome(w, o, gi, units) {
     game.getResources = function () {
         return {
             GetResourceAmount: function (name) { return w.resources[name]; },
-            GetFree: function () { return w.pop; }
+            GetFree: function () {
+                // The client's GetFree takes no argument and throws on one.
+                if (arguments.length) throw new Error('#1063');
+                return w.pop;
+            }
         };
     };
 
@@ -535,11 +561,11 @@ function drain(w) {
 }
 
 // One scheduler tick: plan() only when isReady, tagged with the module as
-// the scheduler does. The scheduler's zone is { id, isHome } as the zone core
-// reads it.
+// the scheduler does. The scheduler's zone is { id, isHome, isAdventure } as
+// the zone core reads it.
 function tick(w) {
     var z = w.S.core.zone;
-    var ready = w.mod.isReady({ zone: { id: z.id(), isHome: z.isHome() } });
+    var ready = w.mod.isReady({ zone: { id: z.id(), isHome: z.isHome(), isAdventure: z.isAdventure() } });
     if (ready) {
         w.S.kernel._currentModule = 'adventures';
         try { w.mod.plan({}); }

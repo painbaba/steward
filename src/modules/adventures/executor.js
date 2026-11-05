@@ -693,7 +693,7 @@
         if (!r || r.status !== S.RunStatus.Running) return;
         // Series steps before and after the waves are run by their own part.
         if (!st().isWaveStep(r.step)) return;
-        if (S.core.zone.id() !== r.zoneId) return;
+        if (!st().readyOn(r, null)) return;
         if (r.waveIndex >= r.paths.length) {
             st().go(S.RunStep.PackStar, 'last wave confirmed');
             return;
@@ -849,8 +849,8 @@
     // Reads the template's loadout and waves fresh and checks them against
     // the island as it is now. Returns { ok, problems (fatal), warnings,
     // loadoutKeys, listOk }; loadoutKeys is null when the loadout cannot be
-    // read. listOk false means the specialist list lost entries, so the
-    // general problems of this check are not facts.
+    // read. listOk false means the specialist list lost entries or could not
+    // be read, so the general problems of this check are not facts.
     // opts (optional): camps === false leaves out the camp checks (the map
     // is not viewed); fighters === false also skips the general checks (the
     // generals may be away), so only the files and the loadout keys count.
@@ -860,7 +860,10 @@
         var camps = fighters && o.camps !== false;
         var out = { ok: false, problems: [], warnings: [], loadoutKeys: null, listOk: true };
         var inv = S.core.army.inventory();
-        out.listOk = !fighters || inv.listOk !== false;
+        // A list that cannot be read at all sets listOk false. The fighter read
+        // can also work while the final sweep fails, which leaves only listRead
+        // false, so both flags must hold for the check to count as complete.
+        out.listOk = !fighters || (inv.listOk !== false && inv.listRead !== false);
         if (camps) S.core.buildings.invalidate();
         var ctx = fighterCtx(inv, camps);
 

@@ -758,6 +758,44 @@ t.test('readFighters: complete on a clean read, incomplete on a dropped or unrea
     assert.strictEqual(unread.list.length, 1);
 });
 
+t.test('readFighters reads the list once', function () {
+    var s = setup({ fighters: [A.fighter({ uid: 'g1' }), A.fighter({ uid: 'c1', carrier: true })] });
+    var zone = s.H.host.game.gi.mCurrentPlayerZone;
+    var real = zone.GetSpecialists_vector;
+    var reads = 0;
+    zone.GetSpecialists_vector = function () { reads++; return real.apply(zone, arguments); };
+    var rf = s.army.readFighters();
+    assert.strictEqual(reads, 1);
+    assert.strictEqual(rf.list.length, 2);
+    assert.strictEqual(rf.complete, true);
+});
+
+t.test('readFighters: a list that cannot be read is incomplete', function () {
+    var s = setup({ fighters: [A.fighter({ uid: 'g1' })] });
+    s.H.host.game.gi.mCurrentPlayerZone.GetSpecialists_vector = function () { return null; };
+    var rf = s.army.readFighters();
+    assert.strictEqual(rf.complete, false);
+    assert.strictEqual(rf.list.length, 0);
+});
+
+t.test('readFighters: an entry whose type cannot be read is incomplete', function () {
+    var bad = A.fighter({ uid: 'g2' });
+    bad.GetType = function () { throw new Error('type'); };
+    var s = setup({ fighters: [A.fighter({ uid: 'g1' }), bad] });
+    var rf = s.army.readFighters();
+    assert.strictEqual(rf.complete, false);
+    assert.strictEqual(rf.list.length, 1);
+});
+
+t.test('readFighters: a real unknown type is not a loss', function () {
+    var odd = A.fighter({ uid: 'x1' });
+    odd.GetType = function () { return 999999; };
+    var s = setup({ fighters: [A.fighter({ uid: 'g1' }), odd] });
+    var rf = s.army.readFighters();
+    assert.strictEqual(rf.complete, true);
+    assert.strictEqual(rf.list.length, 1);
+});
+
 t.test('inventory: listOk and ok are false on a read that dropped an entry', function () {
     var ghost = A.fighter({ uid: 'g2', army: { Rifle: 3 } });
     specStubs.ghost(ghost);
@@ -786,12 +824,12 @@ t.test('inventory: an unreadable owner makes the read incomplete', function () {
 
 t.test('inventory: a null uid key sets listOk false and leaves the entry out', function () {
     var g2 = A.fighter({ uid: 'g2' });
-    // Each of generals() and carriers() reads the list, and the reader reads the
-    // key once per entry; the third read is the one inventory makes itself.
+    // The reader reads the key once per entry for the one list read the
+    // fighters make; the second read is the one inventory makes itself.
     var calls = 0;
     g2.GetUniqueID = function () {
         calls++;
-        return { toKeyString: function () { return calls <= 2 ? 'g2' : null; } };
+        return { toKeyString: function () { return calls <= 1 ? 'g2' : null; } };
     };
     var s = setup({ free: { Rifle: 1 }, fighters: [A.fighter({ uid: 'g1' }), g2] });
     var inv = s.army.inventory();
@@ -816,11 +854,11 @@ t.test('inventory: an entry that turns into a ghost after the fighter read is ca
     assert.deepStrictEqual(Object.keys(inv.byKey).sort(), ['g1', 'g2']);
 });
 
-t.test('inventory: a thrown list leaves listOk true with ok false', function () {
+t.test('inventory: a thrown list sets listOk and ok false', function () {
     var s = setup({ free: { Rifle: 1 }, fighters: [] });
     s.H.host.game.gi.mCurrentPlayerZone.GetSpecialists_vector = function () { throw new Error('list'); };
     var inv = s.army.inventory();
-    assert.strictEqual(inv.listOk, true);
+    assert.strictEqual(inv.listOk, false);
     assert.strictEqual(inv.ok, false);
 });
 
@@ -849,11 +887,11 @@ t.test('inventory: listRead is true on a normal read', function () {
     assert.strictEqual(s.army.inventory().listRead, true);
 });
 
-t.test('inventory: listRead is false on a list that cannot be read, listOk stays true', function () {
+t.test('inventory: listRead is false on a list that cannot be read, and listOk is false', function () {
     var s = setup({ free: { Rifle: 1 }, fighters: [] });
     s.H.host.game.gi.mCurrentPlayerZone.GetSpecialists_vector = function () { return null; };
     var inv = s.army.inventory();
     assert.strictEqual(inv.listRead, false);
-    assert.strictEqual(inv.listOk, true);
+    assert.strictEqual(inv.listOk, false);
     assert.strictEqual(inv.ok, false);
 });

@@ -688,6 +688,12 @@ function shortWorld(extra, opts) {
     return w;
 }
 
+// Turns the stuck step limit off, for tests that watch a Supply wait past it:
+// they cover the wait itself, not the zone trip it would start.
+function noTrip(w) {
+    w.S.kernel.settings.write('adventures', { lastDir: '', stuckMinutes: 0 });
+}
+
 function otherGeneral(uid, name, army, o) {
     return AC.general(Object.assign({ uid: uid, name: name, grid: 40, army: army }, o || {}));
 }
@@ -707,6 +713,7 @@ function assertTroopsShort(w) {
 t.test('Supply: short with a busy donor waits past any window, unloads once idle', function () {
     var donor = otherGeneral('1.4', 'Dora', { Rifle: 6 });
     var w = shortWorld([donor]);
+    noTrip(w);
     busyOn(donor, w);
     tick(w);
     assertWaiting(w);
@@ -731,6 +738,7 @@ t.test('Supply: short with a busy donor waits past any window, unloads once idle
 t.test('Supply: a busy general holding no short type still waits, then TroopsShort after the hold', function () {
     var other = otherGeneral('1.5', 'Emil', { Bow: 9 });
     var w = shortWorld([other]);
+    noTrip(w);
     busyOn(other, w);
     tick(w);
     assertWaiting(w);
@@ -776,6 +784,7 @@ t.test('Supply: a partial idle donor is not unloaded while a general is busy', f
     var part = otherGeneral('1.4', 'Dora', { Rifle: 1 });
     var other = otherGeneral('1.5', 'Emil', {});
     var w = shortWorld([part, other]);
+    noTrip(w);
     busyOn(other, w);
     tick(w);
     W.ticksFor(w, 3600000);

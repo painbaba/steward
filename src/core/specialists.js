@@ -671,6 +671,29 @@
         return out;
     }
 
+    // Generals and carriers of one read of the list, so a fault between two reads
+    // cannot lose one class and leave the other. complete is false when the list
+    // could not be read, the read dropped an entry, or an entry's type could not
+    // be read. classify is also null for a real unknown type, which is no loss.
+    function fighterList(opts) {
+        opts = opts || {};
+        var before = droppedTotal;
+        var src = readSpecialists(opts.zone || S.core.zone.current());
+        var out = [];
+        var complete = src !== null;
+        src = src || [];
+        for (var i = 0; i < src.length; i++) {
+            var c = classify(src[i]);
+            if (c === S.SpecialistType.General || c === S.SpecialistType.Carrier) {
+                out.push(src[i]);
+            } else if (c === null) {
+                var rt = rawType(src[i]);
+                if (rt === null || rt === undefined) complete = false;
+            }
+        }
+        return { list: out, complete: complete && droppedTotal === before };
+    }
+
     function byName(targetName, opts) {
         var src = all(opts);
         var wanted = S.kernel.text.plain(targetName);
@@ -922,6 +945,7 @@
     S.core.specialists.lookup           = lookup;
     S.core.specialists.refind           = refind;
     S.core.specialists.byType           = byType;
+    S.core.specialists.fighterList      = fighterList;
     S.core.specialists.byName           = byName;
     S.core.specialists.generals         = generals;
     S.core.specialists.carriers         = carriers;

@@ -412,6 +412,46 @@ t.test('Validate: a wave file edited to a fatal problem pauses WaveFile; Resume 
     assertStep(w, 'Snapshot');
 });
 
+t.test('Validate: a general gone since Muster waits with no pause, and goes on when he is back', function () {
+    var w = homeWorld();
+    series(w, { step: w.S.RunStep.Validate });
+    w.lists[HOME].splice(w.lists[HOME].indexOf(w.g2), 1);
+    for (var i = 0; i < 4; i++) {
+        tick(w);
+        assertStep(w, 'Validate');
+        W.ticksFor(w, PASS_MS);
+    }
+    waiting(w, /1\.2 not here yet/);
+    assert.ok(!logged(w, /start check/), 'a wait does not run the check');
+    w.lists[HOME].push(w.g2);
+    tick(w);
+    assertStep(w, 'Snapshot');
+});
+
+t.test('Validate: a general leaving between the read and the check waits', function () {
+    var w = homeWorld();
+    series(w, { step: w.S.RunStep.Validate });
+    w.afterRead(function () { w.lists[HOME].splice(w.lists[HOME].indexOf(w.g2), 1); });
+    tick(w);
+    assertStep(w, 'Validate');
+    waiting(w, /Bert \(1\.2\) not here yet/);
+    w.lists[HOME].push(w.g2);
+    tick(w);
+    assertStep(w, 'Snapshot');
+});
+
+t.test('Validate: a real fault beside an absent general still pauses', function () {
+    var w = homeWorld();
+    series(w, { step: w.S.RunStep.Validate });
+    writeJson(w.fs, WAVE, { '1.7': { grid: 10, target: 100, army: { Rifle: 1 }, order: 1 } });
+    w.afterRead(function () { w.lists[HOME].splice(w.lists[HOME].indexOf(w.g2), 1); });
+    tick(w);
+    assertPaused(w, w.S.RunPause.WaveFile, /1\.7/);
+    // Both problems are about 1.7; the absent general adds none.
+    assert.ok(/\(2 problem\(s\)\)/.test(w.st.run().pause.message), w.st.run().pause.message);
+    assert.ok(!/1\.2/.test(w.st.run().pause.message), w.st.run().pause.message);
+});
+
 // ---- 4. Snapshot ----------------------------------------------------------------
 
 t.test('Snapshot: total plus queued per loadout unit; units outside the loadout are left out', function () {

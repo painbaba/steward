@@ -52,7 +52,7 @@ function setup(opts) {
     H.host.game.getResources = function () {
         return {
             GetResourceAmount: function (name) { return world.stock[name]; },
-            GetFree: function () { return world.free; }
+            GetFree: function () { if (arguments.length) throw new Error('#1063'); return world.free; }
         };
     };
     sent.registerDef('MilitarySystem::cMilitaryUnitBase', {

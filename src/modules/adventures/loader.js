@@ -39,7 +39,11 @@
  * wait for a general or an order, and waitRead() the one for a read that
  * failed. hold() is the deadline for a fact that only the user can fix.
  * quietClock() sums the time of a wait that does end in a pause, counting only
- * the passes that really watched the island.
+ * the passes that really watched the island. Each caller names its own memory
+ * slot, so two clocks of one step never share a record.
+ *
+ * A round's attempts refuse to send once another zone than the round's own is
+ * viewed (ZONE_CHANGED); such a refusal sent nothing, like an unreadable one.
  *
  * A specialist list that lost entries says nothing about what it does not
  * show. listHold() holds a step on such a read with no limit, missingLong()
@@ -79,6 +83,9 @@
     // Prefix of the blocker reason while a load waits for queued troops; the
     // blocker is cleared again only when it is this one.
     var WAIT_PREFIX = 'waiting for production: ';
+
+    // Refusal reason of a round's attempt whose zone is no longer viewed.
+    var ZONE_CHANGED = 'viewed zone changed';
 
     function has(obj, key) {
         return Object.prototype.hasOwnProperty.call(obj, key);
@@ -152,8 +159,8 @@
     function waitBusy(r, key, text) {
         var rs = st().current();
         var t = now();
-        var b = rs.busy;
-        if (!b || b.runId !== r.id || b.step !== r.step) {
+        var b = st().busyOf(r);
+        if (!b) {
             b = { runId: r.id, step: r.step, key: key, text: text, since: t, noted: null };
             rs.busy = b;
         }
@@ -167,7 +174,18 @@
         var rem = spec ? S.core.specialists.orders.remaining(spec) : null;
         S.kernel.log(CATEGORY, st().label() + ': ' + text + ', waited ' +
             Math.round((t - b.since) / 60000) + ' min' +
-            (typeof rem === 'number' ? ', remaining ' + rem + ' (raw)' : ''));
+            (typeof rem === 'number' ? ', remaining ' + rem + ' (raw)' : '') +
+            (spec ? ', task ' + taskText(spec) : ''));
+    }
+
+    // What holds a busy general: the task kind, else the raw task code, else
+    // 'none'. A busy general with no task means the in-use flag holds him.
+    function taskText(spec) {
+        var orders = S.core.specialists.orders;
+        var kind = orders.taskKind(spec);
+        if (kind !== null && kind !== undefined) return kind;
+        var raw = orders.rawTaskType(spec);
+        return raw !== null && raw !== undefined ? 'raw ' + raw : 'none';
     }
 
     // A read that failed holds the step with no limit: the wait is the read
@@ -182,8 +200,8 @@
         var text = what + ' not readable';
         var rs = st().current();
         var t = now();
-        var b = rs.busy;
-        if (!b || b.runId !== r.id || b.step !== r.step) {
+        var b = st().busyOf(r);
+        if (!b) {
             rs.busy = { runId: r.id, step: r.step, key: null, text: text, since: t, noted: t, read: true };
             keepBusy();
             return;
@@ -210,24 +228,34 @@
         return true;
     }
 
-    // Summed time of a wait that ends in a pause, from rs.quiet: { ms, gap }.
-    // ms grows only while quiet is true. Passes stop while another zone is
-    // viewed, so a bare difference would count that time and pause on the
-    // return; a silence over MISSING_GAP_MS is reported as gap and not counted.
-    // A new step starts a new record, and its first pass is a gap too. Memory
-    // only: a restart gives a fresh window, which errs to waiting.
-    function quietClock(r, quiet) {
+    // Summed time of a wait, from the runState slot named by slot (default
+    // 'quiet'): { ms, gap }. ms grows only while quiet is true. Passes stop
+    // while another zone is viewed, so a bare difference would count that time
+    // and pause on the return; a silence over gapMs() is reported as gap and
+    // not counted. A new step starts a new record, and its first pass is a gap
+    // too. Memory only: a restart gives a fresh window, which errs to waiting.
+    function quietClock(r, quiet, slot) {
+        var name = slot || 'quiet';
         var rs = st().current();
         var t = now();
-        var q = rs.quiet;
+        var q = rs[name];
         if (!q || q.since !== r.since) {
-            rs.quiet = { since: r.since, last: t, ms: 0 };
+            rs[name] = { since: r.since, last: t, ms: 0 };
             return { ms: 0, gap: true };
         }
-        var gap = t - q.last > MISSING_GAP_MS;
+        var gap = t - q.last > gapMs();
         if (quiet && !gap) q.ms += t - q.last;
         q.last = t;
         return { ms: q.ms, gap: gap };
+    }
+
+    // Longest silence between two passes that still counts as watched time.
+    // Passes come once a scheduler tick, so a tick the user raised must not
+    // turn every pass into a gap and stop the clock.
+    function gapMs() {
+        var s = S.kernel.scheduler && S.kernel.scheduler.state;
+        var tick = s && typeof s.tickIntervalMs === 'number' ? s.tickIntervalMs : 0;
+        return Math.max(MISSING_GAP_MS, 3 * tick);
     }
 
     // Whether a general that a read lacks has now been gone long enough to
@@ -372,18 +400,22 @@
         return typeof round.doneAt === 'number' && now() - round.doneAt < READ_LAG_MS;
     }
 
-    // Whether a result is a first-step refusal because the general could not
-    // be read: nothing was sent, so the round had no effect either way. Only
-    // this exact form counts. A Failed 'retry refused: ...' went out once, and
-    // taking it for no effect would send a marked order again.
+    // Whether a result is a first-step refusal that sent nothing: the general
+    // could not be read, or the round's zone was no longer viewed. Either way
+    // the round had no effect. A ZONE_CHANGED result is normally already
+    // discarded by record() (its zone differs from the round's), so this branch
+    // is a defence for a result that still arrives. Only this exact form counts. A Failed 'retry
+    // refused: ...' went out once, and taking it for no effect would send a
+    // marked order again.
     function unreadable(res) {
         return !!res && res.status === S.ActionResult.Refused &&
-            res.reason === S.core.specialists.UNREADABLE;
+            (res.reason === S.core.specialists.UNREADABLE || res.reason === ZONE_CHANGED);
     }
 
-    // First Refused or Failed result: { key, status, reason } or null. An
-    // unreadable refusal is no failure: its round counts as one without
-    // effect, which settleRound and roundsExhausted bound. A marked order that
+    // First Refused or Failed result: { key, status, reason } or null. A
+    // refusal that sent nothing (unreadable, or the zone changed) is no
+    // failure: its round counts as one without effect, which settleRound and
+    // roundsExhausted bound. A marked order that
     // was not observed in time is none either: nothing refused it, and the
     // mark decides how long it may still show.
     function firstFailure(round) {
@@ -423,8 +455,19 @@
         };
     }
 
+    // A queued order never goes out on another zone than the one its round
+    // started on, at home and on the island alike: the queue may run it after
+    // the user switched, and the step's read no longer holds there.
     function attempt(round, key, def, after) {
         round.expected[key] = true;
+        if (def && typeof def === 'object') {
+            var pre = def.precheck;
+            var zoneId = round.zoneId;
+            def.precheck = function (arg) {
+                if (S.core.zone.id() !== zoneId) return ZONE_CHANGED;
+                return typeof pre === 'function' ? pre.call(def, arg) : null;
+            };
+        }
         if (!S.core.actions.attempt(def, record(round, key, after))) {
             round.results[key] = { status: S.ActionResult.Failed, reason: 'attempt not started' };
         }
@@ -597,8 +640,7 @@
             waitBusy(r, key, who(inv, key) + ' busy, troops short: ' + shortText);
             return true;
         }
-        var b = st().current().busy;
-        if (!b || b.runId !== r.id || b.step !== r.step) return false;
+        if (!st().busyOf(r)) return false;
         st().go(steps.supply, 'every general idle');
         return true;
     }
@@ -837,6 +879,7 @@
         MARK_SETTLE_MS:    MARK_SETTLE_MS,
         ORDER_WAIT_MS:     ORDER_WAIT_MS,
         BUSY_LOG_MS:       BUSY_LOG_MS,
+        ZONE_CHANGED:      ZONE_CHANGED,
         now:               now,
         gen:               gen,
         ready:             ready,

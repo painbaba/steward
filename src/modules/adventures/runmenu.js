@@ -73,9 +73,9 @@
 
     // Who the current step waits for and how long, or ''. The record is memory
     // only and may be absent after a script reload.
-    function busyText(rs, r) {
-        var b = rs.busy;
-        if (!b || b.runId !== r.id || b.step !== r.step) return '';
+    function busyText(r) {
+        var b = st().busyOf(r);
+        if (!b) return '';
         var n = Math.floor((st().now() - b.since) / 60000);
         return b.text + (n >= 1 ? ', ' + n + ' min' : '');
     }
@@ -94,7 +94,7 @@
         var round = roundOf(rs, r);
         var name = st().stepName(r.step);
         if (r.step === S.WaveStep.Verify && round && !S.modules.adventures.loader.complete(round)) name = 'Load';
-        var busy = busyText(rs, r);
+        var busy = busyText(r);
         if (busy) return name + ', ' + busy;
         var count = attackText(rs, r) || roundText(rs, r);
         return name + (count ? ' ' + count : '');
@@ -138,7 +138,7 @@
         var detail = '';
         // Found by its step, so the row's name stays in the one steps table.
         if (row.first === state.position(S.RunStep.Horseshoe)) detail = buffText(r);
-        else if (isCurrent(mark)) detail = busyText(rs, r) || roundText(rs, r);
+        else if (isCurrent(mark)) detail = busyText(r) || roundText(rs, r);
         return { label: row.label, file: '', mark: mark, detail: detail };
     }
 

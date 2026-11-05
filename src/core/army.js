@@ -281,20 +281,20 @@
         return ownerIsSelf(owner) ? null : 'not own';
     }
 
-    // Own generals and carriers. complete is false when the read lost an entry,
-    // to the reader or to an unreadable owner, so the caller can tell a short
-    // list from a smaller army.
+    // Own generals and carriers, from one read of the list. complete is false
+    // when the list could not be read or the read lost an entry, to the reader,
+    // to an unreadable type or to an unreadable owner, so the caller can tell a
+    // short list from a smaller army.
     function readFighters() {
-        var before = S.core.specialists.dropped();
-        var src = S.core.specialists.generals().concat(S.core.specialists.carriers());
+        var read = S.core.specialists.fighterList();
         var out = [];
-        var complete = true;
-        for (var i = 0; i < src.length; i++) {
-            var owner = ownerOf(src[i]);
+        var complete = read.complete;
+        for (var i = 0; i < read.list.length; i++) {
+            var owner = ownerOf(read.list[i]);
             if (owner === null) { complete = false; continue; }
-            if (ownerIsSelf(owner)) out.push(src[i]);
+            if (ownerIsSelf(owner)) out.push(read.list[i]);
         }
-        return { list: out, complete: complete && S.core.specialists.dropped() === before };
+        return { list: out, complete: complete };
     }
 
     function fighters() {
@@ -346,10 +346,10 @@
     // and every general's army were all readable and no fighter was lost.
     // Accounting and packing must not act on an unreadable (and so seemingly
     // empty) source.
-    // listOk is false when a read in this pass lost an entry, so a general
-    // absent from byKey is unknown rather than gone. It stays true on a list
-    // that cannot be read at all: listRead reports that, and it is false then
-    // for the same reason, a general absent from byKey is unknown.
+    // listOk is false when a read in this pass lost an entry or the list could
+    // not be read, so a general absent from byKey is unknown rather than gone.
+    // listRead still tells an unreadable list from a lossy one, for the wording
+    // of the wait.
     function inventory() {
         var read = readFreeArmy();
         var free = read || {};

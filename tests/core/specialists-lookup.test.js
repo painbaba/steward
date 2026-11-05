@@ -268,3 +268,51 @@ t.test('listComplete and listReadable are both false on a null list', function (
         t.assert.strictEqual(c.listReadable({ zone: bad[i] }), false);
     }
 });
+
+// ---- fighterList ------------------------------------------------------------
+
+var A = require('../stubs/army');
+var specStubs = require('../stubs/specialists');
+
+function fighterBoot(fighters) {
+    var H = harness.boot();
+    A.install(H, { fighters: fighters || [] });
+    return H;
+}
+
+t.test('fighterList: generals and carriers of one read, explorers left out, complete', function () {
+    var H = fighterBoot();
+    var list = [
+        A.fighter({ uid: 'g1' }),
+        specStubs.spec({ type: specStubs.TYPE.EXPLORER, uid: 'e1' }),
+        A.fighter({ uid: 'c1', carrier: true })
+    ];
+    var r = H.Steward.core.specialists.fighterList({ zone: zoneOf(list) });
+    t.assert.strictEqual(r.complete, true);
+    t.assert.strictEqual(r.list.length, 2);
+    t.assert.strictEqual(r.list[0], list[0]);
+    t.assert.strictEqual(r.list[1], list[2]);
+});
+
+t.test('fighterList: a list that cannot be read is empty and incomplete', function () {
+    var H = fighterBoot();
+    var bad = [
+        {},
+        { GetSpecialists_vector: function () { return null; } },
+        { GetSpecialists_vector: function () { throw new Error('boom'); } }
+    ];
+    for (var i = 0; i < bad.length; i++) {
+        var r = H.Steward.core.specialists.fighterList({ zone: bad[i] });
+        t.assert.strictEqual(r.list.length, 0);
+        t.assert.strictEqual(r.complete, false);
+    }
+});
+
+t.test('fighterList: a ghost entry makes the read incomplete', function () {
+    var H = fighterBoot();
+    var ghost = A.fighter({ uid: 'g2' });
+    specStubs.ghost(ghost);
+    var r = H.Steward.core.specialists.fighterList({ zone: zoneOf([A.fighter({ uid: 'g1' }), ghost]) });
+    t.assert.strictEqual(r.complete, false);
+    t.assert.strictEqual(r.list.length, 1);
+});

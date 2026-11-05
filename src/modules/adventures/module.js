@@ -26,7 +26,15 @@
  *
  * Each step names where it may run (home, the run's island, or anywhere),
  * and isReady is false on any other zone: nothing is sent and nothing
- * pauses, and the run carries on when the user views that zone again.
+ * pauses, and the run carries on when the user views that zone again. One
+ * log line marks the start and one the end of each such wait.
+ *
+ * A step on the island that has watched a wait for the stuckMinutes setting
+ * takes a zone trip (resolve.js): home, a few minutes there, back, and the
+ * step is entered again, because the client may hold a stale read of the
+ * island. While the trip lasts it owns every pass and runs on any zone; after
+ * a step pass, resolve.watch() feeds the watched-wait clock. The setting is
+ * edited in the Adventures section of the Settings screen.
  *
  * Menu handlers only change state; all queue work is enqueued from plan(),
  * where the scheduler tags it with this module, so Pause and Stop can cancel
@@ -50,10 +58,27 @@
         return st ? st.run() : null;
     }
 
+    // One log line when a Running run starts waiting for its zone and one when
+    // it may act again, so a run that sends nothing says why.
     function isReady(ctx) {
+        var state = S.modules.adventures.state;
         var run = currentRun();
-        if (!run || run.status !== S.RunStatus.Running) return false;
-        return S.modules.adventures.state.readyOn(run, ctx ? ctx.zone : null);
+        if (!run || run.status !== S.RunStatus.Running) {
+            if (run) state.current().zoneWait = false;
+            return false;
+        }
+        var ok = state.readyOn(run, ctx ? ctx.zone : null);
+        var rs = state.current();
+        if (!ok && rs.zoneWait !== true) {
+            rs.zoneWait = true;
+            S.kernel.log('adventures', state.label() + ': waiting for the right zone (' + state.viewHint(run) +
+                '); nothing is sent');
+        }
+        if (ok && rs.zoneWait === true) {
+            rs.zoneWait = false;
+            S.kernel.log('adventures', state.label() + ': zone viewed again, run continues');
+        }
+        return ok;
     }
 
     // The next pass, sooner than the tick when there is something to do. One pass
@@ -82,12 +107,28 @@
         if (!run || !a.state) return;
         var step = run.step;
         var since = run.since;
+        // A zone trip under way owns the pass: the step neither acts nor
+        // counts its wait until the trip has entered it again.
+        if (run.resolve && run.status === S.RunStatus.Running && a.resolve) {
+            a.state.passBegins();
+            try { a.resolve.plan(); }
+            catch (e) { S.kernel.error('adventures', 'resolve.plan threw:', e); }
+            a.state.passEnds();
+            nextPass(run, step, since);
+            return;
+        }
         var name = a.state.partOf(step);
         var part = name ? a[name] : null;
         if (part && part.plan) {
             // A pass that did not wait any more ended the wait.
             a.state.passBegins();
             part.plan();
+            // The watched-wait clock reads whether this pass kept a wait
+            // going, so it runs before the pass ends.
+            if (a.resolve) {
+                try { a.resolve.watch(); }
+                catch (e2) { S.kernel.error('adventures', 'resolve.watch threw:', e2); }
+            }
             a.state.passEnds();
             nextPass(run, step, since);
         }
@@ -108,6 +149,26 @@
         boot:     boot,
         isReady:  isReady,
         plan:     plan,
+        // The module's settings on the Settings screen. The section id is the
+        // module id, because it names the settings buffer. Late-bound:
+        // settings.js loads after this file in name order.
+        ui: {
+            tab: 'misc',
+            section: {
+                id:    'adventures',
+                title: 'Adventures',
+                render: function ($body, h) {
+                    if (S.modules.adventures.renderSettings) {
+                        return S.modules.adventures.renderSettings($body, h);
+                    }
+                },
+                summary: function () {
+                    return S.modules.adventures.settingsSummary
+                        ? S.modules.adventures.settingsSummary()
+                        : '';
+                }
+            }
+        },
         menu: {
             title: 'Adventures',
             // Late-bound: menu.js loads before this file, but a script

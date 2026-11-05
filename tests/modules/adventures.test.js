@@ -52,11 +52,12 @@ function menuLabels(s) {
     return plain(s.H.module('adventures').menu.items().map(function (it) { return labelOf(it, pass); }));
 }
 
-t.test('adventures registers with a function menu and no ui', function () {
+t.test('adventures registers with a function menu and a misc settings section', function () {
     var s = setup();
     var mod = s.H.module('adventures');
     assert.ok(mod, 'registered');
-    assert.strictEqual(mod.ui, null);
+    assert.strictEqual(mod.ui.tab, 'misc');
+    assert.strictEqual(mod.ui.section.id, 'adventures');
     assert.strictEqual(mod.menu.title, 'Adventures');
     assert.strictEqual(typeof mod.menu.items, 'function');
 });
@@ -92,7 +93,7 @@ t.test('boot seeds lastDir only and ignores an old stored default horseshoe', fu
     s.H.module('adventures').boot();
     assert.strictEqual(s.H.settings.read('adventures').lastDir, 'C:/battles');
     s.H.settings.write('adventures', { lastDir: 'C:/y', defaultSpeedBuff: 'GeneralSpeedBuff_A' });
-    assert.deepStrictEqual(plain(s.tpl.settings()), { lastDir: 'C:/y' });
+    assert.deepStrictEqual(plain(s.tpl.settings()), { lastDir: 'C:/y', stuckMinutes: 45 });
 });
 
 // ---- validate -----------------------------------------------------------------

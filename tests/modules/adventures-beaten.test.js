@@ -162,8 +162,10 @@ t.test('Gate: the run\'s zone id over a view not yet an adventure drops nothing;
     var r = startRun(w, ['C:/b/w1.txt', 'C:/b/w2.txt'], { waveIndex: 1 });
     assert.strictEqual(w.S.core.zone.id(), r.zoneId, 'the id already reads the run\'s zone');
     assert.strictEqual(w.S.core.buildings.byGrid(100), null, 'the camp reads as gone');
-    for (var i = 0; i < 8 && stepName(w) !== 'Settle'; i++) tick(w);
-    assert.strictEqual(stepName(w), 'Settle', 'the missing camp cannot be judged');
+    // The zone guard keeps every step idle until the view is an adventure, so
+    // the run waits at Gate and judges nothing.
+    for (var i = 0; i < 8; i++) assert.strictEqual(tick(w), false, 'not ready on a non-adventure view');
+    assert.strictEqual(stepName(w), 'Gate', 'the step waits for its zone');
     W.ticksFor(w, 60000);
     assert.strictEqual(w.st.run().status, w.S.RunStatus.Running, 'no pause');
     assert.ok(!w.st.run().lines['1.1'] || !w.st.run().lines['1.1'].seen, 'not dropped');

@@ -32,7 +32,9 @@
             if (typeof game === 'undefined' || !game || typeof game.getResources !== 'function') return null;
             var resources = game.getResources();
             if (!resources || typeof resources[method] !== 'function') return null;
-            var n = resources[method](arg);
+            // A method called without an argument gets none: the AS3 bridge throws
+            // on an extra argument, even undefined, when the host method takes none.
+            var n = arguments.length > 1 ? resources[method](arg) : resources[method]();
             return (typeof n === 'number' && !isNaN(n)) ? n : null;
         } catch (e) {
             if (!warnedThrow) {
@@ -49,9 +51,10 @@
         return read('GetResourceAmount', resName);
     }
 
-    // Free population: the host's GetFree() value.
+    // Free population: the host's GetFree() value. The host method takes no
+    // parameter, so it is read with no argument at all (see read).
     function freePopulation() {
-        return read('GetFree', undefined);
+        return read('GetFree');
     }
 
     if (!S.core.resources) S.core.resources = {};

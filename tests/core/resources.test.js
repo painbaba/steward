@@ -18,13 +18,24 @@ t.test('amount and freePopulation read the host', function () {
     var seen = [];
     withResources(H, {
         GetResourceAmount: function (name) { seen.push(name); return 42; },
-        GetFree:           function () { return 7; }
+        // The host method takes no parameter and the bridge throws on any.
+        GetFree:           function () { if (arguments.length) throw new Error('#1063'); return 7; }
     });
 
     var R = H.Steward.core.resources;
     t.assert.strictEqual(R.amount('StripedEggs'), 42);
     t.assert.strictEqual(R.freePopulation(), 7);
     t.assert.deepStrictEqual(seen, ['StripedEggs']);
+});
+
+t.test('GetFree is called with no argument', function () {
+    var H = harness.boot({ sections: ['kernel', 'core'] });
+    withResources(H, {
+        GetFree: function () { if (arguments.length) throw new Error('#1063'); return 7; }
+    });
+
+    t.assert.strictEqual(H.Steward.core.resources.freePopulation(), 7);
+    t.assert.strictEqual(warnsFor(H, 'resources').length, 0);
 });
 
 t.test('zero is a real reading, not a failure', function () {
