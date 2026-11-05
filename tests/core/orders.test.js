@@ -585,3 +585,73 @@ t.test('star still verifies when the general really left a clean list', function
     var r = run(s, s.orders.star('g1'), function (n) { if (n === 1) hideGeneral(s); });
     assert.strictEqual(r.status, s.S.ActionResult.Verified);
 });
+
+// ---- send uses what precheck found ------------------------------------------
+
+// Counts the reads of the specialist vector from now on.
+function countReads(s) {
+    var z = s.H.host.game.gi.mCurrentPlayerZone;
+    var real = z.GetSpecialists_vector;
+    var box = { n: 0 };
+    z.GetSpecialists_vector = function () { box.n++; return real.apply(z, arguments); };
+    return box;
+}
+
+function warnLines(s, re) {
+    return s.H.logs().filter(function (l) { return l.level === 'warn' && re.test(JSON.stringify(l)); });
+}
+
+t.test('send reads no list: it uses the general its precheck found', function () {
+    var cases = [
+        { name: 'move',   build: function (s) { return s.orders.move('g1', 42); },        packets: true },
+        { name: 'attack', build: function (s) { return s.orders.attack('g1', 300); },     packets: true },
+        { name: 'star',   build: function (s) { return s.orders.star('g1'); },            packets: true },
+        { name: 'sendToZone', build: function (s) { return s.orders.sendToZone('g1', 5); }, packets: false }
+    ];
+    cases.forEach(function (c) {
+        var g = AC.general({ uid: 'g1', grid: 5, army: { Rifle: 3 } });
+        var s = setup({ generals: [g], buildings: { 300: camp(300) } });
+        var def = c.build(s);
+        assert.strictEqual(def.precheck(), null, c.name);
+        var reads = countReads(s);
+        hideGeneral(s);
+        assert.strictEqual(def.send(), true, c.name);
+        assert.strictEqual(reads.n, 0, c.name + ' read the list');
+        if (c.packets) {
+            assert.strictEqual(s.sent.actions.length, 1, c.name);
+            assert.strictEqual(s.sent.actions[0].data.uniqueID.toKeyString(), 'g1', c.name);
+        } else {
+            assert.strictEqual(s.zoneCalls.length, 1, c.name);
+            assert.strictEqual(s.zoneCalls[0].spec, g, c.name);
+        }
+    });
+});
+
+t.test('send without a found general returns false, sends nothing and warns', function () {
+    var names = ['move', 'attack', 'star', 'sendToZone'];
+    names.forEach(function (name) {
+        var g = AC.general({ uid: 'g1', grid: 5, army: { Rifle: 3 } });
+        var s = setup({ generals: [g], buildings: { 300: camp(300) } });
+        var def = {
+            move:       function () { return s.orders.move('g1', 42); },
+            attack:     function () { return s.orders.attack('g1', 300); },
+            star:       function () { return s.orders.star('g1'); },
+            sendToZone: function () { return s.orders.sendToZone('g1', 5); }
+        }[name]();
+        assert.strictEqual(def.send(), false, name);
+        assert.strictEqual(s.sent.actions.length, 0, name);
+        assert.strictEqual(s.zoneCalls.length, 0, name);
+        assert.strictEqual(warnLines(s, /send without a found general/).length, 1, name);
+    });
+});
+
+t.test('a refused precheck clears what an earlier precheck found', function () {
+    var g = AC.general({ uid: 'g1', grid: 5 });
+    var s = setup({ generals: [g] });
+    var def = s.orders.move('g1', 42);
+    assert.strictEqual(def.precheck(), null);
+    s.sent.placeable = 1;
+    assert.ok(def.precheck());
+    assert.strictEqual(def.send(), false);
+    assert.strictEqual(s.sent.actions.length, 0);
+});

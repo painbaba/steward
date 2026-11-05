@@ -4,9 +4,13 @@
  * Takes a run on the home island from Muster to Depart, and back home from
  * ArriveHome to Next:
  *
- *   Muster -> Validate -> Snapshot -> Supply (-> Unload -> Supply) -> Load
- *   -> Verify -> StartMap -> Depart, then the island ...,
+ *   Muster -> Validate (-> Deploy) -> Snapshot -> Supply (-> Unload -> Supply)
+ *   -> Load -> Verify -> StartMap -> Depart, then the island ...,
  *   ArriveHome -> Account -> Population -> Retrain -> Next.
+ *
+ * Deploy runs only when a loadout general stands in the star menu at home: it
+ * places him back on the home grid he was last seen on, and waits with no
+ * limit when it cannot.
  *
  * plan() does one step per call, and only while the home island is viewed.
  * The scheduler calls it only while no adventures queue entry is pending, so
@@ -37,6 +41,9 @@
     // Starting values, to be tuned in game.
     var GAP_MS                 = 180000;    // the game wants this long between two maps
     var PRODUCTION_WAIT_MAX_MS = 21600000;  // the home load waits this long for queued troops
+    // A failed placing round is tried again after this, so a host that keeps
+    // refusing gets at most one move a minute.
+    var DEPLOY_RETRY_MS        = 60000;
 
     var CATEGORY = 'adventures';
 
@@ -100,8 +107,37 @@
         return null;
     }
 
+    // A general in the star menu reads grid 0 (or below). A grid that could
+    // not be read is not taken for the star menu, so a failed read never sends
+    // the run to Deploy.
+    function offMap(g) {
+        return !!g && typeof g.grid === 'number' && g.grid <= 0;
+    }
+
+    // Key of the first loadout general this read lists in the star menu, or
+    // null.
+    function firstOffMap(r, inv) {
+        var keys = ld().keysOf(r);
+        for (var i = 0; i < keys.length; i++) {
+            if (offMap(ld().gen(inv, keys[i]))) return keys[i];
+        }
+        return null;
+    }
+
     function waitAbsent(r, inv, key) {
         ld().waitBusy(r, key, ld().who(inv, key) + ' not here yet');
+    }
+
+    // Remembers the home grid of every loadout general standing on the map,
+    // so Deploy can place one back after he was put into the star menu.
+    function rememberGrids(r, inv) {
+        // A run kept in memory across a script reload may predate the field.
+        if (!r.homeGrids || typeof r.homeGrids !== 'object') r.homeGrids = {};
+        var keys = ld().keysOf(r);
+        for (var i = 0; i < keys.length; i++) {
+            var g = ld().gen(inv, keys[i]);
+            if (ld().onMap(g)) r.homeGrids[keys[i]] = g.grid;
+        }
     }
 
     // Holds until every loadout general is listed at home, idle and not
@@ -123,6 +159,8 @@
                 return;
             }
         }
+        // go() saves the run, and the grids with it.
+        rememberGrids(r, inv);
         st().go(next, why);
     }
 
@@ -193,7 +231,128 @@
             waitAbsent(r, inv, gone);
             return;
         }
+        if (firstOffMap(r, inv) !== null) {
+            st().go(S.RunStep.Deploy, 'template checked');
+            return;
+        }
         st().go(S.RunStep.Snapshot, 'template checked');
+    }
+
+    // ---- Deploy -------------------------------------------------------------
+
+    function homeGridOf(r, key) {
+        var hg = r.homeGrids;
+        return hg && has(hg, key) && typeof hg[key] === 'number' && hg[key] > 0 ? hg[key] : null;
+    }
+
+    // Logs once per run and key what the client offers for a general in the
+    // star menu at home: whether his remembered grid is placeable and which
+    // landing grids the zone lists. Kept in memory only.
+    function probe(r, inv, key, spec, grid) {
+        var rs = st().current();
+        if (!rs.deployProbe) rs.deployProbe = {};
+        var tag = r.id + ':' + key;
+        if (has(rs.deployProbe, tag)) return;
+        rs.deployProbe[tag] = true;
+        var lg = S.core.zone.landingGrids();
+        var code = grid === null || !spec ? 'n/a' : S.core.specialists.orders.placeCode(spec, grid);
+        log('star menu at home: ' + ld().who(inv, key) + '; home grid ' + (grid === null ? 'unknown' : grid) +
+            ', placeCode ' + code + '; landing grids ' + lg.length +
+            (lg.length ? ' (' + lg.slice(0, 10).join(', ') + ')' : ''));
+    }
+
+    // Places every loadout general standing in the star menu back on his
+    // remembered home grid, then goes to Snapshot once all stand on the map,
+    // ready and not walking. It never pauses: a general it cannot place is
+    // waited for with no limit, so the user can place him by hand. Its rounds
+    // are handled here rather than by settleRound, which pauses on a failure
+    // and counts rounds without effect: a failed round is only tried again
+    // after DEPLOY_RETRY_MS, and r.rounds is never touched.
+    function deploy(r, inv) {
+        var orders = S.core.specialists.orders;
+        ld().dropOrphan(r);
+        var gone = firstAbsent(r, inv);
+        if (gone !== null) {
+            waitAbsent(r, inv, gone);
+            return;
+        }
+        var walking = ld().movingKey(r);
+        if (walking !== null) {
+            ld().waitBusy(r, walking, ld().who(inv, walking) + ' walking to his grid');
+            return;
+        }
+        var round = ld().currentRound(r, S.RunStep.Deploy);
+        if (round) {
+            if (ld().roundSettling(round)) return;
+            var f = ld().firstFailure(round);
+            if (f && typeof round.doneAt === 'number' && now() - round.doneAt < DEPLOY_RETRY_MS) {
+                ld().waitBusy(r, f.key, ld().who(inv, f.key) + ' could not be placed (' + f.reason +
+                    '); place him on the island');
+                return;
+            }
+            st().dropRound(f ? 'placing failed, trying again' : 'placing sent');
+        }
+
+        var keys = ld().keysOf(r);
+        var off = [];
+        var i;
+        for (i = 0; i < keys.length; i++) {
+            if (!ld().onMap(ld().gen(inv, keys[i]))) off.push(keys[i]);
+        }
+        if (!off.length) {
+            for (i = 0; i < keys.length; i++) {
+                if (!ld().ready(ld().gen(inv, keys[i]))) {
+                    ld().waitBusy(r, keys[i], ld().who(inv, keys[i]) + ' busy');
+                    return;
+                }
+            }
+            st().go(S.RunStep.Snapshot, 'generals on the map');
+            return;
+        }
+
+        var moves = [];
+        var blocked = null;
+        for (i = 0; i < off.length; i++) {
+            var k = off[i];
+            var g = ld().gen(inv, k);
+            var why = null;
+            if (!ld().ready(g)) {
+                why = 'busy';
+            } else if (!offMap(g)) {
+                // Neither on the map nor in the star menu: his grid could not
+                // be read, so nothing is sent on it.
+                why = 'grid not readable';
+            } else {
+                var spec = specOf(k);
+                var grid = homeGridOf(r, k);
+                probe(r, inv, k, spec, grid);
+                if (grid === null) why = 'no grid';
+                else if (!spec || !orders.isPlaceable(spec, grid)) why = 'not placeable at ' + grid;
+                else moves.push({ key: k, grid: grid });
+            }
+            if (why !== null && blocked === null) blocked = { key: k, why: why };
+        }
+
+        if (moves.length) {
+            var nr = ld().startRound(r, S.RunStep.Deploy, []);
+            var text = [];
+            for (i = 0; i < moves.length; i++) {
+                ld().attempt(nr, moves[i].key, orders.move(moves[i].key, moves[i].grid));
+                text.push(moves[i].key + ' -> ' + moves[i].grid);
+            }
+            log('placing ' + moves.length + ' general(s) from the star menu: ' + text.join(', '));
+            return;
+        }
+        var name = ld().who(inv, blocked.key);
+        if (blocked.why === 'busy') {
+            ld().waitBusy(r, blocked.key, name + ' busy');
+            return;
+        }
+        if (blocked.why === 'grid not readable') {
+            ld().waitBusy(r, blocked.key, name + ': grid not readable');
+            return;
+        }
+        ld().waitBusy(r, blocked.key, name + ' is in the star menu; place him on the island (' + blocked.why + ')');
     }
 
     // Units the loadout carries into the field.
@@ -643,7 +802,8 @@
             waveIndex:   0,
             step:        S.RunStep.Muster,
             speedBuff:   r.speedBuff,
-            retrain:     r.retrain
+            retrain:     r.retrain,
+            homeGrids:   r.homeGrids
         }));
         S.kernel.log(CATEGORY, 'run ' + (finished + 1) + '/' + total + ' begins: ' + r.label);
     }
@@ -654,6 +814,7 @@
         var RS = S.RunStep;
         if (step === RS.Muster)     return muster;
         if (step === RS.Validate)   return validate;
+        if (step === RS.Deploy)     return deploy;
         if (step === RS.Snapshot)   return snapshot;
         if (step === RS.Supply)     return supplyStep;
         if (step === RS.Unload)     return unloadStep;
@@ -693,6 +854,7 @@
     S.modules.adventures.home = {
         GAP_MS:                 GAP_MS,
         PRODUCTION_WAIT_MAX_MS: PRODUCTION_WAIT_MAX_MS,
+        DEPLOY_RETRY_MS:        DEPLOY_RETRY_MS,
         plan:                   plan
     };
 

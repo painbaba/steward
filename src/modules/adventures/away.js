@@ -314,17 +314,6 @@
         return !!g && (g.cls === S.SpecialistType.Carrier || g.cls === S.SpecialistType.AdmiralCarrier);
     }
 
-    // The first loadout key whose general is walking to a grid, or null. A
-    // key that cannot be looked up does not count as walking.
-    function movingKey(r) {
-        var keys = ld().keysOf(r);
-        for (var i = 0; i < keys.length; i++) {
-            var spec = S.core.specialists.lookup(keys[i]).spec;
-            if (spec && S.core.specialists.orders.taskKind(spec) === S.GeneralTask.Move) return keys[i];
-        }
-        return null;
-    }
-
     // The one pack plan of PackStar, Pack and Clear: carriers first, then the
     // idle loadout generals, each holding one troop class within its
     // capacity. Sharing it keeps the three steps from disagreeing on what is
@@ -441,7 +430,7 @@
             ld().waitRead(r, 'free troops and armies');
             return;
         }
-        var walking = movingKey(r);
+        var walking = ld().movingKey(r);
         if (walking !== null) {
             ld().waitBusy(r, walking, ld().who(inv, walking) + ' walking to its grid');
             return;

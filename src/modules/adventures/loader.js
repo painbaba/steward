@@ -315,6 +315,17 @@
         return !!g && typeof g.grid === 'number' && g.grid > 0;
     }
 
+    // The first loadout key whose general is walking to a grid, or null. A
+    // key that cannot be looked up does not count as walking.
+    function movingKey(r) {
+        var keys = keysOf(r);
+        for (var i = 0; i < keys.length; i++) {
+            var spec = S.core.specialists.lookup(keys[i]).spec;
+            if (spec && S.core.specialists.orders.taskKind(spec) === S.GeneralTask.Move) return keys[i];
+        }
+        return null;
+    }
+
     // A free placeable grid for each key. Landing fields are the only grids a
     // general at the star can be placed on, and the vector also lists other
     // players' fields, so the client's own placeable test decides; the move's
@@ -898,6 +909,7 @@
         seenOnVerified:    seenOnVerified,
         leaving:           leaving,
         onMap:             onMap,
+        movingKey:         movingKey,
         chooseGrids:       chooseGrids,
         anyAttacking:      anyAttacking,
         startRound:        startRound,

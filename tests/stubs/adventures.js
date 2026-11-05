@@ -182,7 +182,11 @@ function homeStock(o, popName) {
 //   - w.afterRead(fn) runs fn once the next inventory read ends, for any
 //     change inside a pass (ghostAfterRead is one such fn);
 //   - w.nullListRead(n) makes the n-th specialist list read from now return
-//     null, the way the client does for a moment; earlier reads pass through.
+//     null, the way the client does for a moment; earlier reads pass through;
+//   - w.hideReads(g, n, mode) hides g from the next n specialist list reads:
+//     each returns a copy of the list without g (mode 'short', the default)
+//     or with a null slot in his place (mode 'falsy'), the way the bridge
+//     loses an entry for a moment; then the real getter is back.
 function world(o) {
     o = o || {};
     var fs = o.fs || airfs.make();
@@ -295,6 +299,24 @@ function world(o) {
                 return null;
             }
             return real.apply(this, arguments);
+        };
+    };
+
+    w.hideReads = function (g, n, mode) {
+        var zone = gi.mCurrentPlayerZone;
+        var real = zone.GetSpecialists_vector;
+        var left = typeof n === 'number' ? n : 1;
+        zone.GetSpecialists_vector = function () {
+            var list = real.apply(this, arguments);
+            left--;
+            if (left <= 0) zone.GetSpecialists_vector = real;
+            if (!list) return list;
+            var out = [];
+            for (var i = 0; i < list.length; i++) {
+                if (list[i] !== g) out.push(list[i]);
+                else if (mode === 'falsy') out.push(null);
+            }
+            return out;
         };
     };
 

@@ -20,8 +20,10 @@
  *   timeoutMs    verify window per send
  *   retries      how many more sends may follow the first (default RETRIES);
  *                0 for an action that must not go out twice
- * Every callback is wrapped in try/catch and re-finds host objects itself, so
- * a def never acts on a stale specialist.
+ * Every callback is wrapped in try/catch. satisfied, precheck, check and
+ * describe re-find host objects themselves; send may use what its precheck
+ * found, since sendStep always runs precheck right before send in the same
+ * step.
  *
  * Observation rule: satisfied and check return true only on a positive,
  * successful observation of the effect. A packet that went out is not success,

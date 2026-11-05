@@ -37,7 +37,8 @@
  * step, key, text, since, noted, read }, read marking a wait kept alive by a bad
  * read), busySeen (whether this pass kept that wait going), stuckClock (the
  * watched-wait clock of the zone trip, in the shape of quiet) and zoneWait
- * (whether the "waiting for zone" line was logged). They describe callbacks and reads of this client session, which do not
+ * (whether the "waiting for zone" line was logged) and deployProbe (run id
+ * and key of the star-menu probe lines already logged). They describe callbacks and reads of this client session, which do not
  * exist after a restart.
  * resetMemory() is the one place that resets them for a new or loaded run.
  * The round alone is also dropped at bundle load and by dropRound(), because a reload or a
@@ -113,6 +114,7 @@
     var RUN_STEPS = [
         ['Muster',     'RunMuster',     HOME,      'Home',       'Check generals and files',   '', true],
         ['Validate',   'RunValidate',   HOME,      'Home',       'Check generals and files',   ''],
+        ['Deploy',     'RunDeploy',     HOME,      'Home',       'Load generals',              ''],
         ['Snapshot',   'RunSnapshot',   HOME,      'Home',       'Load generals',              ''],
         ['Supply',     'RunSupply',     HOME,      'Home',       'Load generals',              ''],
         ['Unload',     'RunUnload',     HOME,      'Home',       'Load generals',              ''],
@@ -559,6 +561,17 @@
         return out;
     }
 
+    // A grid per loadout key: own keys with finite grids > 0 are kept, so a
+    // grid that was never a placed one cannot be sent as a target.
+    function normGrids(v) {
+        var out = {};
+        if (!isPlainObject(v)) return out;
+        for (var k in v) {
+            if (has(v, k) && typeof v[k] === 'number' && isFinite(v[k]) && v[k] > 0) out[k] = v[k];
+        }
+        return out;
+    }
+
     // round, cache, questRetry and the read windows belong to the run they
     // were built for; a new request, a new run or a loaded file starts
     // without them.
@@ -573,6 +586,7 @@
         rs.busySeen = false;
         rs.stuckClock = null;
         rs.zoneWait = false;
+        rs.deployProbe = {};
     }
 
     // The only literal of the run object. start holds the facts fixed at
@@ -591,6 +605,8 @@
     // holds (null: not quiet). resolve is the zone trip in progress ({ phase,
     // at }, at being when home was loaded; null: none). stuck counts the zone
     // trips taken at one stuck position ({ step, wave, trips }; null: none).
+    // homeGrids maps a loadout key to the home grid he was last seen on, so
+    // Deploy can place him back from the star menu ({}: none known).
     function newRun(start) {
         var s = isPlainObject(start) ? start : {};
         var t = clock();
@@ -623,6 +639,7 @@
             popBase:     null,
             resolve:     null,
             stuck:       null,
+            homeGrids:   normGrids(s.homeGrids),
             pause:       null
         };
     }
@@ -767,6 +784,7 @@
         r.popBase    = num(v.popBase);
         r.resolve    = normResolve(v.resolve);
         r.stuck      = normStuck(v.stuck);
+        r.homeGrids  = normGrids(v.homeGrids);
         r.pause      = normPause(v.pause);
         for (k in facts) {
             if (has(facts, k)) r[k] = facts[k];

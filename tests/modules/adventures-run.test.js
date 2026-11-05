@@ -740,6 +740,117 @@ t.test('Depart: a failed send still pauses DepartFailed while another general is
     assert.strictEqual(sendsOf(w, '1.2').length, 0);
 });
 
+// The bridge sometimes lists the specialists for one read with a general
+// left out. None of these reads may end in a pause.
+
+function specialistLogged(w, re) {
+    return w.H.logs().some(function (l) { return l.category === 'specialists' && re.test(l.args.join(' ')); });
+}
+
+// Wraps lib[fn] so that the def it builds for key hides g from one list read
+// (w.hideReads mode), once: before its precheck runs, or with o.after right
+// after a precheck that passed. Returns a counter of the hides armed.
+function hideAtPrecheck(w, lib, fn, key, g, o) {
+    o = o || {};
+    var make = lib[fn];
+    var armed = { n: 0 };
+    lib[fn] = function (k) {
+        var def = make.apply(lib, arguments);
+        if (k !== key) return def;
+        var pre = def.precheck;
+        def.precheck = function () {
+            if (!o.after && !armed.n) {
+                armed.n++;
+                w.hideReads(g, 1, o.mode);
+            }
+            var why = pre.apply(def, arguments);
+            if (o.after && why === null && !armed.n) {
+                armed.n++;
+                w.hideReads(g, 1, o.mode);
+            }
+            return why;
+        };
+        return def;
+    };
+    return armed;
+}
+
+t.test('Depart: a general hidden from the read after his precheck is sent once, verified, no pause', function () {
+    var w = homeWorld({ mapOpen: true });
+    var armed = hideAtPrecheck(w, w.S.core.specialists.orders, 'sendToZone', '1.1', w.g1, { after: true });
+    series(w, { step: w.S.RunStep.Depart, zoneId: ZONE });
+    drive(w, { until: at('Jump') });
+    assertStep(w, 'Jump');
+    assert.strictEqual(armed.n, 1, 'the read after the precheck was hidden');
+    assert.strictEqual(sendsOf(w, '1.1').length, 1);
+    assert.strictEqual(sendsOf(w, '1.2').length, 1);
+    assert.strictEqual(w.st.run().marks['depart:1.1'].seen, true, 'verified');
+    assert.ok(!logged(w, /run paused/));
+});
+
+t.test('Depart: a general hidden from his precheck read is found again; he leaves with no pause', function () {
+    var w = homeWorld({ mapOpen: true });
+    var armed = hideAtPrecheck(w, w.S.core.specialists.orders, 'sendToZone', '1.1', w.g1);
+    series(w, { step: w.S.RunStep.Depart, zoneId: ZONE });
+    tick(w);
+    play(w);
+    if (!sendsOf(w, '1.1').length) {
+        w.t += 1000;
+        tick(w);
+        play(w);
+    }
+    assert.strictEqual(armed.n, 1, 'the precheck read was hidden');
+    assert.strictEqual(sendsOf(w, '1.1').length, 1, 'sent on that pass or the next');
+    assert.ok(specialistLogged(w, /lookup 1\.1 found on read 2 of /), 'the re-read found him');
+    drive(w, { until: at('Jump') });
+    assertStep(w, 'Jump');
+    assert.strictEqual(sendsOf(w, '1.1').length, 1);
+    assert.strictEqual(sendsOf(w, '1.2').length, 1);
+    assert.ok(!logged(w, /run paused/));
+});
+
+t.test('Depart: a general hidden from the step read after the inventory still leaves with no pause', function () {
+    var w = homeWorld({ mapOpen: true });
+    series(w, { step: w.S.RunStep.Depart, zoneId: ZONE });
+    w.afterRead(function () { w.hideReads(w.g1, 1); });
+    drive(w, { until: at('Jump') });
+    assertStep(w, 'Jump');
+    assert.strictEqual(sendsOf(w, '1.1').length, 1);
+    assert.strictEqual(sendsOf(w, '1.2').length, 1);
+    assert.ok(!logged(w, /run paused/));
+});
+
+t.test('Depart: a null slot in place of a general at his precheck holds without a pause', function () {
+    var w = homeWorld({ mapOpen: true });
+    var armed = hideAtPrecheck(w, w.S.core.specialists.orders, 'sendToZone', '1.1', w.g1, { mode: 'falsy' });
+    series(w, { step: w.S.RunStep.Depart, zoneId: ZONE });
+    tick(w);
+    play(w);
+    assert.strictEqual(armed.n, 1, 'the precheck read had a null slot');
+    assert.strictEqual(sendsOf(w, '1.1').length, 0, 'the unreadable read sent nothing');
+    assert.strictEqual(sendsOf(w, '1.2').length, 1);
+    assertStep(w, 'Depart');
+    drive(w, { until: at('Jump') });
+    assertStep(w, 'Jump');
+    assert.strictEqual(sendsOf(w, '1.1').length, 1);
+    assert.strictEqual(sendsOf(w, '1.2').length, 1);
+    assert.ok(!logged(w, /run paused/));
+});
+
+t.test('Load: a loadout general hidden from his raise precheck read is raised, with no LoadMismatch', function () {
+    var smuggler = gen('1.1', 'The Smuggler', 10);
+    var w = homeWorld({ generals: [smuggler, gen('1.2', 'Bert', 20)] });
+    var armed = hideAtPrecheck(w, w.S.core.army, 'raise', '1.1', smuggler);
+    series(w, { step: w.S.RunStep.Supply, run: { snapshot: { Rifle: 20 } } });
+    drive(w, { until: at('StartMap') });
+    assertStep(w, 'StartMap');
+    assert.strictEqual(armed.n, 1, 'the precheck read was hidden');
+    assert.deepStrictEqual(w.raises.filter(function (k) { return k === '1.1'; }), ['1.1'], 'one raise');
+    assert.deepStrictEqual(plain(smuggler.state.army), { Rifle: 5 });
+    assert.ok(specialistLogged(w, /lookup 1\.1 found on read 2 of /), 'the re-read found him');
+    assert.ok(!logged(w, /run paused/));
+});
+
 // ---- 8. Jump and Arrive -----------------------------------------------------------
 
 t.test('Jump: a zone that does not load is visited again at JUMP_MS, then JUMP_RETRY_MS; only a gone adventure pauses', function () {

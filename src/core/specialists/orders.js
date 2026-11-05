@@ -17,10 +17,13 @@
  * yet; they live in RAW_CODES only, and every finished order logs the raw
  * task type it observed so the codes can be confirmed from the console log.
  *
- * Every callback re-finds the general by uid key through
- * S.core.specialists.lookup, so a def never acts on a stale object. A failed
- * list read is "not observed", never success; a general that is not listed
- * is a refusal before the first send.
+ * precheck finds the general by uid key through S.core.specialists.lookup.
+ * send uses the object precheck found instead of reading the list again,
+ * because actions.sendStep runs precheck right before send in the same queue
+ * step, retries included, and a second read can miss a general the bridge
+ * hides for one read. satisfied, check and describe re-find. A failed list
+ * read is "not observed", never success; a general that is not listed is a
+ * refusal before the first send.
  *
  * Bundle slot: core, after specialists/geologists.js and, like every file
  * under core/specialists/, before specialists.js. The top level fills
@@ -229,6 +232,7 @@
     // --- Defs.
 
     function move(key, grid) {
+        var found = null;
         return {
             label:     'move ' + key + ' -> ' + grid,
             category:  CATEGORY,
@@ -238,15 +242,20 @@
                 return !!f.spec && onGrid(f.spec, grid);
             },
             precheck: function () {
+                found = null;
                 var r = ready(key);
                 if (!r.spec) return r.reason;
                 if (typeof grid !== 'number' || !(grid > 0)) return 'bad grid ' + grid;
                 if (!isPlaceable(r.spec, grid)) return 'not placeable at ' + grid;
+                found = r.spec;
                 return null;
             },
             send: function () {
-                var f = S.core.specialists.refind(key);
-                return !!f.spec && sendTask(f.spec, S.GeneralTask.Move, grid);
+                if (!found) {
+                    S.kernel.warn(CATEGORY, 'move: send without a found general');
+                    return false;
+                }
+                return sendTask(found, S.GeneralTask.Move, grid);
             },
             check: function () {
                 var f = S.core.specialists.refind(key);
@@ -264,11 +273,13 @@
     // client keeps for the whole battle; a target that is gone proves nothing,
     // since the building lookup also answers null when it cannot read.
     function attack(key, target, fromGrid) {
+        var found = null;
         return {
             label:     'attack ' + key + ' -> ' + target,
             category:  CATEGORY,
             timeoutMs: ATTACK_TIMEOUT_MS,
             precheck: function () {
+                found = null;
                 var r = ready(key);
                 if (!r.spec) return r.reason;
                 if (!hasUnits(r.spec)) return 'no units';
@@ -279,11 +290,15 @@
                 if (!b) return 'no building at ' + target;
                 if (!S.core.buildings.isEnemy(b)) return 'target ' + target + ' not enemy';
                 if (!hasPath(r.spec, target)) return 'no path to ' + target;
+                found = r.spec;
                 return null;
             },
             send: function () {
-                var f = S.core.specialists.refind(key);
-                return !!f.spec && sendTask(f.spec, S.GeneralTask.Attack, target);
+                if (!found) {
+                    S.kernel.warn(CATEGORY, 'attack: send without a found general');
+                    return false;
+                }
+                return sendTask(found, S.GeneralTask.Attack, target);
             },
             check: function () {
                 var f = S.core.specialists.refind(key);
@@ -307,6 +322,7 @@
     // an empty army, or gone from a list that read fine after the precheck saw
     // it on the map.
     function star(key) {
+        var found = null;
         return {
             label:     'star ' + key,
             category:  CATEGORY,
@@ -316,18 +332,22 @@
                 return !!f.spec && atStar(f.spec);
             },
             precheck: function () {
+                found = null;
                 var r = ready(key);
                 if (!r.spec) return r.reason;
                 var g = S.core.army.garrisonGrid(r.spec);
                 if (typeof g !== 'number' || !(g > 0)) return 'not on the map';
+                found = r.spec;
                 return null;
             },
             baseline: function () {
                 return { found: true, zoneId: S.core.zone.id() };
             },
             send: function () {
-                var f = S.core.specialists.refind(key);
-                if (!f.spec) return false;
+                if (!found) {
+                    S.kernel.warn(CATEGORY, 'star: send without a found general');
+                    return false;
+                }
                 // The client passes the cursor's grid along; copied as it is.
                 var pos = 0;
                 try {
@@ -336,7 +356,7 @@
                 } catch (e) {
                     S.kernel.warn(CATEGORY, 'star: GetGridPosition threw:', e);
                 }
-                return sendTask(f.spec, S.GeneralTask.ToStar, typeof pos === 'number' ? pos : 0);
+                return sendTask(found, S.GeneralTask.ToStar, typeof pos === 'number' ? pos : 0);
             },
             check: function (base) {
                 var l = S.core.specialists.lookup(key);
@@ -354,25 +374,30 @@
     // when it left the viewed list, carries the travel task or reports
     // travelling.
     function sendToZone(key, zoneId) {
+        var found = null;
         return {
             label:     'send ' + key + ' to zone ' + zoneId,
             category:  CATEGORY,
             timeoutMs: ZONE_TIMEOUT_MS,
             precheck: function () {
+                found = null;
                 if (typeof zoneId !== 'number') return 'bad zone id ' + zoneId;
                 var viewed = S.core.zone.id();
                 if (typeof viewed !== 'number') return 'viewed zone unreadable';
                 if (viewed === zoneId) return 'already on zone ' + zoneId;
                 var r = ready(key);
                 if (!r.spec) return r.reason;
+                found = r.spec;
                 return null;
             },
             baseline: function () {
                 return { found: true, zoneId: S.core.zone.id() };
             },
             send: function () {
-                var f = S.core.specialists.refind(key);
-                if (!f.spec) return false;
+                if (!found) {
+                    S.kernel.warn(CATEGORY, 'sendToZone: send without a found general');
+                    return false;
+                }
                 try {
                     var sm = game.def('com.bluebyte.tso.service::ServiceManager');
                     var inst = sm && typeof sm.getInstance === 'function' ? sm.getInstance() : null;
@@ -380,7 +405,7 @@
                         S.kernel.warn(CATEGORY, 'sendToZone: ServiceManager.specialist unavailable');
                         return false;
                     }
-                    inst.specialist.sendToZone(f.spec, zoneId);
+                    inst.specialist.sendToZone(found, zoneId);
                     return true;
                 } catch (e) {
                     S.kernel.warn(CATEGORY, 'sendToZone threw:', e);

@@ -895,3 +895,58 @@ t.test('inventory: listRead is false on a list that cannot be read, and listOk i
     assert.strictEqual(inv.listOk, false);
     assert.strictEqual(inv.ok, false);
 });
+
+// ---- send uses what precheck found --------------------------------------------
+
+function countListReads(s) {
+    var z = s.H.host.game.gi.mCurrentPlayerZone;
+    var real = z.GetSpecialists_vector;
+    var box = { n: 0 };
+    z.GetSpecialists_vector = function () { box.n++; return real.apply(z, arguments); };
+    return box;
+}
+
+function emptyList(s) {
+    s.H.host.game.gi.mCurrentPlayerZone.GetSpecialists_vector = function () { return []; };
+}
+
+t.test('raise send reads no list: it uses the general its precheck found', function () {
+    var g = AC.general({ uid: 'g1', army: { Rifle: 5 } });
+    var s = actionSetup({ free: { Rifle: 100 }, generals: [g] });
+    var def = s.army.raise('g1', { Rifle: 60 });
+    assert.strictEqual(def.precheck(), null);
+    var reads = countListReads(s);
+    emptyList(s);
+    assert.strictEqual(def.send(), true);
+    assert.strictEqual(reads.n, 0);
+    assert.strictEqual(s.sent.messages.length, 1);
+    assert.strictEqual(s.sent.messages[0].id, 1031);
+    assert.strictEqual(s.sent.messages[0].data.armyHolderSpecialistVO.uid, 'g1');
+});
+
+t.test('unload send reads no list: it uses the general its precheck found', function () {
+    var g = AC.general({ uid: 'g1', army: { Rifle: 5 } });
+    var s = actionSetup({ free: {}, generals: [g] });
+    var def = s.army.unload('g1');
+    assert.strictEqual(def.precheck(), null);
+    var reads = countListReads(s);
+    emptyList(s);
+    assert.strictEqual(def.send(), true);
+    assert.strictEqual(reads.n, 0);
+    var calls = s.sent.calls.filter(function (c) { return c.method === 'SendRaiseArmyToServer'; });
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls[0].args[1], g);
+});
+
+t.test('raise and unload send without a found general: false, nothing sent, one warn', function () {
+    var g = AC.general({ uid: 'g1', army: { Rifle: 5 } });
+    var s = actionSetup({ free: { Rifle: 100 }, generals: [g] });
+    assert.strictEqual(s.army.raise('g1', { Rifle: 60 }).send(), false);
+    assert.strictEqual(s.army.unload('g1').send(), false);
+    assert.strictEqual(s.sent.messages.length, 0);
+    assert.strictEqual(s.sent.calls.filter(function (c) { return c.method === 'SendRaiseArmyToServer'; }).length, 0);
+    var warns = s.H.logs().filter(function (l) {
+        return l.level === 'warn' && /send without a found general/.test(JSON.stringify(l));
+    });
+    assert.strictEqual(warns.length, 2);
+});

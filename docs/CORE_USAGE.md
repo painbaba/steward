@@ -108,6 +108,8 @@ You don't need to invalidate after server packets that *trigger* an asynchronous
 The specialist list leaves out an entry whose members are unreadable for a moment (see the AIR bridge note in `TSO_API.md`). A dropped entry is unknown, not absent:
 
 - `Steward.core.specialists.lookup(key)` returns `ok: false` when the key is missing from a read that dropped entries. `refind` reports the same case with the reason `Steward.core.specialists.UNREADABLE`. Treat both as "try again later".
+- A clean read that misses the key is read again, up to `Steward.core.specialists.LOOKUP_CLEAN_MISSES` times in the same call, before `lookup` reports "not listed" (`ok: true, spec: null`). A hit costs one read.
+- An empty (falsy) slot in the vector counts as a dropped entry, so a read that holds one is not complete.
 - Around a count that drives a decision, read `Steward.core.specialists.dropped()` before and after the read, or check `listComplete()`. A count from a read with drops can be too low.
 - Do not pause, or record an entry as gone, on one read. The next tick is the retry.
 

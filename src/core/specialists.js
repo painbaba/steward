@@ -522,8 +522,12 @@
     // AS3 bridge, not a different kind of object.
     var REQUIRED_MEMBERS = ['GetType', 'GetUniqueID', 'getPlayerID', 'GetTask'];
     var DROP_LOG_MS = 60000;
+    // A clean read that misses a key is read again, because the bridge
+    // sometimes hides an entry for one read without marking the read as lossy.
+    var LOOKUP_CLEAN_MISSES = 5;
     var droppedTotal = 0;
     var dropLoggedAt = null;
+    var foundLoggedAt = null;
 
     // Returns null when the entry is usable, else the name of the member that
     // failed ('uid' when the members exist but the key reads null or empty). A throw
@@ -561,7 +565,8 @@
     // works). Such an entry cannot be classified, owned or re-found, and its
     // status would read Idle. The reader leaves it out and counts it in
     // dropped(), so a caller can tell a read that lost entries from a clean one.
-    // There is no retry here: the next tick is the retry.
+    // An empty (falsy) slot counts as dropped too, since it may hold the entry
+    // a caller is looking for. There is no retry here: the next tick is the retry.
     //
     // Returns the specialist array, or null when the list could not be read
     // (no zone, no getter, falsy vector, or a throw). Callers that must tell
@@ -579,7 +584,11 @@
             var sample = null;
             for (var i = 0; i < len; i++) {
                 var spec = v[i];
-                if (!spec) continue;
+                if (!spec) {
+                    lost++;
+                    counts.empty = (counts.empty || 0) + 1;
+                    continue;
+                }
                 var bad = unusableMember(spec);
                 if (bad === null) {
                     out.push(spec);
@@ -630,26 +639,42 @@
         return readVector(zone);
     }
 
+    function noteFound(key, n) {
+        var now = Date.now();
+        if (foundLoggedAt !== null && now - foundLoggedAt < DROP_LOG_MS) return;
+        foundLoggedAt = now;
+        S.kernel.log('specialists', 'lookup ' + key + ' found on read ' + n + ' of ' + LOOKUP_CLEAN_MISSES);
+    }
+
     // Re-finds one specialist by its uid key. Action defs treat ok:false as
     // "not observed" (the list could not be read, or the read lost entries and
     // the key may have been one of them) and spec:null with ok:true as "not
-    // listed" (a complete read in which the specialist is absent).
+    // listed". A clean read can still hide an entry for one read, so "not
+    // listed" takes LOOKUP_CLEAN_MISSES clean misses in a row, read back to back
+    // in this call; a hit costs one read, a lossy or null read ends the call at
+    // once with ok:false.
     function lookup(key, opts) {
         opts = opts || {};
         var zone = opts.zone || S.core.zone.current();
-        var before = droppedTotal;
-        var list = readSpecialists(zone);
-        if (list === null) return { ok: false, spec: null };
-        if (typeof key !== 'string' || !key) return { ok: true, spec: null };
-        var sawNullKey = false;
-        for (var i = 0; i < list.length; i++) {
-            var k = uniqueIdKey(list[i]);
-            if (k === key) return { ok: true, spec: list[i] };
-            // An entry that passed the reader but reads null or empty here flipped
-            // between the two reads; it may be the one searched for.
-            if (!k) sawNullKey = true;
+        for (var n = 1; n <= LOOKUP_CLEAN_MISSES; n++) {
+            var before = droppedTotal;
+            var list = readSpecialists(zone);
+            if (list === null) return { ok: false, spec: null };
+            if (n === 1 && (typeof key !== 'string' || !key)) return { ok: true, spec: null };
+            var sawNullKey = false;
+            for (var i = 0; i < list.length; i++) {
+                var k = uniqueIdKey(list[i]);
+                if (k === key) {
+                    if (n > 1) noteFound(key, n);
+                    return { ok: true, spec: list[i] };
+                }
+                // An entry that passed the reader but reads null or empty here flipped
+                // between the two reads; it may be the one searched for.
+                if (!k) sawNullKey = true;
+            }
+            if (droppedTotal !== before || sawNullKey) return { ok: false, spec: null };
         }
-        return { ok: droppedTotal === before && !sawNullKey, spec: null };
+        return { ok: true, spec: null };
     }
 
     // The one place that turns a lookup into the refusal reason every action
@@ -942,6 +967,7 @@
     S.core.specialists.listComplete     = listComplete;
     S.core.specialists.dropped          = dropped;
     S.core.specialists.UNREADABLE       = UNREADABLE;
+    S.core.specialists.LOOKUP_CLEAN_MISSES = LOOKUP_CLEAN_MISSES;
     S.core.specialists.lookup           = lookup;
     S.core.specialists.refind           = refind;
     S.core.specialists.byType           = byType;

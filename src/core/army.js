@@ -626,6 +626,10 @@
     // refused: unload is the empty form.
     function raise(key, target) {
         var want = sameKeys(target);
+        // The general precheck found. send uses it instead of a second list
+        // read, which can miss a general the bridge hides for one read;
+        // sendStep runs precheck right before send in the same step.
+        var found = null;
         return {
             label:     'raise ' + key,
             category:  'army',
@@ -634,6 +638,7 @@
                 return total(want) > 0 && armyIs(key, false, want);
             },
             precheck: function () {
+                found = null;
                 if (total(want) === 0) return 'empty target: use unload';
                 var f = S.core.specialists.refind(key);
                 if (!f.spec) return f.reason;
@@ -651,12 +656,15 @@
                 if (have === null) return 'army unreadable';
                 var draw = RAISE_REUSES_OWN_TROOPS ? minus(want, have) : want;
                 if (!isEmpty(minus(draw, freeArmy()))) return 'free pool does not cover the raise';
+                found = spec;
                 return null;
             },
             send: function () {
-                var f = S.core.specialists.refind(key);
-                if (!f.spec) return false;
-                var vo = buildRaiseVO(f.spec, want);
+                if (!found) {
+                    S.kernel.warn('army', 'raise: send without a found general');
+                    return false;
+                }
+                var vo = buildRaiseVO(found, want);
                 if (!vo) return false;
                 return S.core.packets.sendMessage(1031, vo) === true;
             },
@@ -671,6 +679,8 @@
     // raise or production in the same window can shrink the pool and make a
     // real unload look like it failed.
     function unload(key) {
+        // The general precheck found, used by send as in raise.
+        var found = null;
         return {
             label:     'unload ' + key,
             category:  'army',
@@ -679,23 +689,27 @@
                 return armyIs(key, true);
             },
             precheck: function () {
+                found = null;
                 var f = S.core.specialists.refind(key);
                 if (!f.spec) return f.reason;
                 var why = ownReason(f.spec);
                 if (why) return why;
                 if (!canUnload(f.spec)) return 'cannot unload';
+                found = f.spec;
                 return null;
             },
             baseline: function () {
                 return total(freeArmy());
             },
             send: function () {
-                var f = S.core.specialists.refind(key);
-                if (!f.spec) return false;
+                if (!found) {
+                    S.kernel.warn('army', 'unload: send without a found general');
+                    return false;
+                }
                 try {
                     var util = game.def('MilitarySystem::cMilitaryUtil');
                     if (!util || typeof util.SendRaiseArmyToServer !== 'function') return false;
-                    util.SendRaiseArmyToServer(game.gi, f.spec, null);
+                    util.SendRaiseArmyToServer(game.gi, found, null);
                     return true;
                 } catch (e) {
                     S.kernel.warn('army', 'unload send threw:', e);

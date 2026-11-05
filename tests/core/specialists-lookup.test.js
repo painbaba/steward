@@ -161,11 +161,132 @@ t.test('lookup does not read absence when an entry flips to an undefined or empt
     });
 });
 
-t.test('a falsy slot is skipped and not counted as dropped', function () {
+t.test('a falsy slot counts as dropped and makes lookup ok:false', function () {
+    [null, undefined, ''].forEach(function (empty) {
+        var H = harness.boot({ sections: ['kernel', 'core'] });
+        var c = H.Steward.core.specialists;
+        var k1 = spec('k1');
+        var z = zoneOf([empty, k1]);
+        t.assert.strictEqual(c.all({ zone: z }).length, 1);
+        t.assert.strictEqual(c.dropped(), 1);
+        c.all({ zone: z });
+        t.assert.strictEqual(c.dropped(), 2);
+        var hit = c.lookup('k1', { zone: z });
+        t.assert.strictEqual(hit.ok, true);
+        t.assert.strictEqual(hit.spec, k1);
+        var miss = c.lookup('k2', { zone: z });
+        t.assert.strictEqual(miss.ok, false);
+        t.assert.strictEqual(miss.spec, null);
+    });
+});
+
+t.test('the drop line names an empty slot as empty x1', function () {
+    var H = harness.boot({ sections: ['kernel', 'core'] });
+    H.Steward.core.specialists.all({ zone: zoneOf([null, spec('k1')]) });
+    var lines = dropLines(H);
+    t.assert.strictEqual(lines.length, 1);
+    t.assert.ok(/empty x1/.test(String(lines[0].args[0])), String(lines[0].args[0]));
+});
+
+// A zone whose list is built per call: absent(n) says whether the key k is
+// hidden on read n (1-based). reads() counts the calls.
+function countingZone(absent, other) {
+    var calls = 0;
+    var k = spec('k');
+    return {
+        zone: { GetSpecialists_vector: function () {
+            calls++;
+            var list = [spec('k1')];
+            if (!absent(calls)) list.push(k);
+            if (other) return other(calls, list);
+            return list;
+        } },
+        reads: function () { return calls; },
+        spec:  k
+    };
+}
+
+function foundLines(H) {
+    return H.logs().filter(function (l) {
+        return l.category === 'specialists' && /found on read/.test(String(l.args[0]));
+    });
+}
+
+t.test('lookup finds a key that is hidden for the first m clean reads, in m+1 reads, with one log line', function () {
+    for (var m = 1; m <= 4; m++) {
+        var H = harness.boot({ sections: ['kernel', 'core'] });
+        var z = countingZone(function (n) { return n <= m; });
+        var r = H.Steward.core.specialists.lookup('k', { zone: z.zone });
+        t.assert.strictEqual(r.ok, true);
+        t.assert.strictEqual(r.spec, z.spec);
+        t.assert.strictEqual(z.reads(), m + 1);
+        var lines = foundLines(H);
+        t.assert.strictEqual(lines.length, 1);
+        t.assert.ok(new RegExp('found on read ' + (m + 1)).test(String(lines[0].args[0])), String(lines[0].args[0]));
+    }
+});
+
+t.test('lookup of a key absent on every read is not listed after exactly LOOKUP_CLEAN_MISSES reads', function () {
     var H = harness.boot({ sections: ['kernel', 'core'] });
     var c = H.Steward.core.specialists;
-    t.assert.strictEqual(c.all({ zone: zoneOf([null, undefined, spec('k1')]) }).length, 1);
-    t.assert.strictEqual(c.dropped(), 0);
+    t.assert.strictEqual(c.LOOKUP_CLEAN_MISSES, 5);
+    var z = countingZone(function () { return true; });
+    var r = c.lookup('k', { zone: z.zone });
+    t.assert.strictEqual(r.ok, true);
+    t.assert.strictEqual(r.spec, null);
+    t.assert.strictEqual(z.reads(), 5);
+    t.assert.strictEqual(foundLines(H).length, 0);
+});
+
+t.test('lookup stops at once when a later read is null or drops an entry', function () {
+    var H = harness.boot({ sections: ['kernel', 'core'] });
+    var L = H.Steward.core.specialists.lookup;
+    var nulled = countingZone(function () { return true; }, function (n, list) { return n === 2 ? null : list; });
+    var r = L('k', { zone: nulled.zone });
+    t.assert.strictEqual(r.ok, false);
+    t.assert.strictEqual(r.spec, null);
+    t.assert.strictEqual(nulled.reads(), 2);
+    var lossy = countingZone(function () { return true; }, function (n, list) {
+        if (n === 2) list.push(without('bad', 'getPlayerID'));
+        return list;
+    });
+    r = L('k', { zone: lossy.zone });
+    t.assert.strictEqual(r.ok, false);
+    t.assert.strictEqual(r.spec, null);
+    t.assert.strictEqual(lossy.reads(), 2);
+});
+
+t.test('a hit on the first read makes one read and logs nothing', function () {
+    var H = harness.boot({ sections: ['kernel', 'core'] });
+    var z = countingZone(function () { return false; });
+    var r = H.Steward.core.specialists.lookup('k', { zone: z.zone });
+    t.assert.strictEqual(r.spec, z.spec);
+    t.assert.strictEqual(z.reads(), 1);
+    t.assert.strictEqual(foundLines(H).length, 0);
+});
+
+t.test('repeated hits on read 2 log one line within the throttle window', function () {
+    var H = harness.boot({ sections: ['kernel', 'core'] });
+    var L = H.Steward.core.specialists.lookup;
+    for (var i = 0; i < 4; i++) {
+        var z = countingZone(function (n) { return n === 1; });
+        t.assert.strictEqual(L('k', { zone: z.zone }).spec, z.spec);
+    }
+    t.assert.strictEqual(foundLines(H).length, 1);
+});
+
+t.test('refind says specialist not found only after LOOKUP_CLEAN_MISSES clean misses', function () {
+    var H = harness.boot({ sections: ['kernel', 'core'] });
+    var c = H.Steward.core.specialists;
+    var hidden = countingZone(function (n) { return n <= 4; });
+    var r = c.refind('k', { zone: hidden.zone });
+    t.assert.strictEqual(r.spec, hidden.spec);
+    t.assert.strictEqual(r.reason, null);
+    var gone = countingZone(function () { return true; });
+    r = c.refind('k', { zone: gone.zone });
+    t.assert.strictEqual(r.spec, null);
+    t.assert.strictEqual(r.reason, 'specialist not found');
+    t.assert.strictEqual(gone.reads(), 5);
 });
 
 t.test('dropped moves on a dropped read and stays on a clean one', function () {
