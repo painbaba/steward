@@ -3,8 +3,10 @@
  *
  * Read-only dumps of what an adventure attack needs to know before anything
  * is ever sent: each own general's task and squads, the free troop pool, the
- * quest pool, the active adventures and the adventure, buff and unit
- * definitions. Every line goes to the standard log so the open questions
+ * quest pool with each quest's triggers, finished status and end
+ * conditions, the buildings of the viewed zone (written as JSON under
+ * steward/dumps/), the active adventures and the adventure, buff and unit
+ * definitions. Every other line goes to the standard log so the open questions
  * (is an injury a task, does a raise reuse the general's own troops, can the
  * definition maps be enumerated) can be settled from a pasted log.
  *
@@ -74,6 +76,27 @@
     function json(map) {
         try { return JSON.stringify(map); }
         catch (e) { return '[unprintable]'; }
+    }
+
+    // Log text for one host property: '?' without an object, '[threw]' when
+    // the read throws.
+    function field(obj, key) {
+        if (!obj) return '?';
+        try { return fmt(obj[key]); }
+        catch (e) { return '[threw]'; }
+    }
+
+    // JSON value for one host property: primitives stay as they are so a diff
+    // shows true/false/null, anything else is rendered as text.
+    function rawField(obj, key) {
+        if (!obj) return null;
+        try {
+            var v = obj[key];
+            if (v === undefined) return null;
+            if (v === null || typeof v === 'boolean' || typeof v === 'number' ||
+                typeof v === 'string') return v;
+            return fmt(v);
+        } catch (e) { return '[threw]'; }
     }
 
     function has(obj, key) {
@@ -263,23 +286,104 @@
     // Quests and active adventures
     // ---------------------------------------------------------------
 
+    // The getter first, the raw field when the getter is absent, throws or
+    // returns nothing; the tag tells which one answered.
+    function questDefinition(q) {
+        try {
+            if (typeof q.GetQuestDefinition === 'function') {
+                var d = q.GetQuestDefinition();
+                if (d) return { def: d, source: 'getter' };
+            }
+        } catch (e) { /* try the field */ }
+        try {
+            if (q.mQuestDefinition) return { def: q.mQuestDefinition, source: 'field' };
+        } catch (e2) { /* none */ }
+        return { def: null, source: 'none' };
+    }
+
+    // Total the host counts for one trigger; a failed read is a value, not an abort.
+    function triggerTotal(q, idx) {
+        if (typeof idx !== 'number') return '?';
+        try {
+            if (typeof game.quests.GetTotalValuesForQuestTrigger !== 'function') return 'absent';
+            return fmt(game.quests.GetTotalValuesForQuestTrigger(game.player, q, idx));
+        } catch (e) { return '[threw]'; }
+    }
+
+    function questDetail(cat, q, def) {
+        var fin = [];
+        try { fin = list(q.mQuestTriggersFinished_vector); }
+        catch (e) { S.kernel.warn(cat, 'finished vector threw:', e); }
+
+        try {
+            var trig = list(def ? def.questTriggers_vector : null);
+            S.kernel.log(cat, '    triggers: ' + trig.length);
+            for (var k = 0; k < trig.length; k++) {
+                try {
+                    var t = trig[k];
+                    var idx = t.triggerIdx;
+                    // The finished list is indexed by triggerIdx, not by
+                    // position in the trigger vector.
+                    var st = (typeof idx === 'number') ? fin[idx] : null;
+                    S.kernel.log(cat, '    trigger pos=' + k + ' idx=' + field(t, 'triggerIdx') +
+                        ' type=' + field(t, 'type') + ' condition=' + field(t, 'condition') +
+                        ' name=' + field(t, 'name_string') + ' amount=' + field(t, 'amount') +
+                        ' min=' + field(t, 'min') + ' item=' + field(t, 'item_string') +
+                        ' typeString=' + field(t, 'type_string') +
+                        ' status=' + (st ? field(st, 'status') : '?') +
+                        ' deltaStart=' + (st ? field(st, 'deltaStart') : '?') +
+                        ' total=' + triggerTotal(q, idx));
+                } catch (e1) { S.kernel.warn(cat, '    trigger ' + k + ' threw:', e1); }
+            }
+        } catch (e2) { S.kernel.warn(cat, 'triggers threw:', e2); }
+
+        try {
+            var ends = list(def ? def.endConditions_vector : null);
+            S.kernel.log(cat, '    endConditions: ' + ends.length);
+            for (var m = 0; m < ends.length; m++) {
+                try {
+                    var en = ends[m];
+                    S.kernel.log(cat, '    end pos=' + m + ' idx=' + field(en, 'triggerIdx') +
+                        ' action=' + field(en, 'action_string') + ' item=' + field(en, 'item_string') +
+                        ' name=' + field(en, 'name_string') + ' amount=' + field(en, 'amount'));
+                } catch (e3) { S.kernel.warn(cat, '    end ' + m + ' threw:', e3); }
+            }
+        } catch (e4) { S.kernel.warn(cat, 'end conditions threw:', e4); }
+    }
+
     function dumpQuests() {
         var cat = 'diag:quest';
         S.kernel.log(cat, '--- quests on this zone ---');
         try {
             var pool = game.quests.GetQuestPool();
+            var active = 'absent';
+            try {
+                if (typeof pool.IsAnyQuestsActive === 'function') active = fmt(pool.IsAnyQuestsActive());
+            } catch (ea) { active = '[threw]'; }
+            try {
+                S.kernel.log(cat, 'zone id=' + fmt(S.core.zone.id()) +
+                                  ' adventure=' + fmt(S.core.zone.isAdventure()) +
+                                  ' anyQuestsActive=' + active);
+            } catch (ez) { S.kernel.warn(cat, 'zone probe threw:', ez); }
             var qs = list(pool.GetQuest_vector());
             S.kernel.log(cat, 'quests: ' + qs.length);
             for (var i = 0; i < qs.length; i++) {
                 try {
                     var q = qs[i];
+                    // Half-loaded pool entries lack isFinished; core quests
+                    // skips them by the same test.
+                    if (typeof q.isFinished !== 'function') {
+                        S.kernel.log(cat, '  entry ' + i + ': not a quest (no isFinished), skipped');
+                        continue;
+                    }
                     var parts = probe(q, ['getQuestName_string', 'GetUniqueId', 'isFinished',
                                           'IsQuestActive', 'IsRunning']);
-                    var special = '?';
-                    try { special = fmt(q.GetQuestDefinition().specialType_string); }
-                    catch (e1) { special = '[threw]'; }
-                    parts.push('specialType=' + special);
+                    var found = questDefinition(q);
+                    var def = found.def;
+                    parts.push('specialType=' + field(def, 'specialType_string'));
+                    parts.push('def=' + found.source);
                     S.kernel.log(cat, '  ' + parts.join(' '));
+                    questDetail(cat, q, def);
                 } catch (e2) { S.kernel.warn(cat, 'quest ' + i + ' threw:', e2); }
             }
         } catch (e) { S.kernel.error(cat, 'quest pool unavailable:', e); }
@@ -314,6 +418,119 @@
         } catch (e) { S.kernel.error(cat, 'adventure manager unavailable:', e); }
         S.kernel.log(cat, '--- end adventures ---');
         notify('Active adventures dumped to log (category ' + cat + ').');
+    }
+
+    // ---------------------------------------------------------------
+    // Buildings on the viewed zone
+    // ---------------------------------------------------------------
+
+    function safeZone(fn) {
+        try { return fn(); } catch (e) { return null; }
+    }
+
+    // Name, then grid numerically; entries without a numeric grid go last.
+    function compareBuildings(a, b) {
+        var an = (a.name === null || a.name === undefined) ? '' : String(a.name);
+        var bn = (b.name === null || b.name === undefined) ? '' : String(b.name);
+        if (an < bn) return -1;
+        if (an > bn) return 1;
+        var ag = (typeof a.grid === 'number');
+        var bg = (typeof b.grid === 'number');
+        if (ag && bg) return a.grid - b.grid;
+        if (ag) return -1;
+        if (bg) return 1;
+        return 0;
+    }
+
+    function buildingRecord(b, x) {
+        var c = null;
+        try { if (typeof x.GetGOContainer === 'function') c = x.GetGOContainer(); }
+        catch (e) { c = null; }
+        return {
+            name:       b.name(x),
+            grid:       b.grid(x),
+            playerId:   b.playerId(x),
+            selectable: rawField(x, 'mIsSelectable'),
+            ui:         rawField(c, 'ui'),
+            attackable: rawField(c, 'mIsAttackable'),
+            leaderCamp: rawField(c, 'mIsLeaderCamp'),
+            hasArmy:    b.hasArmy(x),
+            collectible: b.isCollectible(x)
+        };
+    }
+
+    // Writes every building of the viewed zone as sorted, pretty-printed JSON
+    // with no timestamp inside, so two dumps taken around a click diff
+    // directly. The scheduler may be paused, so the per-tick snapshot is
+    // dropped first.
+    function dumpBuildings() {
+        var cat = 'diag:bldg';
+        S.kernel.log(cat, '--- buildings on this zone ---');
+        var all;
+        try {
+            var b = S.core.buildings;
+            b.invalidate();
+            all = b.list();
+        } catch (e) {
+            S.kernel.error(cat, 'building list unavailable:', e);
+            S.kernel.log(cat, '--- end buildings ---');
+            notify('Buildings dump failed (category ' + cat + ').');
+            return;
+        }
+
+        var records = [];
+        for (var i = 0; i < all.length; i++) {
+            try { records.push(buildingRecord(S.core.buildings, all[i])); }
+            catch (e1) { records.push({ index: i, error: String(e1) }); }
+        }
+        records.sort(compareBuildings);
+
+        var zoneId = safeZone(function () { return S.core.zone.id(); });
+        var doc = {
+            zoneId:        zoneId,
+            adventure:     safeZone(function () { return S.core.zone.isAdventure(); }),
+            adventureName: safeZone(function () { return S.core.zone.adventureName(); }),
+            count:         records.length,
+            buildings:     records
+        };
+        if (doc.adventure === false) S.kernel.log(cat, 'note: not an adventure zone');
+
+        var text = null;
+        try { text = JSON.stringify(doc, null, 2); }
+        catch (e2) { text = null; }
+
+        // stewardDir is looked up here, not cached, so a reload that swaps
+        // the files helper is honoured.
+        var path = null;
+        if (text !== null) {
+            try {
+                var d = S.kernel.files.stewardDir('dumps');
+                var safeId = (zoneId === null || zoneId === undefined) ? 'unknown'
+                    : String(zoneId).replace(/[^A-Za-z0-9_\-]/g, '_');
+                if (d && d.dir) {
+                    path = d.dir.resolvePath('buildings-' + safeId + '-' + new Date().getTime() + '.json').nativePath;
+                }
+            } catch (e3) { path = null; }
+        }
+
+        var written = false;
+        if (path) {
+            var r = S.kernel.files.writeText(path, text);
+            if (r && r.ok) {
+                written = true;
+                S.kernel.log(cat, 'buildings: ' + records.length + ' written to ' + path);
+                notify('Buildings dumped to ' + path + '.');
+            } else {
+                S.kernel.warn(cat, 'write failed: ' + (r && r.message));
+            }
+        } else {
+            S.kernel.warn(cat, 'buildings: no writable dumps folder, logging ' + records.length + ' records');
+        }
+        if (!written) {
+            for (var k = 0; k < records.length; k++) S.kernel.log(cat, '  ' + json(records[k]));
+            notify('Buildings dumped to log (category ' + cat + ').');
+        }
+        S.kernel.log(cat, '--- end buildings ---');
     }
 
     // ---------------------------------------------------------------
@@ -497,6 +714,7 @@
         dumpArmy:        dumpArmy,
         dumpQuests:      dumpQuests,
         dumpAdventures:  dumpAdventures,
+        dumpBuildings:   dumpBuildings,
         dumpDefinitions: dumpDefinitions,
         toggleSampler:   toggleSampler,
         samplerRunning:  samplerRunning

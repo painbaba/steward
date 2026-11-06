@@ -48,6 +48,7 @@ function building(opts) {
     };
     // Production-buff reads exist only when a test asks for them, so a plain
     // building behaves like one the host cannot answer for.
+    if (typeof opts.selectable === 'boolean') b.mIsSelectable = opts.selectable;
     if (typeof opts.outputFactor === 'number') {
         b.GetResourceOutputFactor = function () { return opts.outputFactor; };
     }

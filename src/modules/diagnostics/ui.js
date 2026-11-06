@@ -503,8 +503,10 @@
             h.button('Run', { onClick: function () { army().dumpGenerals(); } })));
         $rows.append(h.formRow('Dump army (free, assigned, units)',
             h.button('Run', { onClick: function () { army().dumpArmy(); } })));
-        $rows.append(h.formRow('Dump quests on this zone',
+        $rows.append(h.formRow('Dump quests on this zone (triggers, end conditions)',
             h.button('Run', { onClick: function () { army().dumpQuests(); } })));
+        $rows.append(h.formRow('Dump buildings on this zone (JSON in steward/dumps)',
+            h.button('Run', { onClick: function () { army().dumpBuildings(); } })));
         $rows.append(h.formRow('Dump active adventures',
             h.button('Run', { onClick: function () { army().dumpAdventures(); } })));
         $rows.append(h.formRow('Dump adventure and buff definitions',
