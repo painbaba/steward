@@ -16,6 +16,10 @@
  *   w.ghost(g1, 3);                                      // a ghost for 3 ticks
  *   W.ticksFor(w, 60000);                                // the clock, tick by tick
  *
+ * Set w.pickups to a list of { grid, name, kind, zoneId } to put map objects on
+ * the viewed zone (null: the map cannot be read); the world's pickups.click
+ * removes the object that was clicked.
+ *
  * Set w.campsUnreadable = true to make the building list of the viewed zone
  * read as unreadable (core.buildings.readable() false), so no camp counts as
  * gone.
@@ -81,6 +85,31 @@ function patchCore(w) {
             label: 'buff ' + name + ' -> ' + grid,
             timeoutMs: 15000,
             send: function () { w.buffs.push({ name: name, grid: grid, t: w.t }); done = true; return true; },
+            check: function () { return done; }
+        };
+    };
+
+    // Map objects of the viewed zone: w.pickups is null (unreadable) or a
+    // list of { grid, name, kind, zoneId }. Like the real read, an ask with no
+    // patterns lists quest objects only.
+    S.core.pickups.targets = function (opts) {
+        if (w.pickups === null) return null;
+        var withPatterns = !!(opts && opts.patterns && opts.patterns.length);
+        return w.pickups.filter(function (p) { return withPatterns || p.kind === 'quest'; })
+            .map(function (p) { return { grid: p.grid, name: p.name, kind: p.kind, zoneId: p.zoneId }; });
+    };
+    S.core.pickups.click = function (target) {
+        var done = false;
+        return {
+            label: 'pick up ' + target.name + ' at ' + target.grid,
+            timeoutMs: 6000,
+            send: function () {
+                if (w.pickups) {
+                    w.pickups = w.pickups.filter(function (p) { return p.grid !== target.grid; });
+                }
+                done = true;
+                return true;
+            },
             check: function () { return done; }
         };
     };
@@ -211,6 +240,7 @@ function world(o) {
         auto: { move: true, attack: true, star: true, raise: true, unload: true,
             map: true, visit: true, travel: true, close: true, walk: false, starKeep: false },
         blocked: {},
+        pickups: [],
         orders: [], raises: [], unloads: [], buffs: [], claims: [],
         zoneSends: [], buffActions: [], productionOrders: [], closes: [],
         pending: [], entries: [], ghosts: [],

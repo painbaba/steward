@@ -7,8 +7,9 @@
  * one persisted series of maps from home back to home: at home the loadout
  * generals are mustered, the template is checked, the troops are
  * snapshotted and loaded, the map is started and the generals are sent; on
- * the island they are starred and the horseshoe applied, the wave executor
- * takes every wave file (position, supply, load, verify, reach, attack,
+ * the island items are picked up (by the collect module, the run only waits
+ * for it), the generals are starred and the horseshoe applied, the wave
+ * executor takes every wave file (position, supply, load, verify, reach, attack,
  * confirm) while a quest watcher claims finished quests except the last;
  * after the last wave the end of map packs the free troops into carriers,
  * claims the last quest, closes the map and recalls whoever is left; back

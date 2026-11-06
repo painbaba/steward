@@ -1,5 +1,5 @@
 /*
- * Quest watcher for the adventures module.
+ * Quest watcher for the adventures module, and the island's map objects.
  *
  * While a run is Running on its own island, every plan() of the module
  * first claims at most one finished quest of that adventure. It never acts
@@ -22,6 +22,13 @@
  * One claim per plan() call keeps the module inside the scheduler's busy
  * contract: plan() runs only when no adventures queue entry is pending, so
  * a claim is never started while the previous one is still in flight.
+ *
+ * The island's map objects are read here as well, for the steps that wait
+ * on them. This file never clicks them: the collect module does, and
+ * patterns() reads its stored settings to know whether it picks up on an
+ * adventure at all. Missing settings mean it does not, so no wait is ever
+ * built on a pick-up that nobody makes. objects() lists the quest objects
+ * still waiting to be clicked, or null when the map cannot be read.
  *
  * Bundle slot: module file; top level only assigns
  * S.modules.adventures.watcher; all else at call time.
@@ -106,9 +113,50 @@
         if (!started) table[key] = st.now() + QUEST_RETRY_MS;
     }
 
+    // Quest objects on the viewed island an open quest still waits to have
+    // clicked; null when the zone, the map or the quest pool cannot be read,
+    // so an unreadable map is never taken for an empty one.
+    function objects() {
+        try {
+            return S.core.pickups.targets({ quests: true });
+        } catch (e) {
+            S.kernel.warn('adventures', 'quest objects read threw:', e);
+            return null;
+        }
+    }
+
+    // The collectible patterns collect picks up on an adventure, or null when
+    // it does not pick up there (no settings, off, or the adventure side off).
+    // A raw settings read: the adventures module never calls into collect.
+    function patterns() {
+        var s = S.kernel.settings.read('collect');
+        if (!s || !s.enabled || s.adventureZones !== true) return null;
+        return S.core.pickups.patterns(s.namePatterns || []);
+    }
+
+    // 'name xN' per name in first-seen order, e.g. 'crates x3, barrel x2'.
+    function pickupText(list) {
+        var names = [];
+        var counts = {};
+        for (var i = 0; i < list.length; i++) {
+            var n = list[i].name;
+            if (!Object.prototype.hasOwnProperty.call(counts, n)) {
+                counts[n] = 0;
+                names.push(n);
+            }
+            counts[n]++;
+        }
+        var out = [];
+        for (var j = 0; j < names.length; j++) out.push(names[j] + ' x' + counts[names[j]]);
+        return out.join(', ');
+    }
+
     S.modules.adventures.watcher = {
         QUEST_RETRY_MS: QUEST_RETRY_MS,
         pending:        pending,
+        objects:        objects,
+        patterns:       patterns,
+        pickupText:     pickupText,
         plan:           plan
     };
 

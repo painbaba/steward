@@ -286,21 +286,6 @@
     // Quests and active adventures
     // ---------------------------------------------------------------
 
-    // The getter first, the raw field when the getter is absent, throws or
-    // returns nothing; the tag tells which one answered.
-    function questDefinition(q) {
-        try {
-            if (typeof q.GetQuestDefinition === 'function') {
-                var d = q.GetQuestDefinition();
-                if (d) return { def: d, source: 'getter' };
-            }
-        } catch (e) { /* try the field */ }
-        try {
-            if (q.mQuestDefinition) return { def: q.mQuestDefinition, source: 'field' };
-        } catch (e2) { /* none */ }
-        return { def: null, source: 'none' };
-    }
-
     // Total the host counts for one trigger; a failed read is a value, not an abort.
     function triggerTotal(q, idx) {
         if (typeof idx !== 'number') return '?';
@@ -378,7 +363,7 @@
                     }
                     var parts = probe(q, ['getQuestName_string', 'GetUniqueId', 'isFinished',
                                           'IsQuestActive', 'IsRunning']);
-                    var found = questDefinition(q);
+                    var found = S.core.quests.definition(q);
                     var def = found.def;
                     parts.push('specialType=' + field(def, 'specialType_string'));
                     parts.push('def=' + found.source);

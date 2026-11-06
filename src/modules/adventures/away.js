@@ -1,14 +1,13 @@
 /*
  * Away steps of an adventure run: from leaving home to coming back.
  *
- * Jump -> Arrive -> StarAll -> Horseshoe hand the run to the wave executor
- * at Gate of wave 1; after the last wave the executor hands it back at
- * PackStar -> Pack -> Clear -> LastQuest -> Close -> Recall -> JumpHome,
- * and the home steps take over at ArriveHome. A holder of free troops is
- * placed on a map grid before its raise, because the client has no
- * garrison for a general at the star; Clear goes back to PackStar while
- * free troops are left to pack. plan() does one step per
- * call. The scheduler only calls it while no adventures queue entry is
+ * Jump -> Arrive -> Pickups -> StarAll -> Horseshoe hand the run to the
+ * wave executor at Gate of wave 1; after the last wave the executor hands it
+ * back at PackStar -> Pack -> Clear -> LastQuest -> Close -> Recall ->
+ * JumpHome, and the home steps take over at ArriveHome. A holder of free
+ * troops is placed on a map grid before its raise, because the client has no
+ * garrison for a general at the star; Clear goes back to PackStar while free
+ * troops are left to pack. plan() does one step per call. The scheduler only calls it while no adventures queue entry is
  * pending, so every step observes the game first and never relies on a
  * callback having fired.
  *
@@ -32,6 +31,12 @@
  * the quest for the whole grace. The adventure is closed only after such a
  * claim, and only when its name still points at the run's zone.
  *
+ * Map objects are picked up by the collect module, never here; the run only
+ * waits for them. Pickups gives collect a short watched time after arrival
+ * and never pauses. Clear holds while quest objects are left, because an
+ * open quest may need them before the last quest can finish; it pauses only
+ * after CLEAR_PICKUP_MAX_MS with no battle and no object picked up.
+ *
  * Bundle slot: module file; top level only assigns
  * S.modules.adventures.away; state, loader and every core are read at call
  * time.
@@ -42,10 +47,12 @@
     if (!S.modules.adventures) S.modules.adventures = {};
 
     // Starting values, to be tuned in game.
-    var JUMP_MS        = 60000;    // a visited zone that has not loaded is visited once more
-    var JUMP_RETRY_MS  = 300000;   // a further visit restarts a slow load, so later visits stay far apart
-    var CLEAR_MAX_MS   = 300000;   // quiet time the last quest gets
-    var PLACE_QUIET_MS = 300000;   // quiet time a holder gets to find a free field
+    var JUMP_MS             = 60000;    // a visited zone that has not loaded is visited once more
+    var JUMP_RETRY_MS       = 300000;   // a further visit restarts a slow load, so later visits stay far apart
+    var CLEAR_MAX_MS        = 300000;   // quiet time the last quest gets
+    var PLACE_QUIET_MS      = 300000;   // quiet time a holder gets to find a free field
+    var PICKUPS_MAX_MS      = 120000;   // watched time collect gets to pick up after arrival
+    var CLEAR_PICKUP_MAX_MS = 900000;   // time with no battle and no pick-up quest objects may stay
 
     var CATEGORY = 'adventures';
 
@@ -86,6 +93,10 @@
             if (own[i] && own[i].zoneId === zoneId) return false;
         }
         return true;
+    }
+
+    function wt() {
+        return S.modules.adventures.watcher;
     }
 
     function lastQuestOf(list) {
@@ -199,7 +210,7 @@
             else if (!ld().ready(g)) { if (busy === null) busy = keys[i]; }
         }
         if (missing === null && busy === null && inv.ok) {
-            st().go(S.RunStep.StarAll, 'every general arrived');
+            st().go(S.RunStep.Pickups, 'every general arrived');
             return;
         }
         if (missing !== null) {
@@ -211,6 +222,44 @@
             return;
         }
         ld().waitRead(r, 'armies');
+    }
+
+    // ---- Pickups ------------------------------------------------------------
+
+    // Gives collect a short watched time to pick up what lies on the island
+    // before the generals leave for the star. It never pauses: a pick-up is
+    // no reason to stop a run, and Clear holds for the quest objects that
+    // matter. When collect does not pick up on adventures there is nothing to
+    // wait for.
+    function pickups(r) {
+        var w = wt();
+        var pats = w.patterns();
+        if (pats === null) {
+            st().go(S.RunStep.StarAll, 'collect does not pick up on adventures');
+            return;
+        }
+        var q = ld().quietClock(r, true, 'pickupClock');
+        S.core.buildings.invalidate();
+        var list = S.core.pickups.targets({ patterns: pats, quests: true });
+        if (list === null) {
+            if (q.ms >= PICKUPS_MAX_MS) {
+                log('map objects unreadable, going on');
+                st().go(S.RunStep.StarAll, 'map objects unreadable');
+                return;
+            }
+            ld().waitRead(r, 'map objects');
+            return;
+        }
+        if (!list.length) {
+            st().go(S.RunStep.StarAll, 'nothing to pick up');
+            return;
+        }
+        if (q.ms >= PICKUPS_MAX_MS) {
+            log('pickups left: ' + w.pickupText(list));
+            st().go(S.RunStep.StarAll, 'pickups left to collect');
+            return;
+        }
+        ld().waitBusy(r, null, 'picking up ' + w.pickupText(list) + ', ' + quietText(q, PICKUPS_MAX_MS));
     }
 
     // ---- Star ---------------------------------------------------------------
@@ -356,7 +405,10 @@
     // is still fighting. Once the quest is done a busy general is waited on
     // with no limit, so only the quest itself can time out. A camp still
     // standing only warns: it may belong to a side quest or have been beaten
-    // in a way the map does not show.
+    // in a way the map does not show. While quest objects are left the quest
+    // may still need them, so the last quest's own limit does not run; their
+    // own clock counts time with no battle and starts again whenever one of
+    // them is picked up.
     function clear(r, inv) {
         var list = S.core.quests.list();
         var last = list ? lastQuestOf(list) : null;
@@ -393,6 +445,17 @@
             ld().waitRead(r, 'quest list');
             return;
         }
+        // An unreadable map says nothing about the objects, so like the quest
+        // list it holds with no limit and feeds no clock.
+        var objs = wt().objects();
+        if (objs === null) {
+            ld().waitRead(r, 'quest objects');
+            return;
+        }
+        if (objs.length) {
+            clearPickups(r, objs);
+            return;
+        }
         // Only a running battle can still finish the quest, so the limit is
         // quiet time. Moving or idle generals count as quiet on purpose: a
         // general left waiting on a quest nothing works on must not hold the
@@ -409,6 +472,26 @@
         var min = Math.round(CLEAR_MAX_MS / 60000);
         var camps = standingText(r) || 'none';
         st().pause(S.RunPause.ClearTimeout, 'last quest not finished after ' + min + ' min; camps standing: ' + camps);
+    }
+
+    // The hold of Clear while quest objects are left. The quiet clock is fed
+    // without counting so it stays live and resumes where it was once the
+    // objects are gone. Fewer objects than last seen is progress and restarts
+    // the pickup clock.
+    function clearPickups(r, objs) {
+        var text = wt().pickupText(objs);
+        ld().quietClock(r, false);
+        var p = ld().quietClock(r, !ld().anyAttacking(), 'pickupClock');
+        var c = st().current().pickupClock;
+        if (c && typeof c.count === 'number' && objs.length < c.count) {
+            c.ms = 0;
+            p.ms = 0;
+        }
+        if (c) c.count = objs.length;
+        ld().waitBusy(r, null, 'quest objects left: ' + text + ', ' + quietText(p, CLEAR_PICKUP_MAX_MS));
+        if (p.ms < CLEAR_PICKUP_MAX_MS) return;
+        var min = Math.round(CLEAR_PICKUP_MAX_MS / 60000);
+        st().pause(S.RunPause.ClearTimeout, 'quest objects not picked up after ' + min + ' min: ' + text);
     }
 
     // Places the planned holders that wait at the star on free landing fields,
@@ -732,6 +815,7 @@
         var rows = [
             [R.Jump,      jumpStep,  false],
             [R.Arrive,    arrive,    true],
+            [R.Pickups,   pickups,   false],
             [R.StarAll,   starAll,   true],
             [R.Horseshoe, horseshoe, false],
             [R.Clear,     clear,     true],
@@ -769,15 +853,17 @@
     }
 
     S.modules.adventures.away = {
-        JUMP_MS:        JUMP_MS,
-        JUMP_RETRY_MS:  JUMP_RETRY_MS,
-        CLEAR_MAX_MS:   CLEAR_MAX_MS,
-        PLACE_QUIET_MS: PLACE_QUIET_MS,
-        toHome:         toHome,
-        toIsland:       toIsland,
-        homeLoaded:     homeLoaded,
-        islandLoaded:   islandLoaded,
-        plan:           plan
+        JUMP_MS:             JUMP_MS,
+        JUMP_RETRY_MS:       JUMP_RETRY_MS,
+        CLEAR_MAX_MS:        CLEAR_MAX_MS,
+        PLACE_QUIET_MS:      PLACE_QUIET_MS,
+        PICKUPS_MAX_MS:      PICKUPS_MAX_MS,
+        CLEAR_PICKUP_MAX_MS: CLEAR_PICKUP_MAX_MS,
+        toHome:              toHome,
+        toIsland:            toIsland,
+        homeLoaded:          homeLoaded,
+        islandLoaded:        islandLoaded,
+        plan:                plan
     };
 
 }(Steward));

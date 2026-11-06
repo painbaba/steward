@@ -175,3 +175,22 @@ t.test('readable is true once the zone lists a building', function () {
     B.invalidate();
     t.assert.strictEqual(B.readable(), true);
 });
+
+// ---- isSelectable --------------------------------------------------------------
+
+t.test('isSelectable reads mIsSelectable strictly', function () {
+    var H = harness.boot();
+    var B = H.Steward.core.buildings;
+    t.assert.strictEqual(B.isSelectable(H.zone.building({ selectable: true })), true);
+    t.assert.strictEqual(B.isSelectable(H.zone.building({ selectable: false })), false);
+    t.assert.strictEqual(B.isSelectable(H.zone.building({})), false);
+    t.assert.strictEqual(B.isSelectable({ mIsSelectable: 1 }), false);
+    t.assert.strictEqual(B.isSelectable(null), false);
+});
+
+t.test('isSelectable is false when the read throws', function () {
+    var H = harness.boot();
+    var bad = {};
+    Object.defineProperty(bad, 'mIsSelectable', { get: function () { throw new Error('boom'); } });
+    t.assert.strictEqual(H.Steward.core.buildings.isSelectable(bad), false);
+});

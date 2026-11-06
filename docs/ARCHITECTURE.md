@@ -38,6 +38,7 @@ Steward
 │   ├── specialists     ← lookup, dispatch, picks, general orders (move, attack, star, send to zone)
 │   ├── deposits
 │   ├── packets
+│   ├── pickups        ← quest objects and collectibles, click action
 │   ├── locale
 │   ├── events
 │   ├── actions         ← send / verify / retry runner for write actions
