@@ -18,11 +18,12 @@
 | `Steward.core.battles`     | Battle-file loader and validator against the army.    |
 | `Steward.core.buffs`       | Star-menu buff stock (including adventure maps) and buff definitions. |
 | `Steward.core.actions`     | Runs write actions: send, verify by observation, retry once. |
-| `Steward.core.quests`      | Quest pool reads and the claim action.                |
+| `Steward.core.quests`      | Quest pool reads, click trigger names and the claim action. |
+| `Steward.core.pickups`     | Clickable quest objects and collectibles of the viewed zone, and the click action. |
 | `Steward.core.production`  | Troop queue reads, order pricing and the order action. |
 | `Steward.core.resources`   | Resource amount and free population reads.            |
 
-Write actions are defs (plain objects with `precheck`, `send`, `check` and so on) built by the core that owns the action, for example `S.core.army.raise`, `S.core.quests.claim` and `S.core.production.order`. They run through `S.core.actions.attempt(def, onDone)`, which verifies by positive observation: a failed read or a missing object never counts as success. Which action to run and when stays with the module; the cores stay policy-free. Readers that defs rely on report a failed read as `null`, never as zero or an empty list.
+Write actions are defs (plain objects with `precheck`, `send`, `check` and so on) built by the core that owns the action, for example `S.core.army.raise`, `S.core.quests.claim`, `S.core.pickups.click` and `S.core.production.order`. They run through `S.core.actions.attempt(def, onDone)`, which verifies by positive observation: a failed read or a missing object never counts as success. Which action to run and when stays with the module; the cores stay policy-free. Readers that defs rely on report a failed read as `null`, never as zero or an empty list.
 
 Detailed API per file lives in `docs/analysis/PLAN.md` (P2 file scopes). Once P2 lands, each `core/*.js` source file's IIFE will be the canonical reference.
 
@@ -191,10 +192,17 @@ Don't wrap calls just to swallow them — autoTSO had 237 silent try/catch block
 | `building.GetGOContainer().mIsAttackable`     | `Steward.core.buildings.isAttackable(building)`          |
 | `loca.GetText('BUI', name)`                   | `Steward.core.locale.bui(name)`                          |
 | `if (status === 'IDLE')`                      | `if (status === Steward.SpecialistStatus.Idle)`          |
-| Reaching into another module's settings       | Don't. Cross-module communication is via the kernel.     |
+| Reaching into another module's settings       | Don't, except a read-only settings read; see below.      |
 | Holding onto a `list()` result across ticks   | The cache is per-tick. Re-fetch every tick.              |
 | Hard-coding deposit type names                | Add an entry to `Steward.Building` and use the enum.     |
 | Using `console.log`                           | Use `Steward.kernel.log('module-id', …)`.                |
+
+The one exception to the settings row is a read-only
+`Steward.kernel.settings.read('<other>')` whose absence errs toward doing
+nothing. Cross-module communication is otherwise via the kernel. Today only
+adventures reads collect's `enabled`, `adventureZones` and `namePatterns`, to
+decide whether its Pickups step waits for collect. Renaming or reshaping any of
+them must update that reader.
 
 ## When to extend core
 

@@ -36,7 +36,9 @@
  * the reads that lacked it), busy (the busy wait of this run and step: { runId,
  * step, key, text, since, noted, read }, read marking a wait kept alive by a bad
  * read), busySeen (whether this pass kept that wait going), stuckClock (the
- * watched-wait clock of the zone trip, in the shape of quiet) and zoneWait
+ * watched-wait clock of the zone trip, in the shape of quiet), pickupClock
+ * (the clock of the wait for map objects, in the shape of quiet plus count,
+ * the number of objects last seen, so a pick-up restarts it), zoneWait
  * (whether the "waiting for zone" line was logged) and deployProbe (run id
  * and key of the star-menu probe lines already logged). They describe callbacks and reads of this client session, which do not
  * exist after a restart.
@@ -124,6 +126,7 @@
         ['Depart',     'RunDepart',     HOME,      'Home',       'Send generals',              ''],
         ['Jump',       'RunJump',       ANY,       'Travel',     'Jump to the map',            ''],
         ['Arrive',     'RunArrive',     ADVENTURE, 'Travel',     'Wait for all generals',      '', true],
+        ['Pickups',    'RunPickups',    ADVENTURE, 'Travel',     'Pick up items',              ''],
         ['StarAll',    'RunStarAll',    ADVENTURE, 'Travel',     'Send all to the star',       ''],
         ['Horseshoe',  'RunHorseshoe',  ADVENTURE, 'Travel',     'Horseshoe',                  OPT_HORSESHOE],
         ['PackStar',   'RunPackStar',   ADVENTURE, 'End of map', 'Place carriers',             ''],
@@ -585,6 +588,7 @@
         rs.busy = null;
         rs.busySeen = false;
         rs.stuckClock = null;
+        rs.pickupClock = null;
         rs.zoneWait = false;
         rs.deployProbe = {};
     }

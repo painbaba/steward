@@ -105,7 +105,7 @@ function addElite(w, name) {
 // everything else in memory.
 var SHARED = ['raises', 'claims', 'sentClaims', 'zoneSends', 'buffActions', 'productionOrders', 'closes'];
 var CARRIED = ['t', 'adventures', 'stock', 'queues', 'pop', 'popNoEffect', 'quests', 'camps', 'auto',
-    'travelMs', 'resources', 'costs', 'blocked'];
+    'travelMs', 'resources', 'costs', 'blocked', 'pickups'];
 
 function restart(w) {
     var viewed = w.gi.mCurrentViewedZoneID;

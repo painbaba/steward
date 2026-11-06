@@ -29,22 +29,23 @@
         try {
             var s = readSettings();
             var bld = S.core.buildings;
+            // The same expanded list plan() clicks with, active events included.
+            var ps = S.core.pickups.patterns(s.namePatterns || []);
             bld.invalidate();
             var src = bld.list();
             var matched = 0;
             var unmatched = 0;
 
             S.kernel.log('collect:discover', '--- discovery start ---',
-                         'patterns:', (s.namePatterns || []).join(','));
+                         'patterns:', ps.join(','));
 
             for (var i = 0; i < src.length; i++) {
                 var b = src[i];
                 if (!bld.isCollectible(b)) continue;
                 var n = bld.name(b);
                 var hits = [];
-                var ps = s.namePatterns || [];
                 for (var k = 0; k < ps.length; k++) {
-                    if (n && n.indexOf(ps[k]) > -1) hits.push(ps[k]);
+                    if (S.core.pickups.matches(n, [ps[k]])) hits.push(ps[k]);
                 }
                 if (hits.length) matched++; else unmatched++;
                 S.kernel.log('collect:discover',
@@ -73,7 +74,8 @@
         var s = readSettings();
         if (!s.enabled) return 'disabled';
         var n = (s.namePatterns || []).length;
-        return n + ' pattern' + (n === 1 ? '' : 's');
+        return n + ' pattern' + (n === 1 ? '' : 's') +
+            (s.adventureZones === true ? ', adventures' : '');
     }
 
     // Section.render — appends rows to the panel. Settings are buffered so
@@ -87,6 +89,11 @@
         $panel.append(h.formRow('Run on Startup', h.toggle({
             checked:  !!s.enabled,
             onChange: function (next) { h.update('collect', { enabled: next }); }
+        })));
+
+        $panel.append(h.formRow('Pick up on adventures', h.toggle({
+            checked:  s.adventureZones === true,
+            onChange: function (next) { h.update('collect', { adventureZones: next }); }
         })));
 
         appendCollectiblesList($panel, h);

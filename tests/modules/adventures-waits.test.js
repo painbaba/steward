@@ -162,7 +162,7 @@ var ROWS = [
     {
         name: 'Arrive: a general not here yet', step: 'Arrive', text: /1\.2 not here yet/,
         setup: function (w) { onIsland(w, [w.g1]); },
-        end: function (w) { w.place(w.g2, ZONE); }, next: 'StarAll'
+        end: function (w) { w.place(w.g2, ZONE); }, next: 'Pickups'
     },
     {
         name: 'Arrive: a general on his way', step: 'Arrive', text: /Bert \(1\.2\) busy/,
@@ -171,7 +171,7 @@ var ROWS = [
             w.g2.state.travelling = true;
             w.g2.state.task = { type: w.code.travel, remaining: 1000 };
         },
-        end: function (w) { w.arrive(); }, next: 'StarAll'
+        end: function (w) { w.arrive(); }, next: 'Pickups'
     },
     {
         name: 'Arrive: armies not readable', step: 'Arrive', text: /armies not readable/,
@@ -180,7 +180,7 @@ var ROWS = [
             GetArmy = w.H.host.game.zone.GetArmy;
             w.H.host.game.zone.GetArmy = function () { return null; };
         },
-        end: function (w) { w.H.host.game.zone.GetArmy = GetArmy; }, next: 'StarAll'
+        end: function (w) { w.H.host.game.zone.GetArmy = GetArmy; }, next: 'Pickups'
     },
     {
         name: 'Jump: the zone does not load', step: 'Jump', text: /zone 7 not loaded/,
@@ -660,4 +660,52 @@ t.test('PackStar: no false rounds pause while the holder waits for a field', fun
     w.landing([500, 501]);
     span(w, MIN);
     assert.strictEqual(w.raises.length >= 3, true, 'raises ' + w.raises.length);
+});
+
+// ---- 7. Settle with quest objects -----------------------------------------------
+
+// A wave line with no path to its camp: Reach hands over to Settle, which
+// pauses only once nothing on the island could still clear the blocker.
+function settleWorld() {
+    var w = homeWorld({ mapOpen: true });
+    onIsland(w, null, {});
+    w.g1.state.army = { Rifle: 5 };
+    w.g2.state.army = { Rifle: 3 };
+    w.sent.pathLen = 0;
+    W.startRun(w, [WAVE], { step: w.S.WaveStep.Reach });
+    tick(w);
+    assert.strictEqual(stepName(w), 'Settle');
+    return w;
+}
+
+function questObject(grid, name) {
+    return { grid: grid, name: name, kind: 'quest', zoneId: ZONE };
+}
+
+t.test('Settle: a quest object pending is not settled and pauses no Unreachable', function () {
+    var w = settleWorld();
+    w.pickups = [questObject(5, 'Chest')];
+    W.ticksFor(w, w.ex.SETTLE_QUIET_MS + 120000);
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Running, 'status ' + r.status + (r.pause ? ': ' + r.pause.reason : ''));
+    assert.strictEqual(r.settledAt, null);
+});
+
+t.test('Settle: quest objects pending still pause SettleTimeout after SETTLE_MAX_MS', function () {
+    var w = settleWorld();
+    w.pickups = [questObject(5, 'Chest')];
+    W.ticksFor(w, w.ex.SETTLE_MAX_MS - 60000);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    W.ticksFor(w, 120000);
+    assertPaused(w, w.S.RunPause.SettleTimeout, /still after 15 min with no battle/);
+});
+
+t.test('Settle: an unreadable map is not settled either', function () {
+    var w = settleWorld();
+    w.pickups = null;
+    W.ticksFor(w, w.ex.SETTLE_QUIET_MS + 120000);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    w.pickups = [];
+    W.ticksFor(w, w.ex.SETTLE_QUIET_MS + 60000);
+    assertPaused(w, w.S.RunPause.Unreachable);
 });

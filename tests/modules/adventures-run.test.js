@@ -249,7 +249,7 @@ function reload(w) {
 var SHARED = ['orders', 'raises', 'unloads', 'buffs', 'claims', 'zoneSends', 'buffActions', 'productionOrders',
     'closes', 'visits'];
 var CARRIED = ['t', 'adventures', 'stock', 'queues', 'pop', 'popNoEffect', 'quests', 'camps', 'auto',
-    'travelMs', 'resources', 'costs', 'blocked'];
+    'travelMs', 'resources', 'costs', 'blocked', 'pickups'];
 
 function restart(w) {
     var viewed = w.gi.mCurrentViewedZoneID;
@@ -302,7 +302,7 @@ t.test('series: x2 from home runs every step once, in order, with no pause; map 
     assert.ok(runs, 'run 2 starts at Muster');
     assert.ok(!all.some(function (x) { return x.from === 'Next'; }), 'no transition leaves Next');
     var order = ['Muster', 'Validate', 'Snapshot', 'Supply', 'Load', 'StartMap', 'Depart', 'Jump', 'Arrive',
-        'StarAll', 'wave Horseshoe', 'wave Gate', 'wave Confirm', 'PackStar', 'Pack', 'Clear', 'LastQuest',
+        'Pickups', 'StarAll', 'wave Horseshoe', 'wave Gate', 'wave Confirm', 'PackStar', 'Pack', 'Clear', 'LastQuest',
         'Close', 'Recall',
         'JumpHome', 'ArriveHome', 'Account', 'Population'];
     runs.forEach(function (list, n) {
@@ -903,7 +903,7 @@ t.test('Arrive: waits per general key, not by count', function () {
     assertStep(w, 'Arrive');
     w.place(w.g2, ZONE);
     tick(w);
-    assertStep(w, 'StarAll');
+    assertStep(w, 'Pickups');
 });
 
 t.test('Arrive: a general still missing waits with no limit, past a stale arrive mark, and goes on once he is here', function () {
@@ -918,10 +918,10 @@ t.test('Arrive: a general still missing waits with no limit, past a stale arrive
     waiting(w, /1\.2 not here yet/);
     w.place(w.g2, ZONE);
     tick(w);
-    assertStep(w, 'StarAll');
+    assertStep(w, 'Pickups');
 });
 
-t.test('Arrive: a listed busy general far past the deadline stays Running, then goes to StarAll', function () {
+t.test('Arrive: a listed busy general far past the deadline stays Running, then goes to Pickups', function () {
     var w = homeWorld();
     onIsland(w);
     w.g2.state.travelling = true;
@@ -934,7 +934,7 @@ t.test('Arrive: a listed busy general far past the deadline stays Running, then 
     assertStep(w, 'Arrive');
     w.arrive();
     tick(w);
-    assertStep(w, 'StarAll');
+    assertStep(w, 'Pickups');
 });
 
 t.test('Arrive: a missing general next to a busy one waits with no limit and the wait names him', function () {
@@ -950,7 +950,7 @@ t.test('Arrive: a missing general next to a busy one waits with no limit and the
     w.g1.state.task = null;
     w.place(w.g2, ZONE);
     tick(w);
-    assertStep(w, 'StarAll');
+    assertStep(w, 'Pickups');
 });
 
 t.test('Arrive: nothing busy, armies unreadable holds with no limit and goes on once they read', function () {
@@ -967,7 +967,7 @@ t.test('Arrive: nothing busy, armies unreadable holds with no limit and goes on 
     waiting(w, /armies not readable/);
     zone.GetArmy = army;
     tick(w);
-    assertStep(w, 'StarAll');
+    assertStep(w, 'Pickups');
 });
 
 // ---- 9. StarAll -----------------------------------------------------------------
@@ -1199,6 +1199,151 @@ t.test('Clear: a null quest list holds with no limit and is not quiet time', fun
         tick(w);
         assertPaused(w, w.S.RunPause.NotObserved, /last quest not listed/);
     });
+});
+
+// ---- 12b. Pickups and quest objects ---------------------------------------------
+
+// Collect's stored settings, which the run reads raw to know whether anything
+// picks up on the island at all.
+function collectSettings(w, o) {
+    var s = { enabled: true, namePatterns: ['Crate'], adventureZones: true };
+    for (var k in (o || {})) if (Object.prototype.hasOwnProperty.call(o, k)) s[k] = o[k];
+    w.H.settings.write('collect', s);
+}
+
+function mapObject(grid, name, kind) {
+    return { grid: grid, name: name, kind: kind || 'collectible', zoneId: ZONE };
+}
+
+function pickupsWorld(settings) {
+    var w = homeWorld();
+    onIsland(w);
+    if (settings !== null) collectSettings(w, settings);
+    series(w, { step: w.S.RunStep.Pickups, zoneId: ZONE });
+    return w;
+}
+
+t.test('Pickups: goes to StarAll at once when there is nothing to pick up', function () {
+    var w = pickupsWorld();
+    tick(w);
+    assertStep(w, 'StarAll');
+});
+
+t.test('Pickups: goes to StarAll at once when collect settings are missing or adventureZones is off', function () {
+    [null, { adventureZones: false }].forEach(function (settings) {
+        var w = pickupsWorld(settings);
+        w.pickups = [mapObject(5, 'CrateA')];
+        tick(w);
+        assertStep(w, 'StarAll');
+    });
+});
+
+t.test('Pickups: waits while collectibles pend, names them, and goes on once they are gone', function () {
+    var w = pickupsWorld();
+    w.pickups = [mapObject(5, 'CrateA'), mapObject(6, 'CrateA'), mapObject(7, 'CrateB')];
+    tick(w);
+    assertStep(w, 'Pickups');
+    waiting(w, /picking up CrateA x2, CrateB x1/);
+    w.pickups = [mapObject(7, 'CrateB')];
+    tick(w);
+    assertStep(w, 'Pickups');
+    waiting(w, /picking up CrateB x1/);
+    w.pickups = [];
+    tick(w);
+    assertStep(w, 'StarAll');
+});
+
+t.test('Pickups: after PICKUPS_MAX_MS it goes on with a pickups left line and is never paused', function () {
+    var w = pickupsWorld();
+    var limit = w.S.modules.adventures.away.PICKUPS_MAX_MS;
+    w.pickups = [mapObject(5, 'CrateA')];
+    tick(w);
+    W.ticksFor(w, limit - 20000);
+    assertStep(w, 'Pickups');
+    W.ticksFor(w, 40000);
+    assertStep(w, 'StarAll');
+    assert.strictEqual(w.st.run().pause, null);
+    assert.ok(logged(w, /pickups left: CrateA x1/), 'the objects left are logged');
+});
+
+t.test('Pickups: an unreadable map holds, then goes on after PICKUPS_MAX_MS', function () {
+    var w = pickupsWorld();
+    var limit = w.S.modules.adventures.away.PICKUPS_MAX_MS;
+    w.pickups = null;
+    tick(w);
+    assertStep(w, 'Pickups');
+    waiting(w, /map objects not readable/);
+    W.ticksFor(w, limit + 20000);
+    assertStep(w, 'StarAll');
+    assert.ok(logged(w, /map objects unreadable/));
+});
+
+// A quest object pending in Clear: the last quest is open and a general is idle.
+function clearObjectsWorld(objects) {
+    var w = homeWorld();
+    onIsland(w, null, {});
+    w.pickups = objects;
+    series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
+    return w;
+}
+
+function questObject(grid, name) { return mapObject(grid, name, 'quest'); }
+
+t.test('Clear: quest objects pending do not reach ClearTimeout at CLEAR_MAX_MS', function () {
+    var w = clearObjectsWorld([questObject(5, 'Chest')]);
+    var limit = w.S.modules.adventures.away.CLEAR_MAX_MS;
+    tick(w);
+    W.ticksFor(w, limit * 2);
+    assertStep(w, 'Clear');
+    waiting(w, /quest objects left: Chest x1/);
+});
+
+t.test('Clear: quest objects with no progress pause ClearTimeout naming them after CLEAR_PICKUP_MAX_MS', function () {
+    var w = clearObjectsWorld([questObject(5, 'Chest'), questObject(6, 'Chest'), questObject(7, 'Lever')]);
+    var limit = w.S.modules.adventures.away.CLEAR_PICKUP_MAX_MS;
+    tick(w);
+    W.ticksFor(w, limit - 20000);
+    assertStep(w, 'Clear');
+    W.ticksFor(w, 40000);
+    assertPaused(w, w.S.RunPause.ClearTimeout, /quest objects not picked up after 15 min: Chest x2, Lever x1/);
+});
+
+t.test('Clear: when an object goes the pickup clock restarts, so there is no pause at the cap from the start', function () {
+    var w = clearObjectsWorld([questObject(5, 'Chest'), questObject(6, 'Lever')]);
+    var limit = w.S.modules.adventures.away.CLEAR_PICKUP_MAX_MS;
+    tick(w);
+    W.ticksFor(w, limit - 120000);
+    assertStep(w, 'Clear');
+    w.pickups = [questObject(6, 'Lever')];
+    tick(w);
+    W.ticksFor(w, 300000);
+    assertStep(w, 'Clear');
+    waiting(w, /quest objects left: Lever x1/);
+    W.ticksFor(w, limit);
+    assertPaused(w, w.S.RunPause.ClearTimeout, /quest objects not picked up after 15 min: Lever x1/);
+});
+
+t.test('Clear: once the objects are gone it goes on to LastQuest when the last quest finishes', function () {
+    var w = clearObjectsWorld([questObject(5, 'Chest')]);
+    tick(w);
+    assertStep(w, 'Clear');
+    w.pickups = [];
+    lastQuest(w).finished = true;
+    tick(w);
+    assertStep(w, 'LastQuest');
+});
+
+t.test('Clear: a null objects read holds with no limit and counts no time', function () {
+    var w = clearObjectsWorld(null);
+    var limit = w.S.modules.adventures.away.CLEAR_PICKUP_MAX_MS;
+    tick(w);
+    W.ticksFor(w, limit * 3);
+    assertStep(w, 'Clear');
+    waiting(w, /quest objects not readable/);
+    w.pickups = [];
+    tick(w);
+    W.ticksFor(w, w.S.modules.adventures.away.CLEAR_MAX_MS - 20000);
+    assertStep(w, 'Clear');
 });
 
 // ---- 13. Pack and the last quest ---------------------------------------------------
@@ -1882,7 +2027,7 @@ t.test('Restart: in Arrive resumes and goes on once every general is there', fun
     assertStep(w, 'Arrive');
     w.arrive();
     tick(w);
-    assertStep(w, 'StarAll');
+    assertStep(w, 'Pickups');
     assert.strictEqual(w.zoneSends.length, 0);
 });
 

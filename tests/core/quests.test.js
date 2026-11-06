@@ -314,3 +314,140 @@ t.test('claim refuses a key whose only entry is not a quest', function () {
     t.assert.strictEqual(b.sent.messages.length, 0);
     t.assert.strictEqual(b.w.modes.length, 0);
 });
+
+// ---- clickNames and definition ------------------------------------------------
+
+// A quest the client counts for pick-up-all: open, active, with the given
+// triggers and per-trigger statuses. opts: triggers, statuses, finished,
+// active (false, or 'missing' for no IsQuestActive), field (definition only
+// on mQuestDefinition), noDef.
+function clickQuest(opts) {
+    var def = { questTriggers_vector: opts.triggers || [] };
+    var q = {
+        isFinished: function () { return opts.finished === true; },
+        mQuestTriggersFinished_vector: opts.statuses
+    };
+    if (opts.active !== 'missing') {
+        q.IsQuestActive = function () { return opts.active !== false; };
+    }
+    if (opts.field) q.mQuestDefinition = def;
+    else if (!opts.noDef) q.GetQuestDefinition = function () { return def; };
+    return q;
+}
+
+function trig(name, idx, extra) {
+    var t = { triggerIdx: idx, type: 1, condition: 9, name_string: name };
+    for (var k in (extra || {})) t[k] = extra[k];
+    return t;
+}
+
+function bootClick(list) {
+    var b = boot([]);
+    b.H.host.game.quests = {
+        GetQuestPool: function () {
+            return { GetQuest_vector: function () { return list; } };
+        }
+    };
+    return b;
+}
+
+function names(b) {
+    var n = b.Q.clickNames();
+    return n === null ? null : Object.keys(n).sort().join(',');
+}
+
+t.test('clickNames collects the open click triggers of an active quest', function () {
+    var b = bootClick([clickQuest({
+        triggers: [trig('crate', 0), trig('barrel', 1)],
+        statuses: [{ status: 0 }, { status: 0 }]
+    })]);
+    t.assert.strictEqual(names(b), 'barrel,crate');
+});
+
+t.test('clickNames is null when the pool cannot be read', function () {
+    var b = boot([]);
+    b.H.host.game.quests = undefined;
+    t.assert.strictEqual(b.Q.clickNames(), null);
+    b.w.broken = true;
+    b.H.host.game.quests = {
+        GetQuestPool: function () { throw new Error('pool failed'); }
+    };
+    t.assert.strictEqual(b.Q.clickNames(), null);
+});
+
+t.test('clickNames is empty for an empty pool', function () {
+    var b = bootClick([]);
+    t.assert.strictEqual(names(b), '');
+});
+
+t.test('clickNames skips triggers that are done, of another type or condition, or unnamed', function () {
+    var b = bootClick([clickQuest({
+        triggers: [
+            trig('done', 0), trig('open', 1),
+            trig('kill', 2, { type: 2 }), trig('other', 3, { condition: 8 }),
+            trig('', 4), trig(undefined, 5)
+        ],
+        statuses: [{ status: 1 }, { status: 0 }, { status: 0 }, { status: 0 }, { status: 0 }, { status: 0 }]
+    })]);
+    t.assert.strictEqual(names(b), 'open');
+});
+
+t.test('clickNames counts a trigger whose status entry is missing', function () {
+    var b = bootClick([clickQuest({ triggers: [trig('crate', 3)], statuses: [{ status: 1 }] })]);
+    t.assert.strictEqual(names(b), 'crate');
+    b = bootClick([clickQuest({ triggers: [trig('crate', 0)] })]);
+    t.assert.strictEqual(names(b), 'crate');
+});
+
+t.test('clickNames skips finished, inactive and half-loaded quests', function () {
+    var open = [trig('x', 0)];
+    var st = [{ status: 0 }];
+    var b = bootClick([
+        clickQuest({ triggers: open, statuses: st, finished: true }),
+        clickQuest({ triggers: open, statuses: st, active: false }),
+        clickQuest({ triggers: open, statuses: st, active: 'missing' }),
+        { GetUniqueId: function () { return null; } },
+        clickQuest({ triggers: [trig('ok', 0)], statuses: st })
+    ]);
+    t.assert.strictEqual(names(b), 'ok');
+});
+
+t.test('clickNames skips a quest whose read throws and warns', function () {
+    var bad = clickQuest({ triggers: [trig('x', 0)] });
+    bad.isFinished = function () { throw new Error('finished failed'); };
+    var b = bootClick([bad, clickQuest({ triggers: [trig('ok', 0)], statuses: [{ status: 0 }] })]);
+    t.assert.strictEqual(names(b), 'ok');
+    var warned = b.H.logs().filter(function (e) {
+        return e.level === 'warn' && e.category === 'quests';
+    });
+    t.assert.ok(warned.length >= 1);
+});
+
+t.test('clickNames reads the definition from the field when the getter is absent', function () {
+    var b = bootClick([clickQuest({
+        triggers: [trig('crate', 0)], statuses: [{ status: 0 }], field: true
+    })]);
+    t.assert.strictEqual(names(b), 'crate');
+});
+
+t.test('definition falls back from getter to field to none', function () {
+    var b = boot([]);
+    var d = { specialType_string: '' };
+    var r = b.Q.definition({ GetQuestDefinition: function () { return d; } });
+    t.assert.strictEqual(r.source, 'getter');
+    t.assert.strictEqual(r.def, d);
+
+    r = b.Q.definition({ mQuestDefinition: d });
+    t.assert.strictEqual(r.source, 'field');
+    t.assert.strictEqual(r.def, d);
+
+    r = b.Q.definition({
+        GetQuestDefinition: function () { throw new Error('getter failed'); },
+        mQuestDefinition: d
+    });
+    t.assert.strictEqual(r.source, 'field');
+
+    r = b.Q.definition({ GetQuestDefinition: function () { return null; } });
+    t.assert.strictEqual(r.source, 'none');
+    t.assert.strictEqual(r.def, null);
+});

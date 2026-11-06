@@ -507,13 +507,17 @@
         st().go(S.WaveStep.Settle, blocked.general + ': ' + blocked.reason);
     }
 
-    // No own fighter in battle and no claimable quest waiting. An unreadable
-    // quest list (null) or a missing watcher is not settled.
+    // No own fighter in battle, no claimable quest waiting and no quest
+    // object left to pick up: a picked-up object can open the next part of
+    // the map just as a claimed quest can. An unreadable quest list or map
+    // (null) or a missing watcher is not settled.
     function islandSettled() {
         if (ld().anyAttacking()) return false;
         var watcher = S.modules.adventures.watcher;
         var pending = watcher && watcher.pending ? watcher.pending() : null;
-        return !!pending && pending.length === 0;
+        if (!pending || pending.length !== 0) return false;
+        var objs = watcher.objects ? watcher.objects() : null;
+        return !!objs && objs.length === 0;
     }
 
     function settle(r, w, inv) {
@@ -530,9 +534,10 @@
         // Two clocks. settledAt says the island has nothing left that could
         // clear the blocker, and a view elsewhere restarts it, since nobody
         // watched that time. The summed clock counts every pass with no battle:
-        // islandSettled stays false while a quest stays pending, and the
-        // watcher retries a failing claim for ever, so a count of battles alone
-        // could hang unseen. A running battle never pauses here.
+        // islandSettled stays false while a quest or a quest object stays
+        // pending, and the watcher retries a failing claim (collect a failing
+        // pick-up) for ever, so a count of battles alone could hang unseen;
+        // SETTLE_MAX_MS still caps it. A running battle never pauses here.
         var q = ld().quietClock(r, !ld().anyAttacking());
         var at = !islandSettled() ? null : (r.settledAt === null || q.gap ? now() : r.settledAt);
         var changed = at !== r.settledAt || !was || was.reason !== blocked.reason;

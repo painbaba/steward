@@ -89,6 +89,14 @@
         catch (e) { return null; }
     }
 
+    // True while the host still lets the object be clicked. A clicked map
+    // object drops this flag, so it is the positive sign that a click landed.
+    function isSelectable(b) {
+        if (!b) return false;
+        try { return b.mIsSelectable === true; }
+        catch (e) { return false; }
+    }
+
     function isMine(b) { return playerId(b) === 0; }
 
     function isEnemy(b) {
@@ -376,6 +384,7 @@
         outputFactor:      outputFactor,
         baseOutputFactor:  baseOutputFactor,
         buffRemainingMs:   buffRemainingMs,
+        isSelectable:      isSelectable,
 
         // state predicates
         isMine:       isMine,

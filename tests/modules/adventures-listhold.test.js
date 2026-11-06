@@ -198,14 +198,14 @@ t.test('Depart: a ghost of a sent general does not read as departed', function (
     assert.strictEqual(r.marks['depart:1.2'].seen, false, 'listed and idle is not gone');
 });
 
-t.test('Arrive: a ghost tick holds, the clean read goes to StarAll', function () {
+t.test('Arrive: a ghost tick holds, the clean read goes to Pickups', function () {
     var w = homeWorld();
     onIsland(w, [w.g1, w.g2]);
     startRun(w, [WAVE], { step: w.S.RunStep.Arrive });
     w.ghost(w.g2);
     holds(w);
     tick(w);
-    assertStep(w, 'StarAll');
+    assertStep(w, 'Pickups');
 });
 
 t.test('Recall: a ghost tick does not skip to JumpHome, the clean read sends both', function () {

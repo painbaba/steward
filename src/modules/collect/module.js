@@ -1,30 +1,45 @@
 /*
  * Collect module.
  *
- * Walks the current zone for "pure collectibles" (Easter eggs, footballs,
- * quest collectibles, event drops) and enqueues a SelectBuilding action for
- * each. Honoured by the kernel's modal guard (waits while the user has a
- * window open) and the busy contract (plan() will not be called again until
- * the previous cycle's actions have all completed).
+ * Clicks map pickups, one target per plan(). The targets come from
+ * S.core.pickups.targets(): on the home island the collectibles whose name
+ * matches the pattern list, on an adventure zone also the quest objects an
+ * open quest still waits to have clicked. Every other zone is left alone.
  *
- * Detection: a building is considered a pure collectible iff
- *   1. CollectionsManager.getBuildingIsCollectible(name) === true   (host API), AND
- *   2. its name matches one of settings.namePatterns (substring match)
+ * Each click runs as S.core.pickups.click(target) through
+ * S.core.actions.attempt, so it counts only once the object is seen gone
+ * from its grid or no longer selectable. The attempt's queue entries keep
+ * this module busy, so the next plan() comes only after the click settled;
+ * a verified click wakes the module at once for the next target.
  *
- * Without the name-pattern filter, the host API matches terrain rocks,
- * depleted mines, charcoal piles and other map-clutter — which is what the
- * F4 "pickup all" shortcut sweeps when the user explicitly invokes it. We
- * gate it tighter so the periodic scheduler tick stays useful.
+ * On adventures the setting adventureZones switches clicking on or off, and
+ * isReady() holds while the adventures module has queue work in flight, so a
+ * click never lands between the steps of an attack it is pacing.
  *
- * Use Steward → Collect → "Discover collectibles" to log every candidate on
+ * A click that did not verify (or did not start) puts its zone and grid into
+ * a memory-only retry table and is not tried again for CLICK_RETRY_MS; other
+ * targets go first meanwhile.
+ *
+ * Collectible detection: the host flag
+ * CollectionsManager.getBuildingIsCollectible(name) alone also matches
+ * terrain rocks, depleted mines and charcoal piles (what the client's F4
+ * "pickup all" sweeps), so a name pattern is required on top. Use
+ * Steward -> Collect -> "Discover collectibles" to log every candidate on
  * the current map and tune the pattern list.
  */
 
 (function (S) {
 
+    if (!S.modules.collect) S.modules.collect = {};
+
+    // How long a failed click waits before the same target is tried again.
+    var CLICK_RETRY_MS = 60000;
+
     // Module-private state. Persists across ticks but not across reboots.
     var state = {
-        lastUnmatchedSig: null
+        lastUnmatchedSig: null,
+        // 'zoneId:grid' -> time from which that target may be clicked again.
+        retries: {}
     };
 
     function readSettings() {
@@ -33,138 +48,144 @@
             : S.modules.collect.defaultSettings;
     }
 
-    function nameMatchesAny(n, patterns) {
-        if (!n || !patterns || !patterns.length) return false;
-        for (var i = 0; i < patterns.length; i++) {
-            if (typeof patterns[i] !== 'string' || !patterns[i].length) continue;
-            if (n.indexOf(patterns[i]) > -1) return true;
-        }
-        return false;
+    // Read through the module object at call time so tests can replace it.
+    function now() {
+        return S.modules.collect.now();
     }
 
-    // Build the effective pattern list for the current tick.
-    //
-    // Active events contribute two strings to the pattern set, both via
-    // substring match:
-    //   1. the event base code (Easter, XMAS, Valentine, HW, …)
-    //   2. the event RESOURCE name (StripedEggs, ChristmasResource,
-    //      ValentinesFlower, …) — confirmed empirically: Easter's
-    //      collectible is named 'BuildingStripedEggs' (not 'BuildingEaster*').
-    //      The building name carries the resource, not the event code.
-    //
-    // Both are included because (a) future events might use either pattern,
-    // (b) one might catch generic decorations the other misses, and the
-    // host's getBuildingIsCollectible filter narrows the result to actual
-    // collectibles regardless.
-    function effectivePatterns(s) {
-        var pats = (s.namePatterns || []).slice();
-        try {
-            if (S.core.events && typeof S.core.events.active === 'function') {
-                var ev = S.core.events.active();
-                for (var i = 0; i < ev.length; i++) {
-                    if (ev[i].code && pats.indexOf(ev[i].code) === -1) pats.push(ev[i].code);
-                    if (typeof S.core.events.eventResource === 'function') {
-                        var res = S.core.events.eventResource(ev[i].code);
-                        if (res && pats.indexOf(res) === -1) pats.push(res);
-                    }
-                }
-            }
-        } catch (e) { /* fall through with the configured list */ }
-        return pats;
+    function retryKey(t) {
+        return t.zoneId + ':' + t.grid;
     }
 
     function isReady(ctx) {
         var s = readSettings();
         if (!s || !s.enabled) return false;
-        if (!ctx.zone || !ctx.zone.isHome) return false;
-        if (!s.namePatterns || !s.namePatterns.length) return false;
-        return true;
+        if (!ctx.zone) return false;
+        if (ctx.zone.isHome) {
+            return !!(s.namePatterns && s.namePatterns.length);
+        }
+        if (ctx.zone.isAdventure) {
+            if (s.adventureZones !== true) return false;
+            // The adventure run paces attacks through the queue; a click in
+            // between would delay or reorder its steps.
+            return !S.kernel.queue.isModuleBusy('adventures');
+        }
+        return false;
     }
 
-    function plan() {
-        var s = readSettings();
-        var patterns = effectivePatterns(s);
+    // Collectibles exist but none match. Logged once per distinct unmatched
+    // set so a stale map doesn't spam the log every tick; repeats go to debug.
+    function noteUnmatched(patterns) {
         var bld = S.core.buildings;
-        bld.invalidate();
         var src = bld.list();
-        var enqueued = 0;
-        var collectibleCount = 0;     // host says "this is a collectible"
-        var unmatchedSamples = [];    // up to MAX_SAMPLES distinct names for the warning
+        var collectibleCount = 0;
+        var unmatchedSamples = [];
         var seenUnmatched = {};
         var MAX_SAMPLES = 8;
 
         for (var i = 0; i < src.length; i++) {
             if (!bld.isCollectible(src[i])) continue;
-            collectibleCount++;
             var name = bld.name(src[i]);
-            if (!nameMatchesAny(name, patterns)) {
-                if (!seenUnmatched[name] && unmatchedSamples.length < MAX_SAMPLES) {
-                    seenUnmatched[name] = true;
-                    unmatchedSamples.push(name);
-                }
-                continue;
+            if (S.core.pickups.matches(name, patterns)) continue;
+            collectibleCount++;
+            if (!seenUnmatched[name] && unmatchedSamples.length < MAX_SAMPLES) {
+                seenUnmatched[name] = true;
+                unmatchedSamples.push(name);
             }
-            S.kernel.queue.add('collect', [bld.grid(src[i])]);
-            enqueued++;
         }
-        if (enqueued > 0) {
-            S.kernel.log('collect', 'enqueued', enqueued, 'collectible(s) of',
-                         collectibleCount, 'host-flagged (patterns:', patterns.join(',') + ')');
-        } else if (collectibleCount > 0) {
-            // Collectibles exist but none match. Logging at log-level only
-            // ONCE per distinct unmatched-set so a stale-state map doesn't
-            // spam the log every tick. Subsequent ticks log at debug.
-            var sig = patterns.join('|') + '|' + unmatchedSamples.join(',');
-            var firstTime = (state.lastUnmatchedSig !== sig);
-            state.lastUnmatchedSig = sig;
-            var msg = ['host has', collectibleCount,
-                       'collectible(s) on map but none match patterns:',
-                       patterns.join(',') || '(empty)',
-                       '— unmatched samples:',
-                       unmatchedSamples.length ? unmatchedSamples.join(', ') : '(none)'];
-            if (firstTime) S.kernel.log.apply(null, ['collect'].concat(msg));
-            else            S.kernel.debug.apply(null, ['collect'].concat(msg));
+        if (collectibleCount === 0) return;
+
+        var sig = patterns.join('|') + '|' + unmatchedSamples.join(',');
+        var firstTime = (state.lastUnmatchedSig !== sig);
+        state.lastUnmatchedSig = sig;
+        var msg = ['host has', collectibleCount,
+                   'collectible(s) on map but none match patterns:',
+                   patterns.join(',') || '(empty)',
+                   '— unmatched samples:',
+                   unmatchedSamples.length ? unmatchedSamples.join(', ') : '(none)'];
+        if (firstTime) S.kernel.log.apply(null, ['collect'].concat(msg));
+        else            S.kernel.debug.apply(null, ['collect'].concat(msg));
+    }
+
+    function onClickDone(t, key) {
+        return function (result) {
+            if (result && result.status === S.ActionResult.Verified) {
+                delete state.retries[key];
+                S.kernel.log('collect', 'picked up ' + t.name + ' at ' + t.grid);
+                // The busy contract still spaces the clicks; this only skips
+                // the wait for the next regular tick.
+                S.kernel.scheduler.wake('collect', 0);
+                return;
+            }
+            state.retries[key] = now() + CLICK_RETRY_MS;
+            S.kernel.debug('collect', t.name + ' at ' + t.grid + ' not picked up (' +
+                           ((result && (result.reason || result.status)) || 'no result') +
+                           '), retry in ' + (CLICK_RETRY_MS / 1000) + ' s');
+        };
+    }
+
+    function plan(ctx) {
+        var s = readSettings();
+        var patterns = S.core.pickups.patterns(s.namePatterns || []);
+        var adventure = !!(ctx && ctx.zone && ctx.zone.isAdventure);
+        S.core.buildings.invalidate();
+        var list = S.core.pickups.targets({ patterns: patterns, quests: adventure });
+        if (list === null) return;
+
+        var t = null;
+        var key = null;
+        var at = now();
+        for (var i = 0; i < list.length; i++) {
+            var k = retryKey(list[i]);
+            if (state.retries.hasOwnProperty(k)) {
+                if (state.retries[k] > at) continue;
+                delete state.retries[k];
+            }
+            t = list[i];
+            key = k;
+            break;
         }
-        // No cooldown — the scheduler's busy contract handles re-entry: plan()
-        // will not be called again until every action above has executed.
-        // When the queue is empty (no collectibles on map), plan() is cheap to
-        // re-run on the next tick.
+
+        if (!t) {
+            if (list.length === 0) noteUnmatched(patterns);
+            return;
+        }
+
+        var started = false;
+        try {
+            started = S.core.actions.attempt(S.core.pickups.click(t), onClickDone(t, key));
+        } catch (e) {
+            S.kernel.error('collect', 'click on ' + t.name + ' at ' + t.grid + ' threw:', e);
+        }
+        if (!started) {
+            state.retries[key] = now() + CLICK_RETRY_MS;
+            S.kernel.debug('collect', 'click on ' + t.name + ' at ' + t.grid + ' did not start');
+        }
+    }
+
+    // Seeds every default key the stored settings lack, so readers of the raw
+    // stored object (the adventure run reads adventureZones) see them. A
+    // stored value always wins; nothing is written when no key was missing.
+    function seedSettings() {
+        var defaults = S.modules.collect.defaultSettings;
+        var stored = S.kernel.settings.read('collect');
+        if (!stored) {
+            S.kernel.settings.write('collect', defaults);
+            return;
+        }
+        var missing = false;
+        for (var key in defaults) {
+            if (defaults.hasOwnProperty(key) && !stored.hasOwnProperty(key)) missing = true;
+        }
+        if (missing) S.kernel.settings.write('collect', readSettings());
     }
 
     function boot() {
-        // Seed defaults on first run.
-        if (!S.kernel.settings.read('collect')) {
-            S.kernel.settings.write('collect', S.modules.collect.defaultSettings);
-        }
-
-        // Register the queue action that performs the actual collect.
-        S.kernel.queue.action('collect', function (params) {
-            var grid = params[0];
-            var bld = S.core.buildings;
-            try {
-                var building = bld.byGrid(grid);
-                if (!building) {
-                    // Building already collected (or zone changed). Quietly drop.
-                    return;
-                }
-                if (typeof game !== 'undefined' && game.gi && typeof game.gi.SelectBuilding === 'function') {
-                    game.gi.SelectBuilding(building);
-                }
-                var name = bld.name(building);
-                S.kernel.debug('collect', 'collecting', name, 'at', grid);
-                if (typeof globalFlash !== 'undefined' && globalFlash && globalFlash.gui &&
-                    typeof globalFlash.gui.UpdateGuiOnZoneLoad === 'function') {
-                    globalFlash.gui.UpdateGuiOnZoneLoad();
-                }
-            } catch (e) {
-                S.kernel.error('collect', 'collect action threw:', e);
-            }
-            // The collected building disappears or changes state; refresh so
-            // the next plan() (after the queue empties) sees the new world.
-            bld.invalidate();
-        });
-
+        seedSettings();
     }
+
+    S.modules.collect.CLICK_RETRY_MS = CLICK_RETRY_MS;
+    S.modules.collect.now = function () { return Date.now(); };
 
     S.kernel.register({
         id:       'collect',

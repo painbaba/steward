@@ -168,9 +168,18 @@ b.GetUpgradeLevel();
 b.GetGOContainer();           // .mIsAttackable, .mIsLeaderCamp, .ui ('enemy'|'friend'|...)
 b.getPlayerID();              // -1 = neutral/enemy, 0 = home
 b.GetArmy();                  // null or army; .HasUnits()
-b.mIsSelectable;
+b.mIsSelectable;              // true while the object can still be clicked
 b.IsUpgradeAllowed(true);
 b.productionQueue;            // .mTimedProductions_vector, .mProductionType
+```
+
+### Quest accessors
+
+```js
+q.IsQuestActive();
+q.GetQuestDefinition().questTriggers_vector[k];   // .triggerIdx, .type, .condition, .name_string
+// type 1 with condition 9 = click on a named map object
+q.mQuestTriggersFinished_vector[triggerIdx].status; // 0 = open
 ```
 
 ### Specialist accessors

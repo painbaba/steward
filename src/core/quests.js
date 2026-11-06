@@ -21,6 +21,12 @@
  * Claiming the last quest of an adventure closes the adventure, so claim()
  * refuses it unless the caller passes allowLast.
  *
+ * clickNames() names the map objects that open quests still wait to have
+ * clicked. It applies the client's own pick-up-all filter: the quest is not
+ * finished and IsQuestActive() holds, the trigger has type 1 and condition 9
+ * (click a named map object) and a non-empty name_string, and its entry in
+ * mQuestTriggersFinished_vector (by triggerIdx) is missing or has status 0.
+ *
  * Bundle slot: core, after production.js and before resources.js (core files
  * load in name order). Everything here runs at call time; the top level only
  * assigns S.core.quests.
@@ -40,6 +46,25 @@
 
     var CLAIM_TIMEOUT_MS = 15000;
 
+    // Trigger type and condition of "click the named map object".
+    var CLICK_TRIGGER_TYPE = 1;
+    var CLICK_TRIGGER_CONDITION = 9;
+
+    // A plain array copy of a host vector, or null when it is missing or has
+    // no length. toArray is preferred where the host offers it; otherwise the
+    // vector is walked by index. A throw reaches the caller.
+    function toList(vec) {
+        if (!vec) return null;
+        if (typeof vec.toArray === 'function') {
+            var arr = vec.toArray();
+            if (arr && typeof arr.length === 'number') vec = arr;
+        }
+        if (typeof vec.length !== 'number') return null;
+        var out = [];
+        for (var i = 0; i < vec.length; i++) out.push(vec[i]);
+        return out;
+    }
+
     // The live quest objects of the pool, or null when the game, the pool or
     // the vector is missing or the read throws.
     function readPool() {
@@ -47,16 +72,7 @@
             if (typeof game === 'undefined' || !game || !game.quests) return null;
             var pool = game.quests.GetQuestPool();
             if (!pool) return null;
-            var vec = pool.GetQuest_vector();
-            if (!vec) return null;
-            if (typeof vec.toArray === 'function') {
-                var arr = vec.toArray();
-                if (arr && typeof arr.length === 'number') vec = arr;
-            }
-            if (typeof vec.length !== 'number') return null;
-            var out = [];
-            for (var i = 0; i < vec.length; i++) out.push(vec[i]);
-            return out;
+            return toList(pool.GetQuest_vector());
         } catch (e) {
             S.kernel.warn('quests', 'quest pool read threw:', e);
             return null;
@@ -89,10 +105,26 @@
         }
     }
 
+    // The quest's definition: the getter first, the raw field when the getter
+    // is absent, throws or returns nothing. source tells which one answered,
+    // so a dump can show where a definition came from.
+    function definition(q) {
+        try {
+            if (typeof q.GetQuestDefinition === 'function') {
+                var d = q.GetQuestDefinition();
+                if (d) return { def: d, source: 'getter' };
+            }
+        } catch (e) { /* try the field */ }
+        try {
+            if (q.mQuestDefinition) return { def: q.mQuestDefinition, source: 'field' };
+        } catch (e2) { /* none */ }
+        return { def: null, source: 'none' };
+    }
+
     // True when the quest definition carries the last-quest marker.
     function isLast(q) {
         try {
-            var special = q.GetQuestDefinition().specialType_string;
+            var special = definition(q).def.specialType_string;
             return typeof special === 'string' && special.indexOf(LAST_QUEST_MARK) !== -1;
         } catch (e) {
             return false;
@@ -132,6 +164,55 @@
         var out = [];
         for (var i = 0; i < all.length; i++) {
             if (all[i].finished) out.push(all[i]);
+        }
+        return out;
+    }
+
+    // True while the quest is open and the client counts it as active. A
+    // missing method means the quest does not count.
+    function isOpenActive(q) {
+        if (q.isFinished() === true) return false;
+        return typeof q.IsQuestActive === 'function' && q.IsQuestActive() === true;
+    }
+
+    // True when the trigger asks for a click on a named map object.
+    function isClickTrigger(t) {
+        return !!t && t.type === CLICK_TRIGGER_TYPE && t.condition === CLICK_TRIGGER_CONDITION &&
+            typeof t.name_string === 'string' && t.name_string.length > 0;
+    }
+
+    // True while the trigger's status entry is missing or still open. Any
+    // other status means the client already counts the trigger as done.
+    function isTriggerOpen(statuses, t) {
+        if (!statuses) return true;
+        var st = statuses[t.triggerIdx];
+        if (st === undefined || st === null) return true;
+        return st.status === 0;
+    }
+
+    // { name: true } for every map object an open, active quest still waits
+    // to have clicked; null when the pool cannot be read. A quest whose read
+    // throws is skipped, as list() does.
+    function clickNames() {
+        var qs = readPool();
+        if (qs === null) return null;
+        var out = {};
+        for (var i = 0; i < qs.length; i++) {
+            try {
+                var q = qs[i];
+                if (!isQuest(q) || !isOpenActive(q)) continue;
+                var def = definition(q).def;
+                var triggers = def ? toList(def.questTriggers_vector) : null;
+                if (!triggers) continue;
+                var statuses = toList(q.mQuestTriggersFinished_vector);
+                for (var k = 0; k < triggers.length; k++) {
+                    var t = triggers[k];
+                    if (!isClickTrigger(t) || !isTriggerOpen(statuses, t)) continue;
+                    out[t.name_string] = true;
+                }
+            } catch (e) {
+                S.kernel.warn('quests', 'quest entry ' + i + ' threw:', e);
+            }
         }
         return out;
     }
@@ -255,5 +336,7 @@
     S.core.quests.finished = finished;
     S.core.quests.isLast   = isLast;
     S.core.quests.claim    = claim;
+    S.core.quests.definition = definition;
+    S.core.quests.clickNames = clickNames;
 
 }(Steward));
