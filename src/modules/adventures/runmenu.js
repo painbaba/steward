@@ -119,9 +119,11 @@
     }
 
     function stageMark(r, row, pos) {
-        if (r.status === S.RunStatus.Done || pos > row.last) return 'done';
+        // A series that was stopped keeps its step like a paused run, so the
+        // list shows where it stopped; a series that finished shows all done.
+        if ((r.status === S.RunStatus.Done && !r.stopReason) || pos > row.last) return 'done';
         if (pos < row.first) return 'todo';
-        return r.status === S.RunStatus.Paused ? 'paused' : 'now';
+        return r.status === S.RunStatus.Paused || r.status === S.RunStatus.Done ? 'paused' : 'now';
     }
 
     function waveMark(r, row, pos, i) {
@@ -203,7 +205,10 @@
         var r = st().run();
         if (!r) return '';
         if (r.status === S.RunStatus.Paused) return r.pause ? r.pause.message : '';
-        if (r.status === S.RunStatus.Done) return 'Series done; use Stop run to clear';
+        if (r.status === S.RunStatus.Done) {
+            return r.stopReason ? 'Stopped: ' + r.stopReason + '; use Stop run to clear'
+                : 'Series done; use Stop run to clear';
+        }
         var row = currentRow(view(pass).groups);
         var line = row ? 'Now: ' + row.label + (row.detail ? ', ' + row.detail : '') : '';
         // A wrong zone stops the passes, so nothing else can say why the run

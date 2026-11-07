@@ -29,6 +29,8 @@ function setup(o) {
     w.run = w.S.modules.adventures.run;
     w.rm = w.S.modules.adventures.runmenu;
     if (o.none) return w;
+    // Retraining is a module setting; o.run.retrain stands for it and never lands on the run.
+    w.S.kernel.settings.write('adventures', { retrain: !(o.run && o.run.retrain === false) });
     var r = w.st.newRun({
         id: 42, templateId: 't1', label: 'Black Knights', adventure: 'BlackKnights', zoneId: null,
         paths: WAVES.slice(0, o.waves || 2), loadoutPath: W.LOADOUT, loadoutKeys: {},
@@ -38,7 +40,9 @@ function setup(o) {
     // After newRun, which starts a wave step's run at Gate.
     r.step = stepValue(w, o.step || 'Muster');
     var k;
-    for (k in (o.run || {})) if (Object.prototype.hasOwnProperty.call(o.run, k)) r[k] = o.run[k];
+    for (k in (o.run || {})) {
+        if (k !== 'retrain' && Object.prototype.hasOwnProperty.call(o.run, k)) r[k] = o.run[k];
+    }
     w.st.begin({
         templateId: 't1', label: 'Black Knights', adventure: 'BlackKnights', count: o.count || 1, ended: false,
         requested: w.t, finished: o.finished || 0, closedAt: null
@@ -199,6 +203,18 @@ t.test('marks: Done marks every row done, the not-used ones stay skipped', funct
         if (r.label === 'Count lost troops' || r.label === 'Retrain') assert.strictEqual(r.mark, 'skip', r.label);
         else assert.strictEqual(r.mark, 'done', r.label);
     });
+});
+
+t.test('a stopped run shows Stopped and the rows after its step stay todo', function () {
+    var w = setup({ step: 'Pack', finished: 1 });
+    w.st.stop('troops short: 5 Rifle');
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done);
+    assert.strictEqual(labels(w)[1].indexOf('Stopped:'), 0, 'the status line is the second item');
+    assert.strictEqual(w.st.status().indexOf('Stopped:'), 0);
+    assert.strictEqual(row(w, 'Place carriers').mark, 'done');
+    assert.strictEqual(row(w, 'Pack leftover troops').mark, 'paused');
+    assert.strictEqual(row(w, 'Wait for last quest').mark, 'todo');
+    assert.strictEqual(row(w, 'Return home').mark, 'todo');
 });
 
 t.test('marks: no run gives no rows', function () {

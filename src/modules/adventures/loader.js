@@ -623,15 +623,52 @@
         return null;
     }
 
-    // True when every unit still short is already queued in at least the
-    // short amount, so the troops arrive without a new order.
-    function shortQueued(shortAfter) {
+    // True when every unit still short is already queued, together with the
+    // extra troops (those on the way home), in at least the short amount, so
+    // the troops arrive without a new order. An unreadable queue never counts
+    // as covered.
+    function shortQueued(shortAfter, extra) {
         for (var u in shortAfter) {
             if (!has(shortAfter, u) || !(shortAfter[u] > 0)) continue;
             var q = S.core.production.queued(u);
-            if (typeof q !== 'number' || q < shortAfter[u]) return false;
+            if (typeof q !== 'number') return false;
+            var x = extra && has(extra, u) && typeof extra[u] === 'number' ? extra[u] : 0;
+            if (q + x < shortAfter[u]) return false;
         }
         return true;
+    }
+
+    // What of a short read cannot be trusted, or null: the free pool, else the
+    // production queue of the first short unit in name order. A source that
+    // cannot be read must never look empty, so a caller that would end the
+    // series on this read waits for it instead.
+    function unreadableShort(inv, shortAfter) {
+        if (!inv.ok) return 'troops';
+        var units = [];
+        for (var u in shortAfter) {
+            if (has(shortAfter, u) && shortAfter[u] > 0) units.push(u);
+        }
+        units.sort();
+        for (var i = 0; i < units.length; i++) {
+            if (typeof S.core.production.queued(units[i]) !== 'number') return 'production queue of ' + units[i];
+        }
+        return null;
+    }
+
+    // The one way supply() gives up on short troops. Without opts.onShort it
+    // pauses TroopsShort. With it the caller decides what a short means, but
+    // only on a read where the pool and every short unit's queue are known.
+    function shortStop(r, inv, shortAfter, opts, message) {
+        if (!opts || typeof opts.onShort !== 'function') {
+            st().pause(S.RunPause.TroopsShort, message);
+            return;
+        }
+        var what = unreadableShort(inv, shortAfter);
+        if (what) {
+            waitRead(r, what);
+            return;
+        }
+        opts.onShort(message);
     }
 
     function isWaitBlocker(b) {
@@ -665,9 +702,15 @@
         return true;
     }
 
-    // opts: { waitQueued, waitMaxMs, untilIdle }, optional. With waitQueued,
-    // troops that are short but already in production are waited for (up to
-    // waitMaxMs since the step began) instead of pausing at once.
+    // opts: { waitQueued, waitMaxMs, untilIdle, transit, onShort }, optional.
+    // With waitQueued, troops that are short but already in production are
+    // waited for (up to waitMaxMs since the step began) instead of pausing at
+    // once. transit is an army map of troops on the way home, which count like
+    // queued ones for that wait. onShort(message) replaces the TroopsShort
+    // pause of a plain short and of exhausted unload cycles; it is called only
+    // on a readable free pool and readable queues of every short unit, and an
+    // unreadable one waits for the read. The production wait limit still
+    // pauses.
     //
     // untilIdle is the wave's Supply. A plan that cannot cover then goes, in
     // this order: an unreadable read holds; a busy general is waited for; a
@@ -687,13 +730,14 @@
         var settling = now() - r.since < READ_LAG_MS;
         if (!p.covered) {
             var shortText = S.core.army.text(p.shortAfter);
-            if (opts && opts.waitQueued && shortQueued(p.shortAfter)) {
+            var transit = opts ? opts.transit : null;
+            if (opts && opts.waitQueued && shortQueued(p.shortAfter, transit)) {
                 if (now() - r.since > opts.waitMaxMs) {
                     st().pause(S.RunPause.TroopsShort, 'troops short: ' + shortText + ' (still in production after ' +
                         Math.round(opts.waitMaxMs / 60000) + ' min)');
                     return;
                 }
-                var reason = WAIT_PREFIX + shortText;
+                var reason = WAIT_PREFIX + shortText + (!S.core.army.isEmpty(transit) ? ' (part on the way home)' : '');
                 if (!r.blocker || r.blocker.reason !== reason) {
                     r.blocker = { key: '', general: null, target: null, reason: reason };
                     S.kernel.log(CATEGORY, st().label() + ': ' + reason);
@@ -704,7 +748,7 @@
             if (untilIdle && holdShort(r, inv, steps, shortText)) return;
             if (!untilIdle || !p.donors.length) {
                 if (settling) return;
-                st().pause(S.RunPause.TroopsShort, 'troops short: ' + shortText);
+                shortStop(r, inv, p.shortAfter, opts, 'troops short: ' + shortText);
                 return;
             }
         }
@@ -720,7 +764,7 @@
             r.donors = keys;
             r.cycles++;
             if (!untilIdle && r.cycles > MAX_UNLOAD_CYCLES) {
-                st().pause(S.RunPause.TroopsShort, 'donors unloaded but the free pool is still short: ' +
+                shortStop(r, inv, p.shortBefore, opts, 'donors unloaded but the free pool is still short: ' +
                     S.core.army.text(p.shortBefore));
                 return;
             }

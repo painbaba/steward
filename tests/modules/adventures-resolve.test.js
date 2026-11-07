@@ -283,10 +283,14 @@ t.test('setting: default 45 over an old stored file, a misc section and its summ
     assert.strictEqual(a.resolve.limitMs(), 2700000);
     var misc = w.S.kernel.registry.byTab('misc').filter(function (m) { return m.id === 'adventures'; });
     assert.strictEqual(misc.length, 1, 'adventures has a misc section');
-    assert.strictEqual(a.settingsSummary(), 'stuck limit 45 min');
+    assert.strictEqual(a.settingsSummary(), 'stuck limit 45 min, retrain off');
     noTrip(w);
-    assert.strictEqual(a.settingsSummary(), 'stuck limit off');
+    assert.strictEqual(a.settingsSummary(), 'stuck limit off, retrain off');
     assert.strictEqual(a.resolve.limitMs(), 0);
+    w.S.kernel.settings.write('adventures', { stuckMinutes: 45, retrain: true });
+    assert.strictEqual(a.settingsSummary(), 'stuck limit 45 min, retrain on');
+    w.S.kernel.settings.write('adventures', { stuckMinutes: 45, retrain: true, retrainSettlersOnly: true });
+    assert.strictEqual(a.settingsSummary(), 'stuck limit 45 min, retrain on, settlers only');
 });
 
 // ---- persistence, pause and resume ----------------------------------------
@@ -462,12 +466,12 @@ t.test('a bad stored limit falls back to the default for both the trip and the s
         w.S.kernel.settings.write('adventures', { lastDir: '', stuckMinutes: v });
         assert.strictEqual(a.stuckMinutes(), 45, 'stored ' + v);
         assert.strictEqual(a.resolve.limitMs(), 2700000, 'stored ' + v);
-        assert.strictEqual(a.settingsSummary(), 'stuck limit 45 min', 'stored ' + v);
+        assert.strictEqual(a.settingsSummary(), 'stuck limit 45 min, retrain off', 'stored ' + v);
     });
     w.S.kernel.settings.write('adventures', { lastDir: '', stuckMinutes: 30 });
     assert.strictEqual(a.stuckMinutes(), 30);
     assert.strictEqual(a.resolve.limitMs(), 1800000);
-    assert.strictEqual(a.settingsSummary(), 'stuck limit 30 min');
+    assert.strictEqual(a.settingsSummary(), 'stuck limit 30 min, retrain off');
 });
 
 t.test('busyOf returns only the record of the run\'s step', function () {

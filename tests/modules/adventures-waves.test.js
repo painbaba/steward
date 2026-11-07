@@ -170,28 +170,51 @@ t.test('state: every newRun field survives a fresh boot', function () {
     assert.strictEqual(loaded.waveIndex, 1);
 });
 
-t.test('state: a run file without retrain loads with retrain true', function () {
+t.test('state: the retrain key of a run file is ignored on load (no retrain field)', function () {
     var w = attackWorld();
     startRun(w, ['C:/b/w1.txt']);
-    assert.strictEqual(w.st.run().retrain, true, 'on by default');
     w.st.save();
+    assert.ok(!Object.prototype.hasOwnProperty.call(JSON.parse(w.fs.disk[RUN_FILE]).run, 'retrain'));
     var data = JSON.parse(w.fs.disk[RUN_FILE]);
-    delete data.run.retrain;
+    data.run.retrain = false;
     writeJson(w.fs, RUN_FILE, data);
     var w2 = world({ fs: w.fs });
     w2.mod.boot();
-    assert.strictEqual(w2.st.run().retrain, true);
+    assert.ok(w2.st.run());
+    assert.ok(!Object.prototype.hasOwnProperty.call(w2.st.run(), 'retrain'));
 });
 
-t.test('state: retrain false round trips through the file', function () {
+t.test('state: transit and transitBase round-trip through the run file; malformed entries drop', function () {
     var w = attackWorld();
     var r = startRun(w, ['C:/b/w1.txt']);
-    r.retrain = false;
+    var until = w.st.now() + 1000000;
+    r.transit = [{ from: 3, army: { Rifle: 8 }, until: until }];
+    r.transitBase = { Rifle: 10 };
     w.st.save();
-    assert.strictEqual(JSON.parse(w.fs.disk[RUN_FILE]).run.retrain, false);
     var w2 = world({ fs: w.fs });
     w2.mod.boot();
-    assert.strictEqual(w2.st.run().retrain, false);
+    assert.deepStrictEqual(plain(w2.st.run().transit), [{ from: 3, army: { Rifle: 8 }, until: until }]);
+    assert.deepStrictEqual(plain(w2.st.run().transitBase), { Rifle: 10 });
+    var data = JSON.parse(w.fs.disk[RUN_FILE]);
+    data.run.transit = [
+        { from: 3, army: { Rifle: 8 }, until: until },
+        { from: 'x', army: { Rifle: 1 }, until: until },
+        { from: 4, army: { Rifle: 1 }, until: 'soon' },
+        { from: 5, army: null, until: until },
+        null, 7
+    ];
+    data.run.transitBase = 'bad';
+    writeJson(w.fs, RUN_FILE, data);
+    var w3 = world({ fs: w.fs });
+    w3.mod.boot();
+    assert.strictEqual(w3.st.run().transit.length, 1);
+    assert.strictEqual(w3.st.run().transit[0].from, 3);
+    assert.strictEqual(w3.st.run().transitBase, null);
+    data.run.transit = 'bad';
+    writeJson(w.fs, RUN_FILE, data);
+    var w4 = world({ fs: w.fs });
+    w4.mod.boot();
+    assert.deepStrictEqual(plain(w4.st.run().transit), []);
 });
 
 t.test('state: a 0.6.0 run file loads Running at its step with the new fields defaulted', function () {

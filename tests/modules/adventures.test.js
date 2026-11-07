@@ -93,7 +93,7 @@ t.test('boot seeds lastDir only and ignores an old stored default horseshoe', fu
     s.H.module('adventures').boot();
     assert.strictEqual(s.H.settings.read('adventures').lastDir, 'C:/battles');
     s.H.settings.write('adventures', { lastDir: 'C:/y', defaultSpeedBuff: 'GeneralSpeedBuff_A' });
-    assert.deepStrictEqual(plain(s.tpl.settings()), { lastDir: 'C:/y', stuckMinutes: 45 });
+    assert.deepStrictEqual(plain(s.tpl.settings()), { lastDir: 'C:/y', stuckMinutes: 45, retrain: false, retrainSettlersOnly: false });
 });
 
 // ---- validate -----------------------------------------------------------------
@@ -299,25 +299,19 @@ t.test('fileName both separators', function () {
     assert.strictEqual(s.tpl.fileName(null), '');
 });
 
-t.test('template round trip keeps retrain', function () {
+t.test('toFile writes no retrain key; an old file with retrain false loads, normalize has no retrain field', function () {
     var s = setup();
-    var off = s.tpl.save(record({ retrain: false }), 1000);
-    var on = s.tpl.save(record({ label: 'Other' }), 2000);
-    assert.strictEqual(JSON.parse(s.fs.disk[DIR + '/t1000.json']).retrain, false);
-    assert.strictEqual(s.tpl.get(off.id).retrain, false);
-    assert.strictEqual(s.tpl.get(on.id).retrain, true, 'on by default');
-    assert.strictEqual(JSON.parse(s.fs.disk[DIR + '/t2000.json']).retrain, true);
-});
-
-t.test('a template file without retrain reads true', function () {
-    var s = setup();
+    var saved = s.tpl.save(record({ retrain: false }), 1000);
+    assert.ok(!Object.prototype.hasOwnProperty.call(JSON.parse(s.fs.disk[DIR + '/t1000.json']), 'retrain'));
+    assert.ok(!Object.prototype.hasOwnProperty.call(s.tpl.get(saved.id), 'retrain'));
     s.fs.disk[DIR + '/old.json'] = JSON.stringify({
         version: 1, label: 'Old', adventure: 'BlackKnights', loadout: 'l.json', waves: ['w.json'],
-        speedBuff: 'SpeedBuffDefault'
+        speedBuff: 'SpeedBuffDefault', retrain: false
     });
-    assert.strictEqual(s.tpl.get('old').retrain, true);
-    assert.strictEqual(s.tpl.normalize({ label: 'x' }).retrain, true);
-    assert.strictEqual(s.tpl.normalize({ label: 'x', retrain: false }).retrain, false);
+    var old = s.tpl.get('old');
+    assert.strictEqual(old.label, 'Old');
+    assert.ok(!Object.prototype.hasOwnProperty.call(old, 'retrain'));
+    assert.ok(!Object.prototype.hasOwnProperty.call(s.tpl.normalize({ label: 'x', retrain: false }), 'retrain'));
 });
 
 // ---- wave order ---------------------------------------------------------------------

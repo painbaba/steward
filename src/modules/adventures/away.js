@@ -53,6 +53,7 @@
     var PLACE_QUIET_MS      = 300000;   // quiet time a holder gets to find a free field
     var PICKUPS_MAX_MS      = 120000;   // watched time collect gets to pick up after arrival
     var CLEAR_PICKUP_MAX_MS = 900000;   // time with no battle and no pick-up quest objects may stay
+    var TRANSIT_MS          = 4500000;  // free troops left on the island travel home by themselves (about an hour) and count as owned this long, unless seen landing first
 
     var CATEGORY = 'adventures';
 
@@ -412,6 +413,8 @@
     // objects are left the quest may still need them, so the last quest's
     // own limit does not run; their own clock counts time with no battle and
     // starts again whenever one of them is picked up.
+    // Leaving Clear records the leftover free troops as travelling home, so
+    // the later home steps count them as owned until they land.
     function clear(r, inv) {
         var list = S.core.quests.list();
         var last = list ? lastQuestOf(list) : null;
@@ -451,6 +454,11 @@
             }
             var standing = standingText(r);
             if (standing) warn('camps still standing after the last quest: ' + standing);
+            st().noteTransit(r, p.remainder, now() + TRANSIT_MS);
+            if (S.core.army.total(p.remainder) > 0) {
+                log('on the way home by themselves: ' + S.core.army.text(p.remainder) +
+                    ', counted as yours for ' + Math.round(TRANSIT_MS / 60000) + ' min');
+            }
             st().go(S.RunStep.LastQuest, 'last quest finished');
             return;
         }

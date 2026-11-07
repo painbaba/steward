@@ -45,12 +45,13 @@ function gen(uid, name, grid, army, more) {
 
 // Anna (1.1) carries 5 Rifle and Bert (1.2) 3 Rifle; the wave attacks two
 // camps. o: world options; o.generals replaces the two at home, o.loadout and
-// o.wave replace the files.
+// o.wave replace the files. Retraining is on unless o.settings says otherwise,
+// so the tests of the home steps see the retrain path.
 function homeWorld(o) {
     o = o || {};
     var g1 = gen('1.1', 'Anna', 10);
     var g2 = gen('1.2', 'Bert', 20);
-    var opts = { home: true, generals: [g1, g2], free: { Rifle: 20, Bow: 0 } };
+    var opts = { home: true, generals: [g1, g2], free: { Rifle: 20, Bow: 0 }, settings: o.settings || { retrain: true } };
     for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) opts[k] = o[k];
     var w = W.world(opts);
     w.g1 = g1;
@@ -229,9 +230,11 @@ function inFlight(w) {
 
 // A script reload: the same files run again into the same context. The run
 // state and the memory-only round survive in the module namespace, the queue
-// does not.
+// does not. The stored settings survive too, as the client keeps them.
 function reload(w) {
+    var settings = w.S.kernel.settings.read('adventures');
     w.H = harness.reload(w.H);
+    if (settings) w.H.Steward.kernel.settings.write('adventures', settings);
     w.H.clearQueued();
     w.pending = [];
     w.S = w.H.Steward;
@@ -244,8 +247,8 @@ function reload(w) {
 
 // A client restart: a fresh boot on the same disk. The game keeps what it
 // holds (generals, pools, adventures, menu stock, queues, quests); the run
-// comes back from its file. The record arrays are shared, so counts span the
-// restart.
+// comes back from its file, and the stored settings survive the fresh boot. The
+// record arrays are shared, so counts span the restart.
 var SHARED = ['orders', 'raises', 'unloads', 'buffs', 'claims', 'zoneSends', 'buffActions', 'productionOrders',
     'closes', 'visits'];
 var CARRIED = ['t', 'adventures', 'stock', 'queues', 'pop', 'popNoEffect', 'quests', 'camps', 'auto',
@@ -255,7 +258,8 @@ function restart(w) {
     var viewed = w.gi.mCurrentViewedZoneID;
     var w2 = W.world({
         home: true, fs: w.fs, generals: w.lists[HOME], away: w.lists[ZONE],
-        free: w.frees[HOME], awayFree: w.frees[ZONE]
+        free: w.frees[HOME], awayFree: w.frees[ZONE],
+        settings: w.S.kernel.settings.read('adventures') || {}
     });
     w2.g1 = w.g1;
     w2.g2 = w.g2;
@@ -1891,6 +1895,7 @@ t.test('Account: no snapshot (started on an open map) skips retraining with the 
     tick(w);
     assertStep(w, 'Next');
     assert.ok(logged(w, /no troop snapshot \(run started on an open map\); retraining skipped/));
+    assert.ok(!logged(w, /retrain off/), 'retraining is on, the missing snapshot is the reason');
     assert.strictEqual(w.productionOrders.length, 0);
     assert.strictEqual(popBuffs(w).length, 0);
 });
@@ -2150,6 +2155,8 @@ t.test('Restart: in Retrain resumes without a second order', function () {
     drive(w, { until: at('Next') });
     assertStep(w, 'Next');
     assert.deepStrictEqual(ordersOf(w), ['Knight 4', 'Rifle 10']);
+    assert.strictEqual(w.productionOrders.length, 2, 'one order per unit across the restart');
+    assert.ok(!logged(w, /retrain off/), 'the setting survived the restart');
 });
 
 // ---- 21. Kernel pause without a reload (B1) ------------------------------------------------
@@ -2348,14 +2355,14 @@ t.test('series: a malformed request count runs one run and ends Done', function 
 // ---- 20. Optional horseshoe and retraining ----------------------------------------------
 
 t.test('retrain off: Snapshot goes to Supply without reading troops', function () {
-    var w = homeWorld();
+    var w = homeWorld({ settings: { retrain: false } });
     var reads = 0;
     var queued = w.S.core.production.queued;
     w.S.core.production.queued = function () { reads++; return queued.apply(this, arguments); };
     // Troops that cannot be read would hold a snapshot; with retraining off
     // nothing waits for them.
     w.H.host.game.zone.GetArmy = function () { return null; };
-    series(w, { step: w.S.RunStep.Snapshot, run: { retrain: false } });
+    series(w, { step: w.S.RunStep.Snapshot });
     tick(w);
     assertStep(w, 'Supply');
     assert.strictEqual(w.st.run().snapshot, null);
@@ -2364,8 +2371,8 @@ t.test('retrain off: Snapshot goes to Supply without reading troops', function (
 });
 
 t.test('retrain off: Account goes to Next with no order', function () {
-    var w = homeWorld();
-    series(w, { step: w.S.RunStep.Account, run: { retrain: false } });
+    var w = homeWorld({ settings: { retrain: false } });
+    series(w, { step: w.S.RunStep.Account });
     tick(w);
     assertStep(w, 'Next');
     assert.ok(logged(w, /retrain off; retraining skipped/));
@@ -2374,15 +2381,19 @@ t.test('retrain off: Account goes to Next with no order', function () {
     assert.strictEqual(popBuffs(w).length, 0);
 });
 
-t.test('nextRun keeps retrain on the next run', function () {
-    [false, true].forEach(function (retrain) {
-        var w = homeWorld();
-        series(w, { step: w.S.RunStep.Next, count: 2, run: { retrain: retrain } });
-        tick(w);
-        var r = w.st.run();
-        assert.strictEqual(r.step, w.S.RunStep.Muster, 'the next run begins');
-        assert.strictEqual(r.retrain, retrain);
-    });
+t.test('nextRun carries pending transit and no retrain key', function () {
+    var w = homeWorld();
+    series(w, { step: w.S.RunStep.Next, count: 2, run: { transit: [
+        { from: 41, army: { Rifle: 8 }, until: w.t + LONG_MS },
+        { from: 40, army: { Bow: 3 }, until: w.t - 1 }
+    ] } });
+    tick(w);
+    var r = w.st.run();
+    assert.strictEqual(r.step, w.S.RunStep.Muster, 'the next run begins');
+    assert.ok(!Object.prototype.hasOwnProperty.call(r, 'retrain'), 'no retrain field');
+    assert.deepStrictEqual(plain(r.transit), [{ from: 41, army: { Rifle: 8 }, until: w.t + LONG_MS }],
+        'the pending entry goes with the run, the expired one does not');
+    assert.deepStrictEqual(plain(r.transitBase), { Rifle: 20 }, 'the base is the home count read at Next');
 });
 
 t.test('horseshoe None sends nothing and logs not used', function () {
@@ -2398,7 +2409,7 @@ t.test('horseshoe None sends nothing and logs not used', function () {
     assert.strictEqual(w.buffActions.filter(function (b) { return /SpeedBuff/.test(b.type); }).length, 0);
 });
 
-t.test('run from a template carries retrain', function () {
+t.test("a template's retrain key is ignored; the run has no retrain field", function () {
     [false, true].forEach(function (retrain) {
         var w = homeWorld();
         var tpl = w.S.modules.adventures.templates;
@@ -2412,8 +2423,287 @@ t.test('run from a template carries retrain', function () {
         }, 1000);
         assert.strictEqual(saved.ok, true);
         assert.strictEqual(w.S.modules.adventures.run.start(saved.id), true);
-        assert.strictEqual(w.st.run().retrain, retrain);
+        assert.ok(!Object.prototype.hasOwnProperty.call(w.st.run(), 'retrain'), 'no retrain field');
     });
+});
+
+// ---- 20. Retrain setting, troops on the way home, series stop ------------------------
+
+// Free troops of an earlier island on the way home, pending until untilMs.
+function travelling(army, untilMs) {
+    return [{ from: 41, army: army, until: untilMs }];
+}
+
+function transitOf(w) {
+    return plain(w.st.run().transit);
+}
+
+t.test('retrain setting: nothing stored reads off; Snapshot skips the count', function () {
+    var w = homeWorld({ settings: {} });
+    assert.strictEqual(w.S.modules.adventures.retrainOn(), false);
+    assert.strictEqual(w.S.modules.adventures.retrainSettlersOnly(), false);
+    series(w, { step: w.S.RunStep.Snapshot });
+    tick(w);
+    assertStep(w, 'Supply');
+    assert.strictEqual(w.st.run().snapshot, null);
+    assert.ok(logged(w, /Snapshot -> Supply \(retrain off\)/));
+});
+
+t.test('retrain setting: turned off mid-run, Account, Population and Retrain go to Next with no order', function () {
+    [['Account', true], ['Population', false], ['Retrain', false]].forEach(function (c) {
+        var w = homeWorld({ free: { Rifle: 10 }, pop: 0 });
+        series(w, { step: w.S.RunStep[c[0]], run: { snapshot: { Rifle: 20 } } });
+        w.S.kernel.settings.write('adventures', { retrain: false });
+        tick(w);
+        play(w);
+        assertStep(w, 'Next');
+        assert.ok(logged(w, new RegExp(c[0] + ' -> Next \\(retrain off\\)')), c[0]);
+        if (c[1]) assert.ok(logged(w, /retrain off; retraining skipped/), c[0] + ' logs the skip');
+        assert.strictEqual(w.productionOrders.length, 0, c[0]);
+        assert.strictEqual(popBuffs(w).length, 0, c[0]);
+    });
+});
+
+t.test('transit: a Clear exit with free troops left records them once, logs them, and a re-exit replaces the entry', function () {
+    var w = packWorld();
+    series(w, { step: w.S.RunStep.PackStar, zoneId: ZONE, keys: PACK_KEYS });
+    drive(w, { until: at('LastQuest') });
+    assertStep(w, 'LastQuest');
+    var r = w.st.run();
+    var list = transitOf(w);
+    assert.strictEqual(list.length, 1, JSON.stringify(list));
+    assert.strictEqual(list[0].from, r.id);
+    assert.deepStrictEqual(list[0].army, { Knight: 1, Rifle: 1 });
+    assert.ok(list[0].until > w.t, 'pending');
+    assert.ok(logged(w, /on the way home by themselves: .*counted as yours for 75 min/));
+    w.st.go(w.S.RunStep.Clear, 'test');
+    tick(w);
+    play(w);
+    assertStep(w, 'LastQuest');
+    list = transitOf(w);
+    assert.strictEqual(list.length, 1, 'one entry per run: ' + JSON.stringify(list));
+    assert.deepStrictEqual(list[0].army, { Knight: 1, Rifle: 1 });
+});
+
+t.test('transit: Account counts troops on the way home as owned; Retrain orders only the real loss', function () {
+    var w = homeWorld({ free: { Rifle: 10 } });
+    series(w, { step: w.S.RunStep.Account, run: { snapshot: { Rifle: 20 }, transit: travelling({ Rifle: 8 }, w.t + LONG_MS) } });
+    tick(w);
+    assertStep(w, 'Population');
+    assert.ok(logged(w, /lost: 2 Rifle/), 'lost logged');
+    assert.ok(logged(w, /on the way home, not counted as lost: 8 Rifle/));
+    drive(w, { until: at('Next') });
+    assertStep(w, 'Next');
+    assert.deepStrictEqual(ordersOf(w), ['Rifle 2']);
+});
+
+t.test('transit: troops seen landing at Population are retired once and nothing extra is ordered', function () {
+    var w = homeWorld({ free: { Rifle: 10 } });
+    series(w, { step: w.S.RunStep.Account, run: { snapshot: { Rifle: 20 }, transit: travelling({ Rifle: 8 }, w.t + LONG_MS) } });
+    tick(w);
+    assertStep(w, 'Population');
+    assert.deepStrictEqual(plain(w.st.run().transitBase), { Rifle: 10 }, 'Account set the base');
+    w.frees[HOME].Rifle += 8;
+    drive(w, { until: at('Next') });
+    assertStep(w, 'Next');
+    assert.ok(logged(w, /landed at home: 8 Rifle, no longer counted as on the way/));
+    assert.deepStrictEqual(transitOf(w), []);
+    assert.deepStrictEqual(ordersOf(w), ['Rifle 2']);
+});
+
+t.test('transit: past its until nothing counts as on the way and the loss is the full count', function () {
+    var w = homeWorld({ free: { Rifle: 10 } });
+    series(w, { step: w.S.RunStep.Account, run: { snapshot: { Rifle: 20 }, transit: travelling({ Rifle: 8 }, w.t + 1000) } });
+    w.t += 2000;
+    tick(w);
+    assertStep(w, 'Population');
+    assert.ok(logged(w, /lost: 10 Rifle/), 'the full loss');
+    assert.ok(!logged(w, /on the way home, not counted as lost/));
+    drive(w, { until: at('Next') });
+    assertStep(w, 'Next');
+    assert.deepStrictEqual(ordersOf(w), ['Rifle 10']);
+});
+
+t.test('transit: nextRun waits on an unreadable read; the next Snapshot adds the pending troops', function () {
+    var w = homeWorld();
+    var zone = w.H.host.game.zone;
+    var army = zone.GetArmy;
+    zone.GetArmy = function () { return null; };
+    series(w, { step: w.S.RunStep.Next, count: 2, run: { transit: travelling({ Rifle: 8 }, w.t + LONG_MS) } });
+    tick(w);
+    assertStep(w, 'Next');
+    waiting(w, /troops or production queues/);
+    assert.strictEqual(w.st.current().request.finished, 0, 'the run is not counted yet');
+    zone.GetArmy = army;
+    tick(w);
+    var r = w.st.run();
+    assert.strictEqual(r.step, w.S.RunStep.Muster, 'the next run begins');
+    assert.strictEqual(w.st.current().request.finished, 1);
+    assert.deepStrictEqual(plain(r.transitBase), { Rifle: 20 });
+    drive(w, { until: at('Supply') });
+    assertStep(w, 'Supply');
+    assert.deepStrictEqual(plain(w.st.run().snapshot), { Rifle: 28 });
+    assert.ok(logged(w, /snapshot: 28 Rifle \(on the way home: 8 Rifle\)/));
+    assert.strictEqual(w.st.run().transitBase, null, 'Snapshot drops the base on its exit');
+    assert.strictEqual(transitOf(w).length, 1, 'still on the way');
+});
+
+t.test('transit: troops landing before the next Snapshot are counted once there', function () {
+    var w = homeWorld();
+    series(w, { step: w.S.RunStep.Next, count: 2, run: { transit: travelling({ Rifle: 8 }, w.t + LONG_MS) } });
+    tick(w);
+    assert.deepStrictEqual(plain(w.st.run().transitBase), { Rifle: 20 });
+    w.frees[HOME].Rifle += 8;
+    drive(w, { until: at('Supply') });
+    assertStep(w, 'Supply');
+    assert.deepStrictEqual(plain(w.st.run().snapshot), { Rifle: 28 }, 'home total, no pending part');
+    assert.ok(logged(w, /landed at home: 8 Rifle/));
+    assert.deepStrictEqual(transitOf(w), []);
+    // After a map that lost nothing, Account finds no loss.
+    w.st.go(w.S.RunStep.Account, 'test');
+    drive(w, { until: at('Next') });
+    assertStep(w, 'Next');
+    assert.ok(logged(w, /lost: none/));
+    assert.strictEqual(w.productionOrders.length, 0);
+});
+
+t.test('transit: a landing during a Population pause is retired on the resumed pass; nextRun carries nothing', function () {
+    var w = homeWorld({ free: { Rifle: 10 }, pop: 0, population: 0 });
+    series(w, { step: w.S.RunStep.Population, count: 2,
+        run: { snapshot: { Rifle: 20 }, transit: travelling({ Rifle: 8 }, w.t + LONG_MS) } });
+    tick(w);
+    play(w);
+    assertPaused(w, w.S.RunPause.RetrainShort, /cannot retrain/);
+    w.frees[HOME].Rifle += 8;
+    w.pop = 5;
+    assert.strictEqual(w.S.modules.adventures.run.resume(), true);
+    drive(w, { until: at('Next') });
+    assertStep(w, 'Next');
+    assert.ok(logged(w, /landed at home: 8 Rifle/));
+    assert.deepStrictEqual(transitOf(w), []);
+    assert.deepStrictEqual(ordersOf(w), ['Rifle 2']);
+    tick(w);
+    var r = w.st.run();
+    assert.strictEqual(r.step, w.S.RunStep.Muster, 'the next run begins');
+    assert.deepStrictEqual(plain(r.transit), []);
+    assert.strictEqual(r.transitBase, null);
+});
+
+t.test('transit: Home Supply short but covered by troops on the way home waits, with no pause and no stop', function () {
+    var w = homeWorld({ free: { Rifle: 4 } });
+    w.queues[0].entries.push({ type: 'Rifle', amount: 1 });
+    series(w, { step: w.S.RunStep.Supply, finished: 1, count: 2,
+        run: { snapshot: { Rifle: 8 }, transit: travelling({ Rifle: 3 }, w.t + LONG_MS) } });
+    for (var i = 0; i < 5; i++) { tick(w); play(w); w.t += 60000; }
+    assertStep(w, 'Supply');
+    assert.ok(/^waiting for production: 4 Rifle \(part on the way home\)$/.test(w.st.run().blocker.reason),
+        w.st.run().blocker.reason);
+    assert.strictEqual(w.st.run().stopReason, null);
+    assert.strictEqual(w.raises.length, 0);
+});
+
+// A population buff whose send fails.
+function popBuffFails(w) {
+    var buffs = w.S.core.buffs;
+    var population = buffs.population;
+    buffs.population = function () {
+        var def = population.apply(buffs, arguments);
+        def.send = function () { return false; };
+        return def;
+    };
+}
+
+t.test('settlers only: too few population buffs skips retraining; off it pauses RetrainShort; a failed buff skips', function () {
+    var w = homeWorld({ free: { Rifle: 10 }, pop: 0, population: 0,
+        settings: { retrain: true, retrainSettlersOnly: true } });
+    series(w, { step: w.S.RunStep.Population, run: { snapshot: { Rifle: 20 } } });
+    tick(w);
+    play(w);
+    assertStep(w, 'Next');
+    assert.ok(logged(w, /retraining skipped: not enough settlers: .*population buffs in stock: 0/));
+    assert.ok(logged(w, /Population -> Next \(retrain skipped\)/));
+    assert.strictEqual(popBuffs(w).length, 0);
+    assert.strictEqual(w.productionOrders.length, 0);
+
+    w = homeWorld({ free: { Rifle: 10 }, pop: 0, population: 0 });
+    series(w, { step: w.S.RunStep.Population, run: { snapshot: { Rifle: 20 } } });
+    tick(w);
+    play(w);
+    assertPaused(w, w.S.RunPause.RetrainShort, /cannot retrain/);
+
+    w = homeWorld({ free: { Rifle: 10 }, pop: 4, settings: { retrain: true, retrainSettlersOnly: true } });
+    popBuffFails(w);
+    series(w, { step: w.S.RunStep.Population, run: { snapshot: { Rifle: 20 } } });
+    drive(w, { until: at('Next'), max: 60 });
+    assertStep(w, 'Next');
+    assert.ok(logged(w, /retraining skipped: population buff failed/));
+    assert.strictEqual(w.productionOrders.length, 0);
+});
+
+t.test('series stop: run 2 short at Supply with retrain off stops the series with the setting hint', function () {
+    var w = homeWorld({ free: { Rifle: 4 }, settings: { retrain: false } });
+    series(w, { step: w.S.RunStep.Supply, finished: 1, count: 3 });
+    tick(w);
+    assertStep(w, 'Supply');
+    w.t += w.S.modules.adventures.loader.READ_LAG_MS;
+    tick(w);
+    var r = w.st.run();
+    assert.strictEqual(r.status, w.S.RunStatus.Done, 'status ' + r.status);
+    assert.strictEqual(r.pause, null, 'no pause');
+    assert.ok(/^troops short: .*Retrain lost troops/.test(r.stopReason), r.stopReason);
+    assert.ok(/^Stopped:/.test(w.st.status()), w.st.status());
+    assert.ok(logged(w, /series stopped at /, 'warn'));
+    assert.strictEqual(w.S.modules.adventures.run.resume(), false);
+    assert.strictEqual(w.raises.length, 0);
+});
+
+t.test('series stop: run 1 short still pauses TroopsShort; run 2 with settlers only gives the settlers hint', function () {
+    var w = homeWorld({ free: { Rifle: 4 }, settings: { retrain: false } });
+    series(w, { step: w.S.RunStep.Supply, count: 2 });
+    tick(w);
+    w.t += w.S.modules.adventures.loader.READ_LAG_MS;
+    tick(w);
+    assertPaused(w, w.S.RunPause.TroopsShort, /troops short: /);
+    assert.strictEqual(w.st.run().stopReason, null);
+
+    w = homeWorld({ free: { Rifle: 4 }, settings: { retrain: true, retrainSettlersOnly: true } });
+    series(w, { step: w.S.RunStep.Supply, finished: 1, count: 2, run: { snapshot: { Rifle: 4 } } });
+    tick(w);
+    w.t += w.S.modules.adventures.loader.READ_LAG_MS;
+    tick(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done);
+    assert.ok(/lack of settlers/.test(w.st.run().stopReason), w.st.run().stopReason);
+});
+
+t.test('series stop: an unreadable free pool or short queue at run 2 Supply waits for the read, then stops', function () {
+    var w = homeWorld({ free: { Rifle: 4 }, settings: { retrain: false } });
+    var zone = w.H.host.game.zone;
+    var army = zone.GetArmy;
+    zone.GetArmy = function () { return null; };
+    series(w, { step: w.S.RunStep.Supply, finished: 1, count: 2 });
+    tick(w);
+    W.ticksFor(w, w.S.modules.adventures.loader.READ_LAG_MS + LONG_MS);
+    assertStep(w, 'Supply');
+    assert.strictEqual(w.st.run().stopReason, null);
+    assert.ok(w.st.current().busy, 'a read wait is recorded');
+    zone.GetArmy = army;
+    tick(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done, 'stopped once the pool reads short');
+    assert.ok(/Retrain lost troops/.test(w.st.run().stopReason), w.st.run().stopReason);
+
+    w = homeWorld({ free: { Rifle: 4 }, settings: { retrain: false } });
+    var pzone = w.gi.mCurrentPlayerZone;
+    var queue = pzone.GetProductionQueue;
+    pzone.GetProductionQueue = function () { return null; };
+    series(w, { step: w.S.RunStep.Supply, finished: 1, count: 2 });
+    tick(w);
+    W.ticksFor(w, w.S.modules.adventures.loader.READ_LAG_MS + LONG_MS);
+    assertStep(w, 'Supply');
+    waiting(w, /production queue of Rifle/);
+    assert.strictEqual(w.st.run().stopReason, null);
+    pzone.GetProductionQueue = queue;
+    tick(w);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Done, 'stopped once the queue reads');
 });
 
 // ---- 21. Busy waits -----------------------------------------------------------------

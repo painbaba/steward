@@ -191,7 +191,8 @@ function homeStock(o, popName) {
 // o.generals: AC.general list (the viewed zone's specialist list, mutable
 // through w.fighters); o.free: free pool map; o.camps: grid -> true (enemy)
 // or 'own'; o.quests: [{ key, name, finished, last, unread }] or null (unreadable);
-// o.fs: an airfs disk to boot on (fresh boot on the same disk).
+// o.fs: an airfs disk to boot on (fresh boot on the same disk); o.settings:
+// the module's stored settings, written right after boot.
 //
 // o.home (off by default) builds two zones, HOME (viewed at start, holding
 // o.generals and o.free) and ZONE (o.away generals, o.awayFree pool):
@@ -248,6 +249,9 @@ function world(o) {
     var alerts = [];
     var H = harness.boot({ host: { air: fs.air, showGameAlert: function (m) { alerts.push(m); } } });
     var S = H.Steward;
+    if (o.settings && typeof o.settings === 'object' && !Array.isArray(o.settings)) {
+        S.kernel.settings.write('adventures', o.settings);
+    }
     var home = o.home === true;
     var fighters = (o.generals || []).slice(0);
     var units = A.unitCatalogue([], ['Rifle', 'Bow']);

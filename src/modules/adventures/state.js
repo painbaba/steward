@@ -54,8 +54,9 @@
  * restarts the wave at Gate, an unknown status pauses the run, and a run
  * without its loadout keys pauses until the user stops and starts it again.
  * A file written before the series fields existed loads with their newRun
- * defaults (no snapshot, no marks, no runs finished). A run file without
- * retrain reads as true, which is what such a run did.
+ * defaults (no snapshot, no marks, no runs finished). A retrain key in a
+ * run file is ignored: whether a run retrains is the module setting, read
+ * when the run reaches the steps that count and order troops.
  *
  * Resume re-enters the paused step with fresh rounds and a fresh start time,
  * after the user has looked at the game. A wave step restarts its wave at
@@ -395,12 +396,16 @@
         return rows;
     }
 
-    // Whether this run skips the stage of an option. A run started on an open
-    // map took no snapshot once it is past that step, so it retrains nothing.
+    // Whether this run skips the stage of an option. Retraining follows the
+    // module setting, read now so a change shows at once; a bundle without
+    // the settings reader reads as off. A run started on an open map took no
+    // snapshot once it is past that step, so it retrains nothing.
     function optionOff(r, option) {
         if (option === OPT_HORSESHOE) return r.speedBuff === S.SpeedBuffChoice.None;
         if (option === OPT_RETRAIN) {
-            return r.retrain === false || (!r.snapshot && position(r.step) > position(S.RunStep.Snapshot));
+            var a = S.modules.adventures;
+            return !(a.retrainOn && a.retrainOn()) ||
+                (!r.snapshot && position(r.step) > position(S.RunStep.Snapshot));
         }
         return false;
     }
@@ -490,7 +495,10 @@
             if (runCmd && runCmd.statusText) return runCmd.statusText(rs.request);
             return 'Requested: ' + rs.request.label;
         }
-        if (r.status === S.RunStatus.Done) return 'Done: ' + r.label + ', ' + finishedRuns() + ' run(s)';
+        if (r.status === S.RunStatus.Done) {
+            if (r.stopReason) return 'Stopped: ' + r.label + ', ' + finishedRuns() + ' run(s): ' + r.stopReason;
+            return 'Done: ' + r.label + ', ' + finishedRuns() + ' run(s)';
+        }
         var where = runPart(r) + ', ' + (isWaveStep(r.step) ? waveLabel() + ', ' : '') + stepName(r.step);
         if (r.status === S.RunStatus.Paused) {
             return 'Paused: ' + where + ': ' + (r.pause ? r.pause.message : '');
@@ -575,6 +583,21 @@
         return out;
     }
 
+    // The travelling troops: entries with a run id, an end time and a troop
+    // map are kept; anything else cannot be counted and is dropped.
+    function normTransit(v) {
+        var out = [];
+        if (!isArray(v)) return out;
+        for (var i = 0; i < v.length; i++) {
+            var e = v[i];
+            if (!isPlainObject(e) || num(e.from) === null || num(e.until) === null) continue;
+            var army = normArmy(e.army);
+            if (army === null) continue;
+            out.push({ from: e.from, army: army, until: e.until });
+        }
+        return out;
+    }
+
     // round, cache, questRetry and the read windows belong to the run they
     // were built for; a new request, a new run or a loaded file starts
     // without them.
@@ -595,12 +618,12 @@
 
     // The only literal of the run object. start holds the facts fixed at
     // start: { id, templateId, label, adventure, zoneId, paths, loadoutPath,
-    // loadoutKeys, waveIndex, speedBuff, retrain } and optionally the first step
+    // loadoutKeys, waveIndex, speedBuff } and optionally the first step
     // (Gate when it is no step); every progress field takes its start value.
     // start may be omitted for the default shape.
     //
     // speedBuff is the template's choice as written and is resolved when it
-    // is used. retrain is true unless the start says false. snapshot is the army counted at home before loading (null:
+    // is used. snapshot is the army counted at home before loading (null:
     // none). marks are the send markers of the series steps, in the shape of
     // lines. waitUntil is the deadline of the step that is waiting. popBase
     // is the free population read before the last population buff, so the
@@ -611,6 +634,13 @@
     // trips taken at one stuck position ({ step, wave, trips }; null: none).
     // homeGrids maps a loadout key to the home grid he was last seen on, so
     // Deploy can place him back from the star menu ({}: none known).
+    // transit is the free troops left on earlier islands that travel home by
+    // themselves, { from, army, until } each (from: the id of the run that
+    // left them), counted as owned until until or until they are seen
+    // landing. transitBase is the home count (free pool, generals and queue)
+    // per travelling unit at the last read where only a landing could raise
+    // it (null: no valid read). stopReason is the reason the series was
+    // stopped (null: not stopped).
     function newRun(start) {
         var s = isPlainObject(start) ? start : {};
         var t = clock();
@@ -626,7 +656,6 @@
             loadoutKeys: isPlainObject(s.loadoutKeys) ? s.loadoutKeys : {},
             waveIndex:   count(s.waveIndex),
             speedBuff:   str(s.speedBuff),
-            retrain:     s.retrain !== false,
             step:        isStep(s.step) ? s.step : S.WaveStep.Gate,
             status:      S.RunStatus.Running,
             since:       t,
@@ -644,6 +673,9 @@
             resolve:     null,
             stuck:       null,
             homeGrids:   normGrids(s.homeGrids),
+            transit:     normTransit(s.transit),
+            transitBase: isPlainObject(s.transitBase) ? normArmy(s.transitBase) : null,
+            stopReason:  null,
             pause:       null
         };
     }
@@ -763,8 +795,7 @@
             loadoutPath: str(v.loadoutPath),
             loadoutKeys: normKeys(v.loadoutKeys),
             waveIndex:   count(v.waveIndex),
-            speedBuff:   str(v.speedBuff),
-            retrain:     v.retrain !== false
+            speedBuff:   str(v.speedBuff)
         };
         var r = newRun(facts);
         var k;
@@ -789,6 +820,9 @@
         r.resolve    = normResolve(v.resolve);
         r.stuck      = normStuck(v.stuck);
         r.homeGrids  = normGrids(v.homeGrids);
+        r.transit    = normTransit(v.transit);
+        r.transitBase = isPlainObject(v.transitBase) ? normArmy(v.transitBase) : null;
+        r.stopReason = typeof v.stopReason === 'string' && v.stopReason ? v.stopReason : null;
         r.pause      = normPause(v.pause);
         for (k in facts) {
             if (has(facts, k)) r[k] = facts[k];
@@ -1028,23 +1062,159 @@
         if (!rs.busySeen) rs.busy = null;
     }
 
+    // Ends the series: the run stays as Done, so Resume refuses it and Stop
+    // run clears it.
+    function finish(r, rs) {
+        r.status = S.RunStatus.Done;
+        r.pause = null;
+        rs.round = null;
+        rs.cache = null;
+        save();
+        refresh();
+        // This runs inside plan(), which may not rebuild a menu. A hide only moves
+        // the item out of the bar, so no rebuild comes from the tick.
+        syncMenu();
+    }
+
     // The series is done: every requested run has finished.
     function done() {
         var rs = current();
         var r = rs.run;
         if (!r) return false;
-        r.status = S.RunStatus.Done;
-        r.pause = null;
-        rs.round = null;
-        rs.cache = null;
         S.kernel.log('adventures', 'series done: ' + r.label + ' (' + finishedRuns() + ' run(s))');
-        save();
+        finish(r, rs);
         notify('Adventure series done: ' + r.label + '.');
-        refresh();
-        // This runs inside plan(), which may not rebuild a menu. A hide only moves
-        // the item out of the bar, so no rebuild comes from the tick.
-        syncMenu();
         return true;
+    }
+
+    // The series cannot go on: a later run would start short of troops. It
+    // ends as Done with the reason kept, so the menu and the status line say
+    // why and what to change before the next start. The step is named before
+    // the run ends, while it still says where the run stood.
+    function stop(message) {
+        var rs = current();
+        var r = rs.run;
+        if (!r) return false;
+        var lbl = label();
+        var why = str(message);
+        r.stopReason = why;
+        finish(r, rs);
+        S.kernel.warn('adventures', 'series stopped at ' + lbl + ' after ' + finishedRuns() + ' run(s): ' + why);
+        notify('Adventure series stopped: ' + why);
+        return true;
+    }
+
+    // ---- Travelling troops --------------------------------------------------
+
+    // The live entries still on the way: not past their end time and not
+    // empty, on the clock of the run.
+    function pendingEntries(r) {
+        var out = [];
+        var list = r && isArray(r.transit) ? r.transit : [];
+        var t = clock();
+        for (var i = 0; i < list.length; i++) {
+            var e = list[i];
+            if (e && e.until > t && S.core.army.total(e.army) > 0) out.push(e);
+        }
+        return out;
+    }
+
+    // The troops on the way home: { army, entries }, with copies of the
+    // pending entries and their sum, so a caller cannot change the record.
+    function transit(r) {
+        var live = pendingEntries(r);
+        var entries = [];
+        var army = {};
+        for (var i = 0; i < live.length; i++) {
+            entries.push({ from: live[i].from, army: S.core.army.add(live[i].army), until: live[i].until });
+            army = S.core.army.add(army, live[i].army);
+        }
+        return { army: army, entries: entries };
+    }
+
+    // Records what one run left on its island. A repeated exit of the same
+    // run replaces its entry, so the same troops are never counted twice.
+    // No save: the caller's step change saves.
+    function noteTransit(r, army, until) {
+        if (!r) return false;
+        var kept = [];
+        var list = isArray(r.transit) ? r.transit : [];
+        for (var i = 0; i < list.length; i++) {
+            if (list[i] && list[i].from !== r.id) kept.push(list[i]);
+        }
+        if (S.core.army.total(army) > 0) kept.push({ from: r.id, army: S.core.army.add(army), until: until });
+        r.transit = kept;
+        return true;
+    }
+
+    function byUntil(a, b) {
+        return a.until - b.until;
+    }
+
+    // Retires travelling troops seen at home. owned is the home count
+    // ({ unit: n }: free pool, generals and queue) of each travelling unit.
+    // A rise against transitBase, the count of the last read where only a
+    // landing could raise it, is taken as landed troops, up to what is
+    // pending, and comes off the entries that end first. The base rises by
+    // the same amount, so a second call with the same count lands nothing,
+    // and a reload between the change and its save stays consistent because
+    // entries and base are written together. The live entries are changed,
+    // not the copies transit() hands out. Returns the landed map ({}: none).
+    // No save: the caller's step change saves.
+    function landTransit(r, owned) {
+        var landed = {};
+        if (!r) return landed;
+        var have = isPlainObject(owned) ? owned : {};
+        var pend = transit(r).army;
+        var units = [];
+        var u;
+        for (u in pend) {
+            if (has(pend, u)) units.push(u);
+        }
+        if (!units.length) {
+            r.transitBase = null;
+            return landed;
+        }
+        units.sort();
+        var i;
+        if (!isPlainObject(r.transitBase)) {
+            var first = {};
+            for (i = 0; i < units.length; i++) {
+                if (num(have[units[i]]) !== null) first[units[i]] = have[units[i]];
+            }
+            r.transitBase = first;
+            return landed;
+        }
+        var base = r.transitBase;
+        var live = pendingEntries(r).sort(byUntil);
+        for (i = 0; i < units.length; i++) {
+            u = units[i];
+            if (num(have[u]) === null) continue;
+            if (num(base[u]) === null) {
+                base[u] = have[u];
+                continue;
+            }
+            var rise = have[u] - base[u];
+            if (rise <= 0) continue;
+            var land = Math.min(rise, pend[u]);
+            var left = land;
+            for (var j = 0; j < live.length && left > 0; j++) {
+                var n = live[j].army[u];
+                if (!(n > 0)) continue;
+                var take = Math.min(left, n);
+                if (n - take > 0) live[j].army[u] = n - take;
+                else delete live[j].army[u];
+                left -= take;
+            }
+            base[u] += land;
+            landed[u] = land;
+        }
+        var kept = [];
+        for (i = 0; i < r.transit.length; i++) {
+            if (S.core.army.total(r.transit[i].army) > 0) kept.push(r.transit[i]);
+        }
+        r.transit = kept;
+        return landed;
     }
 
     // A script reload always resets the queue, while the module namespace and
@@ -1073,6 +1243,10 @@
         passBegins:    passBegins,
         passEnds:      passEnds,
         done:          done,
+        stop:          stop,
+        transit:       transit,
+        noteTransit:   noteTransit,
+        landTransit:   landTransit,
         now:           now,
         nameOf:        nameOf,
         status:        status,

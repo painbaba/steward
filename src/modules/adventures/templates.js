@@ -13,9 +13,9 @@
  * ignored. Any file in the folder whose base name matches ID_RE and ends in
  * EXT is a template, so a file shared by someone else can simply be dropped
  * in. File format: JSON.stringify of
- *   { version, label, adventure, loadout, waves, speedBuff, retrain, saved }
- * indented, so it stays readable and shareable. A file without `retrain` was
- * written before the option existed and reads as true, the behaviour it had.
+ *   { version, label, adventure, loadout, waves, speedBuff, saved }
+ * indented, so it stays readable and shareable. An older file may carry a
+ * `retrain` key; it is ignored, because retraining is a module setting.
  *
  * A file that cannot be read or parsed is listed as a broken entry
  * { id, path, error } instead of being skipped, so the user sees it and can
@@ -133,7 +133,6 @@
             loadout:   str(rec.loadout),
             waves:     waves,
             speedBuff: speedBuffChoice(rec),
-            retrain:   rec.retrain !== false,
             saved:     typeof rec.saved === 'number' ? rec.saved : null
         };
     }
@@ -157,7 +156,6 @@
             loadout:   data.loadout,
             waves:     data.waves,
             speedBuff: data.speedBuff,
-            retrain:   data.retrain,
             saved:     data.saved
         });
         rec.id = id;
@@ -173,7 +171,6 @@
             loadout:   rec.loadout,
             waves:     rec.waves,
             speedBuff: rec.speedBuff,
-            retrain:   rec.retrain,
             saved:     rec.saved
         }, null, 2);
     }

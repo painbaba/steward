@@ -203,8 +203,7 @@
             loadoutKeys: chk.loadoutKeys,
             waveIndex:   waveIndex,
             step:        step,
-            speedBuff:   S.modules.adventures.templates.speedBuffChoice(rec),
-            retrain:     rec.retrain
+            speedBuff:   S.modules.adventures.templates.speedBuffChoice(rec)
         });
     }
 

@@ -4,8 +4,10 @@
  * Stored under steward.adventures. Shape:
  *
  *   {
- *     lastDir:      '',
- *     stuckMinutes: 45
+ *     lastDir:             '',
+ *     stuckMinutes:        45,
+ *     retrain:             false,
+ *     retrainSettlersOnly: false
  *   }
  *
  * `lastDir` is the folder the battle-file picker last opened from, so the
@@ -17,9 +19,21 @@
  * edited in the Adventures section of the Settings screen. `stuckMinutes()`
  * is the reader the trip uses.
  *
+ * `retrain` switches retraining of the troops lost on a map on or off for
+ * every run. It is read again each time a run reaches Snapshot, Account,
+ * Population and Retrain, so a change takes effect in the middle of a run.
+ * A `retrain` key in an older template file or run file is ignored, because
+ * this setting alone decides. `retrainOn()` is its reader.
+ *
+ * `retrainSettlersOnly`, while retraining is on, skips retraining and moves
+ * on instead of pausing when free settlers cannot cover the orders and
+ * cannot be topped up with a population buff. `retrainSettlersOnly()` is its
+ * reader. Both switches default to off, and any stored value that is not
+ * exactly `true` reads as off, so a hand-edited file never turns them on.
+ *
  * Run templates are not settings: each one is its own JSON file under the
  * steward folder (see templates.js), so they can be shared and survive a
- * profile switch. Both module settings are scalars that are only ever
+ * profile switch. All module settings are scalars that are only ever
  * overwritten, never removed, so the host's merging write is correct for
  * them. One known overlap: the Settings screen snapshots the adventures
  * buffer when it is first used, so a `lastDir` the template dialog writes
@@ -44,9 +58,19 @@
     if (!S.modules.adventures) S.modules.adventures = {};
 
     S.modules.adventures.defaultSettings = {
-        lastDir:      '',
-        stuckMinutes: 45
+        lastDir:             '',
+        stuckMinutes:        45,
+        retrain:             false,
+        retrainSettlersOnly: false
     };
+
+    // The stored settings with the defaults filled in (the defaults alone
+    // while templates.js is not loaded yet), so every reader below sees the
+    // same values.
+    function settingsNow() {
+        var a = S.modules.adventures;
+        return a.templates && a.templates.settings ? a.templates.settings() : a.defaultSettings;
+    }
 
     // A stored limit that is not a usable minute count falls back to the
     // default, so a hand-edited or missing value never disables the trip.
@@ -72,20 +96,42 @@
                 }
             }
         }), 'a step on the island waiting this long goes home and back; 0 = off'));
+
+        $body.append(h.formRow('Retrain lost troops', h.toggle({
+            checked:  s.retrain === true,
+            onChange: function (on) { h.update('adventures', { retrain: !!on }); }
+        }), 'after each map, order the troops lost on it'));
+
+        $body.append(h.formRow('Only retrain with enough settlers', h.toggle({
+            checked:  s.retrainSettlersOnly === true,
+            onChange: function (on) { h.update('adventures', { retrainSettlersOnly: !!on }); }
+        }), 'too few settlers and no population buff: skip retraining instead of pausing'));
     };
 
-    // The stored stuck-step limit in minutes, read with the defaults filled in
-    // (the defaults alone while templates.js is not loaded yet). The trip and
-    // the Settings summary both read it here, so they never disagree.
+    // The stored stuck-step limit in minutes. The trip and the Settings
+    // summary both read it here, so they never disagree.
     S.modules.adventures.stuckMinutes = function () {
-        var a = S.modules.adventures;
-        return minutesOf(a.templates && a.templates.settings ? a.templates.settings() : a.defaultSettings);
+        return minutesOf(settingsNow());
     };
 
-    // Section summary, from the same limit the trip uses.
+    // Whether lost troops are retrained. The run steps, the run state and the
+    // summary all read it here; only a stored `true` switches it on.
+    S.modules.adventures.retrainOn = function () {
+        return settingsNow().retrain === true;
+    };
+
+    // Whether a settler shortage skips retraining instead of pausing the run.
+    S.modules.adventures.retrainSettlersOnly = function () {
+        return settingsNow().retrainSettlersOnly === true;
+    };
+
+    // Section summary, from the same readers the run uses.
     S.modules.adventures.settingsSummary = function () {
-        var m = S.modules.adventures.stuckMinutes();
-        return m > 0 ? 'stuck limit ' + m + ' min' : 'stuck limit off';
+        var a = S.modules.adventures;
+        var m = a.stuckMinutes();
+        var text = m > 0 ? 'stuck limit ' + m + ' min' : 'stuck limit off';
+        if (!a.retrainOn()) return text + ', retrain off';
+        return text + (a.retrainSettlersOnly() ? ', retrain on, settlers only' : ', retrain on');
     };
 
 }(Steward));

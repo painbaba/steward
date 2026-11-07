@@ -25,9 +25,13 @@
  *
  * The troops at home are counted before the load (free pool plus every
  * general plus what is still queued), so after the map the lost troops are
- * exactly that count minus the same count now. Population and Retrain
- * recompute what is missing from the game on every pass, so an order that
- * reached the queue drops out of the plan by itself.
+ * exactly that count minus the same count now. Free troops still on the way
+ * home from an earlier island count as owned in both, until they expire or
+ * are seen landing, so they are neither retrained nor counted twice.
+ * Population and Retrain recompute what is missing from the game on every
+ * pass, so an order that reached the queue drops out of the plan by itself.
+ * Whether lost troops are retrained at all follows the module setting, read
+ * each time a step needs it, so a change applies to the running run.
  *
  * Bundle slot: module file; top level only assigns
  * S.modules.adventures.home; state, loader, executor and every core are read
@@ -94,6 +98,54 @@
 
     function loadoutLines(r) {
         return ld().linesOf(r, r.loadoutPath, -1, 'loadout');
+    }
+
+    // The module settings, read late: settings.js may be missing from a
+    // partial load, and a missing reader reads as off.
+    function retrainOn() {
+        var a = S.modules.adventures;
+        return typeof a.retrainOn === 'function' && a.retrainOn() === true;
+    }
+
+    function settlersOnly() {
+        var a = S.modules.adventures;
+        return typeof a.retrainSettlersOnly === 'function' && a.retrainSettlersOnly() === true;
+    }
+
+    // ---- Troops on the way home ---------------------------------------------
+
+    function pendingTransit(r) {
+        return st().transit(r).army;
+    }
+
+    // Home count (free pool, generals and queue) of each unit of army, or
+    // null while the troops or any of those queues cannot be read.
+    function ownedOf(inv, army) {
+        if (!inv.ok) return null;
+        var out = {};
+        for (var u in army) {
+            if (!has(army, u)) continue;
+            var q = S.core.production.queued(u);
+            if (typeof q !== 'number') return null;
+            out[u] = (inv.total[u] || 0) + q;
+        }
+        return out;
+    }
+
+    // Retires travelling troops that this read shows at home. An unreadable
+    // read changes nothing; the caller's own read wait follows.
+    function settleTransit(r, inv) {
+        var pend = pendingTransit(r);
+        if (S.core.army.total(pend) <= 0) {
+            r.transitBase = null;
+            return;
+        }
+        var o = ownedOf(inv, pend);
+        if (!o) return;
+        var landed = st().landTransit(r, o);
+        if (S.core.army.total(landed) > 0) {
+            log('landed at home: ' + S.core.army.text(landed) + ', no longer counted as on the way');
+        }
     }
 
     // ---- Gathering ----------------------------------------------------------
@@ -368,15 +420,21 @@
 
     // Troops at home per loadout unit, free pool plus generals plus queued.
     // A snapshot already taken (a resume or a reload) is kept: the troops may
-    // have moved since.
+    // have moved since. Troops still on the way home from an earlier island
+    // are added to it, so ones landing during this map do not hide its
+    // losses; ones that landed already are retired first and counted once.
+    // Every exit to Supply drops the arrival base, because troops leave home
+    // from then on and a fall or rise no longer means a landing.
     function snapshot(r, inv) {
         // Only Account, Population and Retrain read the snapshot, and taking it
         // can hold or pause the run, so a run that retrains nothing skips it.
-        if (r.retrain === false) {
+        if (!retrainOn()) {
+            r.transitBase = null;
             st().go(S.RunStep.Supply, 'retrain off');
             return;
         }
         if (r.snapshot) {
+            r.transitBase = null;
             st().go(S.RunStep.Supply, 'snapshot kept');
             return;
         }
@@ -389,6 +447,8 @@
             ld().waitRead(r, 'troops');
             return;
         }
+        settleTransit(r, inv);
+        var pend = pendingTransit(r);
         var units = loadoutUnits(ln.lines);
         var snap = {};
         for (var i = 0; i < units.length; i++) {
@@ -397,10 +457,12 @@
                 ld().waitRead(r, 'production queue of ' + units[i]);
                 return;
             }
-            snap[units[i]] = (inv.total[units[i]] || 0) + q;
+            snap[units[i]] = (inv.total[units[i]] || 0) + q + (pend[units[i]] || 0);
         }
         r.snapshot = snap;
-        log('snapshot: ' + S.core.army.text(snap));
+        r.transitBase = null;
+        log('snapshot: ' + S.core.army.text(snap) +
+            (S.core.army.total(pend) > 0 ? ' (on the way home: ' + S.core.army.text(pend) + ')' : ''));
         st().go(S.RunStep.Supply, 'troops counted');
     }
 
@@ -415,11 +477,32 @@
         return S.core.battles.supplyWave(ln.lines);
     }
 
-    // Troops still in production are waited for: at home the queue fills the
-    // free pool by itself.
+    // What a series stopped for short troops tells the user to change.
+    function shortHint() {
+        if (!retrainOn()) {
+            return 'turn on "Retrain lost troops" in Settings > Adventures, then start the run again';
+        }
+        if (settlersOnly()) {
+            return 'lost troops were not retrained for lack of settlers; add settlers or population buffs, ' +
+                'or turn off "Only retrain with enough settlers", then start the run again';
+        }
+        return 'the lost troops were not replaced; check the barracks, then start the run again';
+    }
+
+    // Troops still in production, and free troops on the way home from an
+    // earlier island, are waited for: at home both fill the free pool by
+    // themselves. From the second run on, troops short at home mean the
+    // earlier maps' losses were not replaced, which no Resume can fix, so the
+    // series stops instead of pausing. The loader calls onShort only on a
+    // readable count.
     function supplyStep(r, inv) {
         var sup = loadoutSupply(r);
-        if (sup) ld().supply(r, sup, inv, homeSteps(), { waitQueued: true, waitMaxMs: PRODUCTION_WAIT_MAX_MS });
+        if (!sup) return;
+        var opts = { waitQueued: true, waitMaxMs: PRODUCTION_WAIT_MAX_MS, transit: pendingTransit(r) };
+        if (st().finishedRuns() >= 1) {
+            opts.onShort = function (message) { st().stop(message + '; ' + shortHint()); };
+        }
+        ld().supply(r, sup, inv, homeSteps(), opts);
     }
 
     function loadOrders(r, inv) {
@@ -576,18 +659,21 @@
     }
 
     // Troops missing against the snapshot, from the game as it is now:
-    // { ok, orders: [{ unit, count }], lost: { unit: n } }. ok is false while
-    // any count cannot be read.
+    // { ok, orders: [{ unit, count }], lost: { unit: n }, transit: { unit: n } }.
+    // Troops on the way home count as owned, and transit names them. ok is
+    // false while any count cannot be read.
     function missing(r, inv) {
-        var out = { ok: false, orders: [], lost: {} };
+        var out = { ok: false, orders: [], lost: {}, transit: {} };
         if (!inv.ok || !r.snapshot) return out;
+        var pend = pendingTransit(r);
+        out.transit = pend;
         var units = [];
         for (var u in r.snapshot) if (has(r.snapshot, u)) units.push(u);
         units.sort();
         for (var i = 0; i < units.length; i++) {
             var q = S.core.production.queued(units[i]);
             if (typeof q !== 'number') return out;
-            var n = r.snapshot[units[i]] - ((inv.total[units[i]] || 0) + q);
+            var n = r.snapshot[units[i]] - ((inv.total[units[i]] || 0) + q + (pend[units[i]] || 0));
             if (n > 0) {
                 out.orders.push({ unit: units[i], count: n });
                 out.lost[units[i]] = n;
@@ -597,24 +683,38 @@
         return out;
     }
 
+    // The setting is read first, so turning it off skips a snapshot already
+    // taken as well.
     function account(r, inv) {
+        if (!retrainOn()) {
+            log('retrain off; retraining skipped');
+            st().go(S.RunStep.Next, 'retrain off');
+            return;
+        }
         if (!r.snapshot) {
-            if (r.retrain === false) {
-                log('retrain off; retraining skipped');
-                st().go(S.RunStep.Next, 'retrain off');
-                return;
-            }
             log('no troop snapshot (run started on an open map); retraining skipped');
             st().go(S.RunStep.Next, 'no snapshot');
             return;
         }
+        settleTransit(r, inv);
         var m = missing(r, inv);
         if (!m.ok) {
             ld().waitRead(r, 'troops or production queues');
             return;
         }
         log('lost: ' + (m.orders.length ? S.core.army.text(m.lost) : 'none'));
+        if (S.core.army.total(m.transit) > 0) {
+            log('on the way home, not counted as lost: ' + S.core.army.text(m.transit));
+        }
         st().go(S.RunStep.Population, 'troops counted');
+    }
+
+    // Moves on without retraining, for the settlers-only setting: the user
+    // chose to skip a retrain that free settlers cannot pay for.
+    function skipRetrain(r, why) {
+        ld().dropMark(r, 'population');
+        log('retraining skipped: ' + why);
+        st().go(S.RunStep.Next, 'retrain skipped');
     }
 
     function shortText(list) {
@@ -629,9 +729,17 @@
     // buffs as the stock allows. A buff counts only once free population has
     // risen above the value read before it: a buff the game confirms but
     // that does not raise free population pauses, so the stock is never
-    // spent buff after buff.
+    // spent buff after buff. With the settlers-only setting on, a population
+    // shortfall that cannot be topped up (too few buffs, or a buff that
+    // fails or shows no rise) skips retraining instead of pausing; a
+    // shortage of any other cost still pauses.
     function population(r, inv) {
         var RS = S.RunStep;
+        if (!retrainOn()) {
+            st().go(RS.Next, 'retrain off');
+            return;
+        }
+        settleTransit(r, inv);
         var m = missing(r, inv);
         if (!m.ok) {
             ld().waitRead(r, 'troops or production queues');
@@ -684,12 +792,20 @@
                     ld().waitSent(r, 'population buff');
                     return;
                 }
+                if (settlersOnly()) {
+                    skipRetrain(r, 'population buff verified but free population did not rise');
+                    return;
+                }
                 st().pause(S.RunPause.RetrainFailed, 'population buff verified but free population did not rise');
                 return;
             }
             var s = ld().staleMark(r, 'population', 'population buff');
             if (s === 'wait') return;
             if (s === 'stale') {
+                if (settlersOnly()) {
+                    skipRetrain(r, 'population buff sent but free population did not rise');
+                    return;
+                }
                 st().pause(S.RunPause.NotObserved,
                     'population buff sent but free population did not rise; check the star menu, then Resume');
                 return;
@@ -702,11 +818,20 @@
             return;
         }
         if (popShort > stock.total) {
+            if (settlersOnly()) {
+                skipRetrain(r, 'not enough settlers: ' + shortText(j) +
+                    ' (population buffs in stock: ' + stock.total + ')');
+                return;
+            }
             st().pause(S.RunPause.RetrainShort, 'cannot retrain: ' + shortText(j) +
                 ' (population buffs in stock: ' + stock.total + ')');
             return;
         }
         var next = ld().settleRound(r, RS.Population, function (f) {
+            if (settlersOnly()) {
+                skipRetrain(r, 'population buff failed: ' + f.reason);
+                return;
+            }
             st().pause(S.RunPause.RetrainFailed, 'population buff failed: ' + f.reason);
         }, 'population buff');
         if (next !== 'new') return;
@@ -730,6 +855,13 @@
     // until then, so a queue that lags gets no second order.
     function retrain(r, inv) {
         var RS = S.RunStep;
+        if (!retrainOn()) {
+            st().go(RS.Next, 'retrain off');
+            return;
+        }
+        // Orders raise the queue from here on, so a rise of the home count no
+        // longer means troops landed.
+        r.transitBase = null;
         var m = missing(r, inv);
         if (!m.ok) {
             ld().waitRead(r, 'troops or production queues');
@@ -778,14 +910,28 @@
     // Counts the run and starts the next one at Muster, or ends the series.
     // The counter is saved together with the new run (begin) or the done
     // state, so a reload in between repeats this step instead of counting a
-    // run twice.
-    function nextRun(r) {
+    // run twice. Troops still on the way home go with the new run, together
+    // with their home count now, so the new run's Snapshot can tell troops
+    // that land in between from ones still travelling. That count is waited
+    // for, since without it a landing before Snapshot would be counted twice.
+    function nextRun(r, inv) {
         var q = st().current().request;
         var finished = st().finishedRuns() + 1;
         var total = st().requestedRuns();
+        var last = !q || finished >= total;
+        var carried = last ? [] : st().transit(r).entries;
+        var base = null;
+        if (carried.length) {
+            // Before the counter changes, so the wait repeats this step only.
+            base = ownedOf(inv, pendingTransit(r));
+            if (!base) {
+                ld().waitRead(r, 'troops or production queues');
+                return;
+            }
+        }
         if (q) q.finished = finished;
         S.kernel.log(CATEGORY, 'run ' + finished + '/' + total + ' done: ' + r.label);
-        if (!q || finished >= total) {
+        if (last) {
             st().done();
             return;
         }
@@ -802,7 +948,8 @@
             waveIndex:   0,
             step:        S.RunStep.Muster,
             speedBuff:   r.speedBuff,
-            retrain:     r.retrain,
+            transit:     carried,
+            transitBase: base,
             homeGrids:   r.homeGrids
         }));
         S.kernel.log(CATEGORY, 'run ' + (finished + 1) + '/' + total + ' begins: ' + r.label);

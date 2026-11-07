@@ -211,7 +211,6 @@
         var buffName = T().resolveSpeedBuff(rec, buffs);
         var buffText = buffName === null ? 'No horseshoe'
             : 'Horseshoe: ' + T().buffLabel(buffs, buffName);
-        if (rec.retrain === false) buffText += ', no retrain';
         var adventure = S.core.adventures.label(rec.adventure) || rec.adventure;
         var $btns = $('<span>');
         $btns.append(btn('Edit', act(function () { editTemplate(rec.id); })));
@@ -519,10 +518,6 @@
                 }
             }
         }
-        $c.append(h.formRow('Retrain lost troops', h.toggle({
-            checked: draft.retrain !== false,
-            onChange: function (on) { draft.retrain = on; }
-        })));
 
         var $btns = $('<span>');
         $btns.append(btn('Save', function () { saveDraft($label); }));

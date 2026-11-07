@@ -46,7 +46,8 @@ function homeWorld(o) {
     o = o || {};
     var g1 = gen('1.1', 'Anna', 10);
     var g2 = gen('1.2', 'Bert', 20);
-    var opts = { home: true, generals: [g1, g2], free: { Rifle: 20, Bow: 0 } };
+    var opts = { home: true, generals: [g1, g2], free: { Rifle: 20, Bow: 0 },
+        settings: { retrain: true } };
     for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) opts[k] = o[k];
     var w = W.world(opts);
     w.g1 = g1;
@@ -111,7 +112,8 @@ function restart(w) {
     var viewed = w.gi.mCurrentViewedZoneID;
     var w2 = W.world({
         home: true, fs: w.fs, generals: w.lists[HOME], away: w.lists[ZONE],
-        free: w.frees[HOME], awayFree: w.frees[ZONE]
+        free: w.frees[HOME], awayFree: w.frees[ZONE],
+        settings: w.S.kernel.settings.read('adventures') || {}
     });
     w2.g1 = w.g1;
     w2.g2 = w.g2;
