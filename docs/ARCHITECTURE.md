@@ -35,7 +35,7 @@ Steward
 ├── core
 │   ├── zone
 │   ├── buildings
-│   ├── specialists     ← lookup, dispatch, picks, general orders (move, attack, star, send to zone)
+│   ├── specialists     ← lookup, dispatch, picks, general orders (move, attack, star, send to zone), send guard
 │   ├── deposits
 │   ├── packets
 │   ├── pickups        ← quest objects and collectibles, click action

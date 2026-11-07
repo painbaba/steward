@@ -364,3 +364,116 @@ t.test('the override star shows for an entity-form key only', function () {
     row = rows[rows.length - 1];
     t.assert.ok(!/ \*$/.test(row[0][1]), String(row[0][1]));
 });
+
+// --- send guard ------------------------------------------------------------
+
+// A booted harness with a test clock on the shared send guard; env.T is read
+// at call time.
+function guarded() {
+    var H = harness.boot();
+    var env = { H: H, T: 1000000 };
+    env.g = H.Steward.core.specialists.sendGuard;
+    env.g.clock = function () { return env.T; };
+    return env;
+}
+
+// Mounts `list` with IronOre enabled at `max` and boots the module. plan()
+// returns what that pass queued.
+function guardedGeos(env, list, max) {
+    var H = env.H;
+    var z = H.zone.zone()
+        .deposits('IronOre', [])
+        .specialists(list)
+        .mountOnPlayer((H.host.game.gi.mCurrentPlayer = {}));
+    H.host.game.gi.mCurrentPlayerZone = z.zone;
+    H.settings.write('geologists', onlyEnable('IronOre', max));
+    var fire = dispatchAction(H);
+    return {
+        zone: z,
+        fire: fire,
+        plan: function () {
+            H.clearQueued();
+            H.module('geologists').plan({ zone: { isHome: true } });
+            return H.queued();
+        }
+    };
+}
+
+t.test('guard: a pending geologist counts as on task for its deposit', function () {
+    var env = guarded();
+    var f = guardedGeos(env, [idleGeo(env, 'g1'), idleGeo(env, 'g2')], 1);
+    env.H.Steward.core.specialists.send = function () { return true; };
+
+    var q = f.plan();
+    t.assert.strictEqual(q.length, 1);
+    f.fire(q[0].params);
+    env.T += env.g.VERIFY_MS - 1;
+    t.assert.strictEqual(f.plan().length, 0, 'the other idle geologist is not sent to the same slot');
+});
+
+t.test('guard: a held geologist is replaced by another idle one', function () {
+    var env = guarded();
+    var f = guardedGeos(env, [idleGeo(env, 'g1'), idleGeo(env, 'g2')], 1);
+    env.H.Steward.core.specialists.send = function () { return true; };
+
+    var q = f.plan();
+    t.assert.strictEqual(q.length, 1);
+    var first = q[0].params[0];
+    f.fire(q[0].params);
+    env.T += env.g.VERIFY_MS;
+
+    q = f.plan();
+    t.assert.strictEqual(env.g.blocked(first), true, 'the first geologist is held');
+    t.assert.strictEqual(q.length, 1);
+    t.assert.notStrictEqual(q[0].params[0], first);
+});
+
+t.test('guard: the breaker is shared, so explorer misses stop geologists until one probe', function () {
+    var env = guarded();
+    var H = env.H;
+    var list = [idleGeo(env, 'g1'), idleGeo(env, 'g2')];
+    var explorerUids = ['e1', 'e2', 'e3', 'e4', 'e5'];
+    explorerUids.forEach(function (u) {
+        var s = H.specs.spec({ name: u, uid: u, type: 1 });
+        list.push(s);
+    });
+    var f = guardedGeos(env, list, 2);
+
+    explorerUids.forEach(function (u) { env.g.note('explorers', u, u, 'Short'); });
+    env.T += env.g.VERIFY_MS;
+    env.g.settle('explorers', H.Steward.core.specialists.explorers(), true);
+    t.assert.strictEqual(env.g.isOpen(), true);
+
+    t.assert.strictEqual(f.plan().length, 0, 'paused while open');
+    env.T = env.g.snapshot().nextProbeAt;
+    t.assert.strictEqual(f.plan().length, 1, 'exactly one probe');
+    t.assert.strictEqual(f.plan().length, 0, 'no second probe in the same cooldown');
+});
+
+t.test('guard: a geologist send that sends nothing leaves nothing pending', function () {
+    var cases = {
+        'send false': function (c) { c.send = function () { return false; }; },
+        'lookup ok:false': function (c) { c.lookup = function () { return { ok: false }; }; }
+    };
+    Object.keys(cases).forEach(function (name) {
+        var env = guarded();
+        var f = guardedGeos(env, [idleGeo(env, 'g1')], 1);
+        var c = env.H.Steward.core.specialists;
+        var lookup = c.lookup;
+        c.send = function () { return true; };
+        var q = f.plan();
+        t.assert.strictEqual(q.length, 1, name);
+        cases[name](c);
+        f.fire(q[0].params);
+        c.lookup = lookup;
+
+        t.assert.strictEqual(env.g.snapshot().pending, 0, name);
+        t.assert.strictEqual(env.g.pendingTags('geologists').length, 0, name);
+        t.assert.strictEqual(f.plan().length, 1, name);
+    });
+});
+
+// An idle geologist with uid and name `uid`.
+function idleGeo(env, uid) {
+    return env.H.specs.geologist({ name: uid, uid: uid });
+}

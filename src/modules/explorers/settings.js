@@ -7,7 +7,7 @@
  *   {
  *     enabled:       true,
  *     overrides:     { '<explorer name>': 'TaskExplorerShort', ... },
- *     dispatchDelay: 5000      // ms between sends to the same explorer
+ *     dispatchDelay: 1500      // ms between queued sends
  *   }
  *
  * Naming the override map by explorer NAME (not by GetType) is intentional:

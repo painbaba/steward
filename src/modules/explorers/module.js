@@ -15,7 +15,13 @@
  *
  * Honours the kernel's busy contract: once plan() has enqueued one
  * dispatch per available explorer, the module is "busy" until those
- * dispatches drain. No second plan() call piles work on top.
+ * dispatches drain.
+ *
+ * A send only counts once the explorer is seen to leave Idle: the client
+ * can accept a send and never apply it, and the next plan would send the
+ * same explorer again without limit. Pending and held explorers, and the
+ * breaker shared with every specialist module, live in
+ * S.core.specialists.sendGuard.
  *
  * P7d v0.4.0 scope: dispatch idle explorers only. Explorers already
  * working are left alone. Cancellation and re-routing are deferred
@@ -68,31 +74,51 @@
 
     function plan() {
         var c = S.core.specialists;
-        var rawIdle;
-        try { rawIdle = c.available(S.SpecialistType.Explorer); }
+        var all;
+        var before = c.dropped();
+        try { all = c.explorers(); }
         catch (e) {
-            S.kernel.error('explorers', 'available() threw:', e);
+            S.kernel.error('explorers', 'explorers() threw:', e);
             return;
         }
-        if (rawIdle.length === 0) return;
+        var complete = c.dropped() === before;
+
+        // One read serves both the guard and the idle filter, so earlier
+        // sends are judged against the same state this pass dispatches from.
+        c.sendGuard.settle('explorers', all, complete);
+        if (!all || all.length === 0) return;
 
         // The reader already leaves out entries without a stable uniqueID; an
         // entry can still lose its members after that read. The queue contract
         // needs the uid for the re-find at fire time. A dropped explorer only
         // leaves fewer candidates, never a wrong count, so unlike geologists
-        // this pass does not hold on a read that dropped entries.
+        // this pass does not hold on a read that dropped entries. The guard
+        // still gets the completeness flag, because a dropped entry reads Idle
+        // and must not count as a send that changed nothing.
+        // Pending and held explorers are skipped: sending them again is the
+        // loop the guard exists to stop.
         var idleExplorers = [];
-        for (var ie = 0; ie < rawIdle.length; ie++) {
-            if (!c.uniqueIdKey(rawIdle[ie])) continue;
-            idleExplorers.push(rawIdle[ie]);
+        for (var ie = 0; ie < all.length; ie++) {
+            var st;
+            try { st = c.status(all[ie]); }
+            catch (eStatus) { continue; }
+            if (st !== S.SpecialistStatus.Idle) continue;
+            var ieKey = c.uniqueIdKey(all[ie]);
+            if (!ieKey) continue;
+            if (c.sendGuard.blocked(ieKey)) continue;
+            idleExplorers.push(all[ie]);
         }
         if (idleExplorers.length === 0) return;
+
+        // While the breaker is open this is 0, or 1 for a probe.
+        var room = c.sendGuard.admit(idleExplorers.length);
+        if (room <= 0) return;
 
         var s = readSettings();
         var delay = (typeof s.dispatchDelay === 'number') ? s.dispatchDelay : 1500;
         var dispatched = 0;
 
-        for (var i = 0; i < idleExplorers.length; i++) {
+        for (var i = 0; i < idleExplorers.length && dispatched < room; i++) {
             var spec = idleExplorers[i];
             var task = pickForExplorer(spec);
             if (!task) continue;
@@ -160,7 +186,8 @@
             try {
                 var ok = c.send(spec, taskEnum);
                 if (ok) {
-                    S.kernel.log('explorers', 'sent', displayName, '→', taskEnum);
+                    c.sendGuard.note('explorers', uidKey, displayName, taskEnum);
+                    S.kernel.log('explorers', 'sent', displayName, '(uid', uidKey + ')', '→', taskEnum);
                 } else {
                     S.kernel.warn('explorers', 'send returned false for', displayName);
                 }
