@@ -86,6 +86,74 @@ t.test('h.update on a misc module id goes through the shared buffer and saves', 
     assert.deepStrictEqual(plain(s.H.settings.read('zeta')), { keep: 'me', probe: 1 });
 });
 
+// ---- Typing enables Save ----------------------------------------------------
+
+// Every $() in the host stub returns the shared $.fn, so patching its `on`
+// records the handlers of whichever element h.input builds next.
+function recordHandlers(s) {
+    var handlers = {};
+    s.H.ctx.$.fn.on = function (ev, fn) {
+        (handlers[ev] = handlers[ev] || []).push(fn);
+        return s.H.ctx.$.fn;
+    };
+    return handlers;
+}
+
+t.test('typing into a bound input enables Save before blur', function () {
+    var s = setup();
+    var handlers = recordHandlers(s);
+    assert.strictEqual(s.ui.canSave(), false);
+    s.ui.helpers.input({ onChange: function () {} });
+    assert.strictEqual(handlers.input.length, 1);
+    handlers.input[0]();
+    assert.strictEqual(s.ui.canSave(), true);
+    // Typing alone marks nothing dirty, so closing writes nothing.
+    s.ui.closeDashboard(true);
+    assert.strictEqual(s.alerts.length, 0);
+    assert.strictEqual(s.H.settings.read('logger'), null);
+    assert.strictEqual(s.ui.canSave(), false);
+});
+
+t.test('an unbound input adds no typing hook', function () {
+    var s = setup();
+    var handlers = recordHandlers(s);
+    s.ui.helpers.input({});
+    assert.strictEqual(handlers.input, undefined);
+});
+
+t.test('typing then the blur change saves on the first Save', function () {
+    var s = setup();
+    var handlers = recordHandlers(s);
+    s.S.kernel.register({
+        id: 'zeta', priority: 'PriorityNormal',
+        isReady: function () { return true; }, plan: function () {},
+        ui: { tab: 'misc', section: { id: 'zeta', title: 'Zeta', render: function () {} } }
+    });
+    s.ui.helpers.input({ onChange: function () { s.ui.helpers.update('zeta', { probe: 1 }); } });
+    handlers.input[0]();
+    assert.strictEqual(s.ui.canSave(), true);
+    handlers.change[0]();
+    s.ui.closeDashboard(true);
+    assert.strictEqual(s.H.settings.read('zeta').probe, 1);
+    assert.strictEqual(s.ui.canSave(), false);
+});
+
+t.test('a typing-only edit neither blocks opening nor survives it', function () {
+    var s = setup();
+    var handlers = recordHandlers(s);
+    var rig = hostStubs.installModal(s.H);
+    s.ui.openSettings();
+    rig.visible = true;
+    s.ui.helpers.input({ onChange: function () {} });
+    handlers.input[0]();
+    assert.strictEqual(s.ui.canSave(), true);
+
+    s.ui.openDashboard();
+    assert.strictEqual(rig.made.length, 2);
+    assert.strictEqual(s.alerts.length, 0);
+    assert.strictEqual(s.ui.canSave(), false);
+});
+
 // ---- Parsers ----------------------------------------------------------------
 
 t.test('settingsParse sizeKB, keep and tickMs', function () {

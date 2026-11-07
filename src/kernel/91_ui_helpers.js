@@ -173,6 +173,15 @@
                 try { opts.onChange($i.val()); }
                 catch (err) { S.kernel.error('ui', 'input change threw:', err); }
             });
+            // change fires only on blur; enable Save while typing so the
+            // click that causes the blur is not swallowed by a disabled button.
+            $i.on('input', function () {
+                try {
+                    if (S.kernel.ui && typeof S.kernel.ui.markEditing === 'function') {
+                        S.kernel.ui.markEditing();
+                    }
+                } catch (err) { S.kernel.error('ui', 'input edit hook threw:', err); }
+            });
         }
         return $i;
     }

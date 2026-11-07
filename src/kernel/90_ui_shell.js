@@ -96,6 +96,7 @@
         activeTab: null,
         buffer:    {},
         dirty:     {},
+        editing:   false,
         saveBtn:   null
     };
 
@@ -945,6 +946,7 @@
         ensureStyle(modalId);
         dashboard.buffer = {};
         dashboard.dirty = {};
+        dashboard.editing = false;
         dashboard.activeTab = activeTab;
         try {
             dashboard.modal = new Modal(modalId, title, true);
@@ -972,6 +974,7 @@
         }
         dashboard.buffer = {};
         dashboard.dirty = {};
+        dashboard.editing = false;
         if (dashboard.modal) {
             try { dashboard.modal.hide(); } catch (e) { /* ignore */ }
         }
@@ -1206,9 +1209,8 @@
     function showSeconds(ms) { return ms / 1000; }
 
     // Text input bound to a number. A rejected entry reverts and a clamped
-    // one shows the clamped value. h.input fires on blur and a disabled Save
-    // swallows the click that causes the blur, so typing marks the namespace
-    // dirty at once; the click's change event still runs before the flush.
+    // one shows the clamped value. h.input enables Save while typing, and the
+    // blur change event from the Save click still runs before the flush.
     function numberInput(ns, key, value, parse, show) {
         var h = S.kernel.ui.helpers;
         var current = value;
@@ -1222,7 +1224,6 @@
             }
             $i.val(show(current));
         } });
-        $i.on('input', function () { h.update(ns, {}); });
         return $i;
     }
 
@@ -1327,9 +1328,15 @@
         return hasDirty() && dashboard.modal && dashboard.modal.Body().is(':visible');
     }
 
+    // Typing alone enables Save: a bound input commits on blur, and a disabled
+    // button would swallow the very click whose blur commits the value.
+    function canSave() {
+        return hasDirty() || dashboard.editing === true;
+    }
+
     function updateFooterButtons() {
         if (!dashboard.saveBtn) return;
-        dashboard.saveBtn.prop('disabled', !hasDirty());
+        dashboard.saveBtn.prop('disabled', !canSave());
     }
 
     function flushBuffers() {
@@ -1365,6 +1372,13 @@
         updateFooterButtons();
     }
 
+    // An input is being typed into but has not committed yet; the flag only
+    // enables Save so the committing click reaches it, it never marks dirty.
+    function markEditing() {
+        dashboard.editing = true;
+        updateFooterButtons();
+    }
+
     // -----------------------------------------------------------------
     // Public API
     // -----------------------------------------------------------------
@@ -1391,6 +1405,8 @@
     S.kernel.ui.closeDashboard   = closeDashboard;
     S.kernel.ui.bufferedSettings = bufferedSettings;
     S.kernel.ui.markDirty        = markDirty;
+    S.kernel.ui.markEditing      = markEditing;
+    S.kernel.ui.canSave          = canSave;
     S.kernel.ui.settingsParse    = settingsParse;
     S.kernel.ui.TAB_ORDER        = TAB_ORDER;
 
