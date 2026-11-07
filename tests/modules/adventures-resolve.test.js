@@ -1,12 +1,15 @@
 'use strict';
 
 // The zone trip and the zone guard of the adventures run. A step on the island
-// that has watched a wait for the stuckMinutes setting goes home, stays
-// RESOLVE_HOME_MS, goes back and enters its step again; after RESOLVE_MAX
-// trips at the same wave the run pauses Stuck. Every step acts only while its
-// own zone is viewed, and a queued order does not go out once the view has
-// changed. The home world of tests/stubs/adventures.js ({ home: true }) has a
-// home island and the adventure island with their own lists and travel.
+// that has watched a wait for the stuckMinutes setting first sends the client's
+// zone refresh (message 1037) and re-reads the island from the answer; a wait
+// the fresh read ends needs no trip. A wait that goes on past REFRESH_MS takes
+// the trip: home, stays RESOLVE_HOME_MS, goes back and enters its step again;
+// after RESOLVE_MAX trips at the same wave the run pauses Stuck. Every step
+// acts only while its own zone is viewed, and a queued order does not go out
+// once the view has changed. The home world of tests/stubs/adventures.js
+// ({ home: true }) has a home island and the adventure island with their own
+// lists and travel.
 
 var t = require('../runner');
 var AC = require('../stubs/actions');
@@ -53,6 +56,17 @@ function onVisit(w, fn) {
     w.gi.visitZone = function (id) {
         var out = visit.apply(this, arguments);
         fn(id);
+        return out;
+    };
+}
+
+// Runs fn(zone) when the zone refresh goes out, the way the server's answer
+// replaces the island read and the stale wait heals.
+function onRefresh(w, fn) {
+    var send = w.gi.mClientMessages.SendMessagetoServer;
+    w.gi.mClientMessages.SendMessagetoServer = function (id, zone, data) {
+        var out = send.apply(this, arguments);
+        if (id === w.S.modules.adventures.resolve.ZONE_REFRESH) fn(zone);
         return out;
     };
 }
@@ -152,19 +166,28 @@ function escapeRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); 
 
 // ---- the hang ---------------------------------------------------------------
 
-t.test('hang: a Gate wait watched past 45 min goes home, waits 5 min, comes back and goes on', function () {
+t.test('hang: a Gate wait watched past 45 min resyncs with a zone refresh, then goes home, waits 5 min, comes back and goes on', function () {
     var w = hangWorld();
     var before = sends(w);
     W.ticksFor(w, 44 * MIN);
     assert.strictEqual(w.visits.length, 0, 'no visit before the limit');
+    assert.strictEqual(w.refreshSends.length, 0, 'no refresh before the limit');
     assert.strictEqual(w.st.run().resolve, null);
     assert.strictEqual(stepName(w), 'Gate');
     W.ticksFor(w, 2 * MIN);
-    assert.strictEqual(visitsTo(w, HOME), 1, 'one trip home');
+    assert.strictEqual(w.refreshSends.length, 1, 'one zone refresh at the limit');
+    assert.strictEqual(w.refreshSends[0].zoneId, ZONE, 'the refresh goes to the viewed zone');
+    assert.strictEqual(visitsTo(w, HOME), 0, 'no trip at the limit: the refresh goes first');
+    assert.strictEqual(w.st.run().resolve, null);
+    assert.strictEqual(w.st.run().stuck.refreshedSince, w.st.run().since, 'the window keeps its refresh');
+    assert.strictEqual(logCount(w, /Gate waited 45 min \(Anna \(1\.1\) busy\); zone refresh sent, trip in 5 min if the wait goes on/), 1);
+    W.ticksFor(w, 6 * MIN);
+    assert.strictEqual(visitsTo(w, HOME), 1, 'one trip home: the wait went on past the refresh');
     assert.strictEqual(w.st.run().resolve.phase, 'wait');
     assert.strictEqual(w.st.run().stuck.trips, 1);
-    assert.strictEqual(logCount(w, /Gate waited 45 min \(Anna \(1\.1\) busy\); zone trip 1\/2: going home/), 1);
-    W.ticksFor(w, 4 * MIN);
+    assert.strictEqual(w.refreshSends.length, 1, 'the window sends one refresh');
+    assert.strictEqual(logCount(w, /Gate waited 50 min \(Anna \(1\.1\) busy\); zone trip 1\/2: going home/), 1);
+    W.ticksFor(w, 3 * MIN);
     assert.strictEqual(visitsTo(w, ZONE), 0, 'still at home inside the 5 min');
     // Viewing the island again gives a fresh read: the battle is over.
     onVisit(w, function (id) { if (id === ZONE) w.g1.state.task = null; });
@@ -208,18 +231,22 @@ t.test('hang: time on another zone is not counted, and one log line marks each e
     W.ticksFor(w, 14 * MIN);
     assert.strictEqual(w.st.run().resolve, null, 'the 30 min watched before count, the hour away does not');
     W.ticksFor(w, 2 * MIN);
-    assert.notStrictEqual(w.st.run().resolve, null, 'the trip fires at 45 watched min');
+    assert.strictEqual(w.refreshSends.length, 1, 'the refresh fires at 45 watched min');
+    assert.strictEqual(w.st.run().resolve, null, 'the trip waits for the fresh read');
+    W.ticksFor(w, 6 * MIN);
+    assert.notStrictEqual(w.st.run().resolve, null, 'the trip fires at 50 watched min');
 });
 
 t.test('hang: after 2 trips that change nothing the run pauses Stuck', function () {
     var w = hangWorld();
-    tickUntil(w, function () { return w.st.run().status !== w.S.RunStatus.Running; }, 170 * MIN);
+    tickUntil(w, function () { return w.st.run().status !== w.S.RunStatus.Running; }, 180 * MIN);
     var r = w.st.run();
     assert.strictEqual(r.status, w.S.RunStatus.Paused);
     assert.strictEqual(r.pause.reason, w.S.RunPause.Stuck);
     assert.ok(/after 2 zone trips: .*busy/.test(r.pause.message), r.pause.message);
     assert.strictEqual(visitsTo(w, HOME), 2, 'no third trip');
     assert.strictEqual(visitsTo(w, ZONE), 2);
+    assert.strictEqual(w.refreshSends.length, 2, 'one refresh per watched window');
     W.ticksFor(w, 60 * MIN);
     assert.strictEqual(visitsTo(w, HOME), 2, 'nothing travels while paused');
 });
@@ -232,14 +259,19 @@ t.test('hang: a tick raised to 60 s still lets the clock grow', function () {
     try {
         var t0 = w.t;
         var firedAt = null;
-        for (var i = 0; i < 60 && firedAt === null; i++) {
+        var refreshedAt = null;
+        for (var i = 0; i < 70 && firedAt === null; i++) {
             w.t += 60000;
             tick(w);
+            if (refreshedAt === null && w.refreshSends.length) refreshedAt = w.t;
             if (w.st.run().resolve) firedAt = w.t;
         }
         assert.ok(firedAt !== null, 'the trip fired');
+        assert.ok(refreshedAt !== null, 'the refresh went out first');
         var mins = (firedAt - t0) / MIN;
-        assert.ok(mins >= 45 && mins <= 47, 'fired after ' + mins + ' min');
+        var refMins = (refreshedAt - t0) / MIN;
+        assert.ok(refMins >= 45 && refMins <= 48, 'refreshed after ' + refMins + ' min');
+        assert.ok(mins >= 50 && mins <= 53, 'fired after ' + mins + ' min');
     } finally {
         sch.tickIntervalMs = was;
     }
@@ -247,13 +279,14 @@ t.test('hang: a tick raised to 60 s still lets the clock grow', function () {
 
 // ---- where the trip does not fire ------------------------------------------
 
-t.test('excluded: a home step and the long Arrive step never take the trip', function () {
+t.test('excluded: a home step and the long Arrive step never take the trip or the refresh', function () {
     var w = homeWorld();
     w.g1.state.task = { type: w.code.attack };
     series(w, { step: w.S.RunStep.Muster });
     W.ticksFor(w, 60 * MIN);
     assert.strictEqual(w.visits.length, 0, 'Muster: no visit');
     assert.strictEqual(w.st.run().resolve, null, 'Muster: no trip');
+    assert.strictEqual(w.refreshSends.length, 0, 'Muster: no refresh');
 
     var w2 = homeWorld();
     onIsland(w2);
@@ -264,6 +297,7 @@ t.test('excluded: a home step and the long Arrive step never take the trip', fun
     assert.strictEqual(stepName(w2), 'Arrive');
     assert.strictEqual(w2.st.run().resolve, null, 'Arrive: no trip');
     assert.strictEqual(w2.visits.length, 0);
+    assert.strictEqual(w2.refreshSends.length, 0, 'Arrive: no refresh');
 });
 
 t.test('setting 0 turns the trip off', function () {
@@ -293,12 +327,64 @@ t.test('setting: default 45 over an old stored file, a misc section and its summ
     assert.strictEqual(a.settingsSummary(), 'stuck limit 45 min, retrain on, settlers only');
 });
 
+// ---- the zone refresh -------------------------------------------------------
+
+t.test('refresh: a wait the fresh read ends takes no trip at all', function () {
+    var w = hangWorld();
+    // The server's answer replaces the island read: the phantom battle is
+    // gone, the way a stale read heals.
+    onRefresh(w, function () { w.g1.state.task = null; });
+    var ok = tickUntil(w, function () { return w.refreshSends.length > 0; }, 60 * MIN);
+    assert.ok(ok, 'the refresh went out: ' + logs(w).slice(-3).join(' | '));
+    assert.strictEqual(w.refreshSends.length, 1);
+    assert.strictEqual(w.refreshSends[0].zoneId, ZONE, 'the refresh goes to the viewed island');
+    assert.strictEqual(visitsTo(w, HOME), 0, 'no trip at the refresh');
+    ok = tickUntil(w, function () { return stepName(w) !== 'Gate'; }, 2 * MIN);
+    assert.ok(ok, 'the step re-read the island: ' + logs(w).slice(-4).join(' | '));
+    W.ticksFor(w, 2 * MIN);
+    assert.strictEqual(visitsTo(w, HOME), 0, 'no trip: the fresh read ended the wait');
+    assert.strictEqual(w.refreshSends.length, 1, 'the window sends one refresh');
+    assert.strictEqual(logCount(w, /zone trip/), 0, logs(w).filter(function (s) {
+        return /zone trip|zone refresh/.test(s);
+    }).join(' | '));
+});
+
+t.test('refresh: a reload inside the window sends no second one, and the trip still follows', function () {
+    var w = hangWorld();
+    W.ticksFor(w, 46 * MIN);
+    assert.strictEqual(w.refreshSends.length, 1, 'the refresh went out at the limit');
+    assert.strictEqual(w.st.run().resolve, null, 'no trip inside the window');
+
+    var w2 = W.world({ home: true, fs: w.fs, generals: [] });
+    w2.gi = w2.H.host.game.gi;
+    countVisits(w2);
+    w2.t = w.t;
+    var a1 = gen('1.1', 'Anna', 10);
+    var a2 = gen('1.2', 'Bert', 20);
+    w2.adventures = [{ adventureName: 'BlackKnights', zoneID: ZONE }];
+    w2.place(a1, ZONE);
+    w2.place(a2, ZONE);
+    w2.frees[ZONE] = {};
+    a1.state.task = { type: w2.code.attack };
+    w2.gi.visitZone(ZONE);
+    w2.visits.length = 0;
+    w2.mod.boot();
+    var r = w2.st.run();
+    assert.strictEqual(r.resolve, null);
+    assert.strictEqual(r.stuck.refreshedSince, r.since, 'the window keeps its refresh over the reload');
+    var ok = tickUntil(w2, function () { return w2.visits.length > 0; }, 60 * MIN);
+    assert.ok(ok, 'the trip follows: ' + logs(w2).slice(-4).join(' | '));
+    assert.strictEqual(w2.refreshSends.length, 0, 'no second refresh in the same window');
+    assert.strictEqual(w2.st.run().stuck.trips, 1, 'the trip went');
+});
+
 // ---- persistence, pause and resume ----------------------------------------
 
 t.test('reload mid-trip: the run carries on in the wait phase and goes back once', function () {
     var w = hangWorld();
-    W.ticksFor(w, 46 * MIN);
+    W.ticksFor(w, 52 * MIN);
     assert.strictEqual(w.st.run().resolve.phase, 'wait');
+    assert.strictEqual(w.refreshSends.length, 1, 'the refresh went before the trip');
     var at = w.st.run().resolve.at;
 
     var w2 = W.world({ home: true, fs: w.fs, generals: [] });
@@ -322,7 +408,7 @@ t.test('reload mid-trip: the run carries on in the wait phase and goes back once
 
 t.test('pause during a trip keeps it; resume ends it and clears the count', function () {
     var w = hangWorld();
-    W.ticksFor(w, 46 * MIN);
+    W.ticksFor(w, 52 * MIN);
     w.st.pause(w.S.RunPause.User, 'paused by you');
     assert.strictEqual(w.st.run().resolve.phase, 'wait', 'pause keeps the trip');
     W.ticksFor(w, 10 * MIN);
@@ -338,21 +424,29 @@ t.test('normRun: resolve and stuck round-trip; bad shapes load as null', functio
     var w = hangWorld();
     var r = w.st.run();
     r.resolve = { phase: 'wait', at: 123 };
-    r.stuck = { step: w.S.WaveStep.Gate, wave: 0, trips: 1 };
+    r.stuck = { step: w.S.WaveStep.Gate, wave: 0, trips: 1, refreshedSince: 1234 };
     w.st.save();
     var w2 = W.world({ home: true, fs: w.fs });
     w2.st.load();
     assert.deepStrictEqual(plain(w2.st.run().resolve), { phase: 'wait', at: 123 });
-    assert.deepStrictEqual(plain(w2.st.run().stuck), { step: w.S.WaveStep.Gate, wave: 0, trips: 1 });
+    assert.deepStrictEqual(plain(w2.st.run().stuck), { step: w.S.WaveStep.Gate, wave: 0, trips: 1, refreshedSince: 1234 });
 
+    // A stuck record of an older file has no refresh flag: it loads as null.
     var data = JSON.parse(w.fs.disk[W.RUN_FILE]);
     data.run.resolve = { phase: 'x' };
-    data.run.stuck = { step: 'nope' };
+    data.run.stuck = { step: w.S.WaveStep.Gate, wave: 0, trips: 2 };
     w.fs.disk[W.RUN_FILE] = JSON.stringify(data);
     var w3 = W.world({ home: true, fs: w.fs });
     w3.st.load();
     assert.strictEqual(w3.st.run().resolve, null);
-    assert.strictEqual(w3.st.run().stuck, null);
+    assert.deepStrictEqual(plain(w3.st.run().stuck), { step: w.S.WaveStep.Gate, wave: 0, trips: 2, refreshedSince: null });
+
+    data.run.stuck = { step: 'nope' };
+    w.fs.disk[W.RUN_FILE] = JSON.stringify(data);
+    var w4 = W.world({ home: true, fs: w.fs });
+    w4.st.load();
+    assert.strictEqual(w4.st.run().resolve, null);
+    assert.strictEqual(w4.st.run().stuck, null);
 });
 
 t.test('trip out of Settle: the blocker, settleFrom and cycles go, Gate waits like a fresh one', function () {

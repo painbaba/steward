@@ -308,7 +308,9 @@
 
     // Whether the trip count in r.stuck belongs to the stuck position of step:
     // the same wave, and the same series step (every wave step shares one
-    // position, so a wave that loops Gate -> Supply keeps its count).
+    // position, so a wave that loops Gate -> Supply keeps its count). The
+    // zone-refresh flag rides the same record and names the window (r.since)
+    // it was sent in, so a watched window sends one and the next may.
     function sameStuck(r, step) {
         return !!(r && r.stuck) && r.stuck.wave === r.waveIndex &&
             position(r.stuck.step) === position(step);
@@ -761,7 +763,7 @@
 
     function normStuck(v) {
         if (!isPlainObject(v) || !isStep(v.step)) return null;
-        return { step: v.step, wave: count(v.wave), trips: count(v.trips) };
+        return { step: v.step, wave: count(v.wave), trips: count(v.trips), refreshedSince: num(v.refreshedSince) };
     }
 
     function filePause(r, reason, message) {

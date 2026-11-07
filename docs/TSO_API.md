@@ -98,6 +98,7 @@ Host calls behind the core write actions (each is wrapped by `Steward.core.packe
 | Call | Used by |
 |------|---------|
 | `SendMessagetoServer(1031, dRaiseArmyVO)` with `armyHolderSpecialistVO` and one `dResourceVO` per unit | `army.raise` (the general must stand on a map grid: `GetGarrison()` is null at the star and the server refuses the raise) |
+| `SendMessagetoServer(1037, null)` for the currently viewed zone — the client's own Update menu entry (`menuZoneRefreshHandler` in the client's `scripts/0-common.js`); the server answers with a fresh zone state. The message alone: the handler's UI refresh is not steward's to trigger | `adventures.resolve` (the stuck-step resync before the zone trip) |
 | `cMilitaryUtil.SendRaiseArmyToServer(game.gi, spec, null)` | `army.unload` |
 | `SendMessagetoServer(91, dTimedProductionVO)`, one per stack shape; queue 0 is the barracks, 8 the elite barracks | `production.order` |
 | `quest.SetQuestMode(1)`, then `SendMessagetoServer(100, dServerAction, responder)` with `type = 1`, `data = quest.GetUniqueId()` and `responder = game.createResponder(onResult, onFault)` (`ServerState::ResponderSimple`). The claim is verified by the server's result callback for the current send, or by the quest leaving the zone's pool (a claimed quest stays in the pool for a while). A fault, a stale callback or `isFinished` turning false is never a success | `quests.claim` |

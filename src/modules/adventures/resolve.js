@@ -2,11 +2,24 @@
  * Zone trip of an adventure run: the way out of a wait the game never ends.
  *
  * The client can keep a stale read of the island: a general that finished
- * his battle still reads busy, and a wave waits at its gate for hours. Viewing
- * another zone and coming back makes the client read the island afresh, so a
- * step on the island that has watched a wait for the stuckMinutes setting
- * (0 is off) goes home, stays RESOLVE_HOME_MS there, travels back and enters
- * its step again: a wave step at the Gate of its wave, a series step anew.
+ * his battle still reads busy, and a wave waits at its gate for hours. A step
+ * on the island that has watched a wait for the stuckMinutes setting (0 is
+ * off) resyncs the zone in place first: it sends the client's zone refresh
+ * (message 1037, the Update menu entry's own message) for the currently
+ * viewed island, and the server answers with a fresh zone state, which the
+ * step re-reads on its next passes. That is a lighter resync than the trip:
+ * it costs one message where the trip costs a round trip and about 5 minutes
+ * at home. Only if the wait goes on past REFRESH_MS does the step take the
+ * zone trip: home, stays RESOLVE_HOME_MS there, travels back and enters its
+ * step again: a wave step at the Gate of its wave, a series step anew.
+ *
+ * The refresh is the message alone. The client's Update handler belongs to
+ * the client's script set and refreshes the UI with it; steward sends the
+ * message itself, so no UI refresh runs inside its own work, and the refresh
+ * carries no order, so a battle it watches is not touched. One refresh per
+ * watched window: the flag rides the run's stuck record with the start time
+ * of the window it belongs to, so a window that ends (the step moved on) may
+ * refresh again but a window never sends two.
  *
  * Only watched time counts. The clock sums the passes that kept a wait going
  * and skips any silence longer than the pass gap, so the time the user spends
@@ -37,6 +50,8 @@
 
     var RESOLVE_HOME_MS = 300000;   // time the trip stays at home before it goes back
     var RESOLVE_MAX     = 2;        // trips per stuck wave or series step before the pause
+    var REFRESH_MS      = 300000;   // time the fresh read after a zone refresh has to end the wait
+    var ZONE_REFRESH    = 1037;     // the client Update menu's message: the server answers with a fresh zone state
 
     var CATEGORY = 'adventures';
 
@@ -72,17 +87,18 @@
     }
 
     // Starts a trip, or pauses once the trips at this stuck position are used
-    // up. The text names the wait that did not end.
+    // up. The text names the wait that did not end. watch() has made the
+    // stuck record of this position before calling.
     function fire(r, ms) {
         var b = st().busyOf(r);
         var what = b ? b.text : 'waiting';
         var mins = Math.round(ms / 60000);
-        if (!st().sameStuck(r, r.step)) r.stuck = { step: r.step, wave: r.waveIndex, trips: 0 };
         if (r.stuck.trips >= RESOLVE_MAX) {
             st().pause(S.RunPause.Stuck, 'waited ' + mins + ' min after ' + r.stuck.trips + ' zone trips: ' + what);
             return;
         }
         r.stuck.trips++;
+        r.stuck.refreshedSince = null;
         // Old visit times of an earlier trip must not count for this one.
         ld().dropMark(r, HOME_MARK);
         ld().dropMark(r, BACK_MARK);
@@ -92,9 +108,30 @@
             RESOLVE_MAX + ': going home');
     }
 
+    // The cheap resync before the trip: sends the client's zone refresh for
+    // the currently viewed zone once and lets the step re-read the island
+    // from the answer on its next passes. The message alone, no responder:
+    // the server's answer is the zone state itself, and the wait going on is
+    // what the watched clock reports. The flag keeps the window's start, so
+    // the same watched window never sends two, and the next window may.
+    function resync(r, ms) {
+        var b = st().busyOf(r);
+        var what = b ? b.text : 'waiting';
+        var mins = Math.round(ms / 60000);
+        var sent = S.core.packets.sendMessage(ZONE_REFRESH, null) === true;
+        r.stuck.refreshedSince = r.since;
+        st().save();
+        log(st().stepName(r.step) + ' waited ' + mins + ' min (' + what + '); zone refresh ' +
+            (sent ? 'sent' : 'failed') + ', trip in ' + REFRESH_MS / 60000 + ' min if the wait goes on');
+    }
+
     // Feeds the watched-wait clock once per step pass. module.js calls it
     // after the step's own part and before the pass ends, so busySeen tells
-    // whether this pass kept a wait going.
+    // whether this pass kept a wait going. At the limit the zone refresh goes
+    // out first and the trip waits REFRESH_MS: a wait the fresh read ends
+    // needs no trip, so the trip fires only if the wait goes on past it. A
+    // position whose trips are used up pauses at the limit: no trip may
+    // follow there, so no refresh goes out for it either.
     function watch() {
         var r = st().run();
         if (!r || r.status !== S.RunStatus.Running || r.resolve) return;
@@ -103,6 +140,18 @@
         if (!(limit > 0)) return;
         var q = ld().quietClock(r, st().current().busySeen === true, 'stuckClock');
         if (q.ms < limit) return;
+        if (!st().sameStuck(r, r.step)) {
+            r.stuck = { step: r.step, wave: r.waveIndex, trips: 0, refreshedSince: null };
+        }
+        if (r.stuck.trips >= RESOLVE_MAX) {
+            fire(r, q.ms);
+            return;
+        }
+        if (r.stuck.refreshedSince !== r.since) {
+            resync(r, q.ms);
+            return;
+        }
+        if (q.ms < limit + REFRESH_MS) return;
         fire(r, q.ms);
     }
 
@@ -163,6 +212,8 @@
     S.modules.adventures.resolve = {
         RESOLVE_HOME_MS: RESOLVE_HOME_MS,
         RESOLVE_MAX:     RESOLVE_MAX,
+        REFRESH_MS:      REFRESH_MS,
+        ZONE_REFRESH:    ZONE_REFRESH,
         limitMs:         limitMs,
         watch:           watch,
         plan:            plan

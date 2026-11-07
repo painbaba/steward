@@ -31,11 +31,14 @@
  * log line marks the start and one the end of each such wait.
  *
  * A step on the island that has watched a wait for the stuckMinutes setting
- * takes a zone trip (resolve.js): home, a few minutes there, back, and the
- * step is entered again, because the client may hold a stale read of the
- * island. While the trip lasts it owns every pass and runs on any zone; after
- * a step pass, resolve.watch() feeds the watched-wait clock. The setting is
- * edited in the Adventures section of the Settings screen.
+ * resyncs the zone (resolve.js): the client's zone refresh goes out once (the
+ * message alone, no UI refresh) and the step re-reads the island from the
+ * answer; a wait it ends needs no trip. A wait that goes on takes a zone
+ * trip: home, a few minutes there, back, and the step is entered again,
+ * because the client may hold a stale read of the island. While the trip
+ * lasts it owns every pass and runs on any zone; after a step pass,
+ * resolve.watch() feeds the watched-wait clock. The setting is edited in the
+ * Adventures section of the Settings screen.
  *
  * Menu handlers only change state; all queue work is enqueued from plan(),
  * where the scheduler tags it with this module, so Pause and Stop can cancel

@@ -47,6 +47,7 @@ var SERVICE_MANAGER = 'com.bluebyte.tso.service::ServiceManager';
 var ACTION_BUFF = 61;
 var MESSAGE_RAISE = 1031;
 var MESSAGE_ORDER = 91;
+var MESSAGE_ZONE_REFRESH = 1037;
 
 // Star-menu types; the population resource name is read from the core.
 var MAP_TYPE = 'Adventure';
@@ -272,7 +273,7 @@ function world(o) {
         blocked: {},
         pickups: [],
         orders: [], raises: [], unloads: [], buffs: [], claims: [], reads: [],
-        zoneSends: [], buffActions: [], productionOrders: [], closes: [],
+        zoneSends: [], buffActions: [], productionOrders: [], closes: [], refreshSends: [],
         pending: [], entries: [], ghosts: [],
         adventures: home && !o.mapOpen ? [] : [{ adventureName: 'BlackKnights', zoneID: ZONE }],
         stock: [],
@@ -455,10 +456,16 @@ function world(o) {
     };
 
     // Raise: message 1031 with the full target composition. Order: message
-    // 91, landing in the queue of its building's grid.
+    // 91, landing in the queue of its building's grid. Zone refresh: message
+    // 1037, recorded so a test sees the resync; the fresh read it brings is
+    // what the world already holds.
     var sendMessage = gi.mClientMessages.SendMessagetoServer;
     gi.mClientMessages.SendMessagetoServer = function (id, zone, data) {
         sendMessage.apply(this, arguments);
+        if (id === MESSAGE_ZONE_REFRESH) {
+            w.refreshSends.push({ zoneId: zone, t: w.t });
+            return;
+        }
         if (id === MESSAGE_ORDER && home) {
             w.productionOrders.push({ unit: data.type_string, amount: data.amount * data.stacks, t: w.t });
             var q = data.buildingGrid === w.queues[8].grid ? w.queues[8] : w.queues[0];

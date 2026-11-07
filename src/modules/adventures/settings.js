@@ -14,10 +14,12 @@
  * next pick starts there.
  *
  * `stuckMinutes` is the stuck-step limit: a run step on the island that has
- * watched a wait this many minutes takes a zone trip home and back, which
- * makes the host refresh what it reports. 0 switches the trip off. It is
- * edited in the Adventures section of the Settings screen. `stuckMinutes()`
- * is the reader the trip uses.
+ * watched a wait this many minutes sends the client's zone refresh first (a
+ * lighter resync than the trip: the server answers with a fresh zone state,
+ * which the step re-reads) and takes a zone trip home and back only if the
+ * wait goes on past it. 0 switches both off. It is edited in the Adventures
+ * section of the Settings screen. `stuckMinutes()` is the reader the trip
+ * uses.
  *
  * `retrain` switches retraining of the troops lost on a map on or off for
  * every run. It is read again each time a run reaches Snapshot, Account,
