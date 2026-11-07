@@ -403,21 +403,31 @@
 
     // The map is clear when its last quest is finished and no loadout general
     // is still fighting. Once the quest is done a busy general is waited on
-    // with no limit, so only the quest itself can time out. A camp still
-    // standing only warns: it may belong to a side quest or have been beaten
-    // in a way the map does not show. While quest objects are left the quest
-    // may still need them, so the last quest's own limit does not run; their
-    // own clock counts time with no battle and starts again whenever one of
-    // them is picked up.
+    // with no limit, so only the quest itself can time out. A general
+    // recovering after a lost battle is not waited on: he takes no order
+    // until his rest ends and goes home with the map. Free troops that only
+    // he could have held stay in the pool, with one warning when Clear
+    // leaves. A camp still standing only warns: it may belong to a side
+    // quest or have been beaten in a way the map does not show. While quest
+    // objects are left the quest may still need them, so the last quest's
+    // own limit does not run; their own clock counts time with no battle and
+    // starts again whenever one of them is picked up.
     function clear(r, inv) {
         var list = S.core.quests.list();
         var last = list ? lastQuestOf(list) : null;
         var questDone = !!(last && last.finished);
         var keys = ld().keysOf(r);
         var firstKey = null;
+        var resting = [];
         for (var i = 0; i < keys.length; i++) {
             var g = ld().gen(inv, keys[i]);
-            if (g && !ld().ready(g)) { firstKey = keys[i]; break; }
+            if (!g || ld().ready(g)) continue;
+            if (ld().recovering(keys[i])) {
+                resting.push(keys[i]);
+                continue;
+            }
+            firstKey = keys[i];
+            break;
         }
         if (questDone && firstKey === null && !ld().anyAttacking()) {
             if (!inv.ok) {
@@ -426,9 +436,18 @@
             }
             // Troops freed by the last battles, or generals that were still
             // fighting during the first pack, are packed before the claim.
-            if (packPlan(r, inv).raises.length) {
+            // A recovering general is not ready, so the plan leaves his share
+            // in the remainder.
+            var p = packPlan(r, inv);
+            if (p.raises.length) {
                 st().go(S.RunStep.PackStar, 'free troops left to pack');
                 return;
+            }
+            if (resting.length && S.core.army.total(p.remainder) > 0) {
+                var names = [];
+                for (i = 0; i < resting.length; i++) names.push(ld().who(inv, resting[i]));
+                warn('left in the free pool while ' + names.join(', ') +
+                    (resting.length === 1 ? ' recovers: ' : ' recover: ') + S.core.army.text(p.remainder));
             }
             var standing = standingText(r);
             if (standing) warn('camps still standing after the last quest: ' + standing);
@@ -733,6 +752,8 @@
     // nothing about the view, so it holds. A general the list lacks is gone at
     // once when his return went out. With no mark he may only be a skipped
     // entry, so he gets the grace, and after it he counts as gone with no pause.
+    // A general recovering after a lost battle takes no order, so he is not
+    // sent or waited on; he returns home with the map.
     function recall(r, inv) {
         var id = S.core.zone.id();
         if (typeof id !== 'number') {
@@ -754,6 +775,7 @@
         var open = [];
         var busy = null;
         var absent = null;
+        var resting = 0;
         for (var i = 0; i < keys.length; i++) {
             var name = 'recall:' + keys[i];
             var g = ld().gen(inv, keys[i]);
@@ -771,6 +793,10 @@
                 ld().markSeen(r, name);
                 continue;
             }
+            if (!ld().ready(g) && ld().recovering(keys[i])) {
+                resting++;
+                continue;
+            }
             open.push(name);
             if (ld().ready(g)) need.push(keys[i]);
             else if (busy === null) busy = keys[i];
@@ -778,7 +804,10 @@
         if (busy !== null) ld().waitBusy(r, busy, ld().who(inv, busy) + ' busy on the adventure');
         else if (absent !== null) ld().waitBusy(r, absent, ld().who(inv, absent) + ' not listed');
         if (!need.length) {
-            if (busy === null && absent === null) st().go(S.RunStep.JumpHome, 'generals sent home');
+            if (busy === null && absent === null) {
+                st().go(S.RunStep.JumpHome, 'generals sent home' +
+                    (resting > 0 ? ', ' + resting + ' recovering return with the map' : ''));
+            }
             return;
         }
         for (i = 0; i < need.length; i++) {

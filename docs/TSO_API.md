@@ -101,15 +101,16 @@ Host calls behind the core write actions (each is wrapped by `Steward.core.packe
 | `cMilitaryUtil.SendRaiseArmyToServer(game.gi, spec, null)` | `army.unload` |
 | `SendMessagetoServer(91, dTimedProductionVO)`, one per stack shape; queue 0 is the barracks, 8 the elite barracks | `production.order` |
 | `quest.SetQuestMode(1)`, then `SendMessagetoServer(100, dServerAction, responder)` with `type = 1`, `data = quest.GetUniqueId()` and `responder = game.createResponder(onResult, onFault)` (`ServerState::ResponderSimple`). The claim is verified by the server's result callback for the current send, or by the quest leaving the zone's pool (a claimed quest stays in the pool for a while). A fault, a stale callback or `isFinished` turning false is never a success | `quests.claim` |
+| `quest.SetQuestMode(3)`, then `SendMessagetoServer(100, dServerAction, responder)` with `type = 0` (`SERVER_STACK_QUEST_BUTTON_OK`) and `data = quest.GetUniqueId()`. This is what the client's `QuestOkButtonPressedFromGui` sends when the player opens a quest in mode 2 ("New Quest", unread). The read is verified by the server's result callback for the current send, or by new quests entering the zone's pool. Mode 3 alone is never proof | `quests.read` |
 | `AdventureManager.removeAdventure(zoneId)` | `adventures.close` |
 | `game.getResources().GetResourceAmount(name)` and `.GetFree()` | `resources.amount`, `resources.freePopulation` |
 | `unitBase.GetCosts_vector()` | `production.costs` |
-| `SendServerAction(95, code, grid, 0, dStartSpecialistTaskVO)` after `mCurrentCursor.mCurrentSpecialist = general`; codes 4 move, 5 attack, 7 travel to zone, 12 to star menu (not yet confirmed in steward logs) | `specialists.orders.move`, `.attack`, `.star` (via `sendTask`) |
+| `SendServerAction(95, code, grid, 0, dStartSpecialistTaskVO)` after `mCurrentCursor.mCurrentSpecialist = general`; codes 4 move, 5 attack, 7 travel to zone, 12 to star menu (not yet confirmed in steward logs); code 6 is not an order: the client sets it while a general recovers after a lost battle (seen in steward logs), steward only reads it | `specialists.orders.move`, `.attack`, `.star` (via `sendTask`) |
 | `game.zone.mStreetDataMap.mLandingFields_vector[i].GetGrid()` (not yet confirmed in steward logs; the vector also lists other players' fields, `lf.mId` differs, so steward's callers leave the choice to the placeable test) | `zone.landingGrids` (returns an array of grid numbers, empty when unreadable) |
 | `ServiceManager.getInstance().specialist.sendToZone(general, zoneId)`, home to an adventure and back home from one (the client's battle window uses the same call for Return home) | `specialists.orders.sendToZone` |
 | `game.player.GetHomeZoneId()`, else `game.gi.mCurrentPlayer.GetHomeZoneId()` | `zone.homeId` (returns a number or null) |
 | `mMouseCursor.CheckIfGarrisonIsPlacableInGame(grid, true)` in cursor edit mode 86; `mPathFinder.CalculatePath` | `orders.placeCode` (the raw code), `orders.isPlaceable` (code 0 is placeable), `orders.hasPath` (prechecks). On an adventure a general with no garrison (at the star) is placeable only on a free landing field of the player's own landing zone; a general with a garrison goes through the normal rules. |
-| `general.GetTask().GetOriginalType()`, `.GetNewGarrisonGridIdx()` | `orders.rawTaskType`, `.taskKind`, `.newGrid` (verification) |
+| `general.GetTask().GetOriginalType()` (4, 5, 6 recovering, 7, 12), `.GetNewGarrisonGridIdx()` | `orders.rawTaskType`, `.taskKind`, `.newGrid` (verification) |
 | `general.GetTask().GetRemainingTime()` (unit assumed to be ms, not yet confirmed in steward logs; the raw value is logged) | `specialists.orders.remaining` (returns a number or null) |
 
 ### Class lookup
@@ -177,10 +178,16 @@ b.productionQueue;            // .mTimedProductions_vector, .mProductionType
 
 ```js
 q.IsQuestActive();
+q.IsActive();                 // the client's gate for the read: a quest not active is never read
+q.mQuestMode;                 // 0 failed, 1 claim pending, 2 waits for "New Quest" (unread),
+                              // 3 running, 4-12 reward and housekeeping
 q.GetQuestDefinition().questTriggers_vector[k];   // .triggerIdx, .type, .condition, .name_string
 // type 1 with condition 9 = click on a named map object
 q.mQuestTriggersFinished_vector[triggerIdx].status; // 0 = open
 ```
+
+`cQuestBook.Show()` sends the read for the preselected quest when it is in mode 2 (through
+`DisplayQuest` and `QuestOkButtonPressedFromGui`). `Hide()` sends nothing.
 
 ### Specialist accessors
 

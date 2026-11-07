@@ -117,8 +117,27 @@ function patchCore(w) {
     S.core.quests.list = function () {
         if (w.quests === null) return null;
         return w.quests.map(function (q) {
-            return { key: q.key, name: q.name, finished: !!q.finished, last: !!q.last };
+            return { key: q.key, name: q.name, finished: !!q.finished, last: !!q.last, unread: !!q.unread };
         });
+    };
+    S.core.quests.unread = function () {
+        if (w.quests === null) return null;
+        return w.quests.filter(function (q) { return q.unread; });
+    };
+    S.core.quests.read = function (key) {
+        w.reads.push({ key: key });
+        return {
+            label: 'read quest ' + key,
+            timeoutMs: 15000,
+            send: function () {
+                if (w.auto.readFails) return true;
+                for (var i = 0; i < w.quests.length; i++) {
+                    if (w.quests[i].key === key) w.quests[i].unread = false;
+                }
+                return true;
+            },
+            check: function () { return !w.auto.readFails; }
+        };
     };
     S.core.quests.finished = function () {
         if (w.quests === null) return null;
@@ -171,7 +190,7 @@ function homeStock(o, popName) {
 
 // o.generals: AC.general list (the viewed zone's specialist list, mutable
 // through w.fighters); o.free: free pool map; o.camps: grid -> true (enemy)
-// or 'own'; o.quests: [{ key, name, finished, last }] or null (unreadable);
+// or 'own'; o.quests: [{ key, name, finished, last, unread }] or null (unreadable);
 // o.fs: an airfs disk to boot on (fresh boot on the same disk).
 //
 // o.home (off by default) builds two zones, HOME (viewed at start, holding
@@ -190,7 +209,11 @@ function homeStock(o, popName) {
 //     (o.population in stock) raises it unless w.popNoEffect (o.popNoEffect);
 //   - unit costs are w.costs (o.costs, default one Population per unit) and
 //     other resources w.resources (o.resources);
-//   - the quest pool has a last quest that is not finished.
+//   - the quest pool has a last quest that is not finished;
+//   - w.reads lists every core.quests.read(key) send, and a read clears the
+//     quest's unread flag. w.auto.readFails models a read that never reached
+//     the client (quest not found, no server action): the quest stays unread
+//     and the check fails. It does not model a server refusal.
 //
 // On either world:
 //   - w.landing(grids) fills the map's landing fields (none by default);
@@ -198,6 +221,9 @@ function homeStock(o, popName) {
 //   - the client's star rule holds on the adventure: a general at the star can
 //     only be placed on a landing field, a general on the map never on one,
 //     and a landing field an own fighter stands on is refused;
+//   - w.auto.taken (default off) makes the client refuse, with code 1, any grid
+//     an own fighter on the viewed zone stands on, as the live client does off a
+//     landing field; landing fields keep answering 9;
 //   - w.auto.walk makes a move a walk: a Move task that holds until
 //     w.endWalks() puts each walker on its grid (default: instant move);
 //   - a general at the star (grid <= 0) has no garrison, so a raise is refused;
@@ -238,10 +264,10 @@ function world(o) {
         camps: o.camps || { 100: true, 200: true, 300: true },
         quests: o.quests === undefined ? defaultQuests : o.quests,
         auto: { move: true, attack: true, star: true, raise: true, unload: true,
-            map: true, visit: true, travel: true, close: true, walk: false, starKeep: false },
+            map: true, visit: true, travel: true, close: true, walk: false, starKeep: false, taken: false },
         blocked: {},
         pickups: [],
-        orders: [], raises: [], unloads: [], buffs: [], claims: [],
+        orders: [], raises: [], unloads: [], buffs: [], claims: [], reads: [],
         zoneSends: [], buffActions: [], productionOrders: [], closes: [],
         pending: [], entries: [], ghosts: [],
         adventures: home && !o.mapOpen ? [] : [{ adventureName: 'BlackKnights', zoneID: ZONE }],
@@ -274,6 +300,7 @@ function world(o) {
         if (!gi.isOnHomzone() && !(at > 0) && !landing) return 7;
         if (!gi.isOnHomzone() && at > 0 && landing) return 8;
         if (landing && taken) return 9;
+        if (w.auto.taken && taken) return 1;
         return sent.placeable;
     };
 
@@ -372,7 +399,7 @@ function world(o) {
     var RAW = S.core.specialists.orders.RAW_CODES;
     w.code = {
         move: RAW[S.GeneralTask.Move], attack: RAW[S.GeneralTask.Attack], star: RAW[S.GeneralTask.ToStar],
-        travel: RAW[S.GeneralTask.TravelToZone]
+        travel: RAW[S.GeneralTask.TravelToZone], recover: RAW[S.GeneralTask.Recovering]
     };
 
     // Buff action: spends the star-menu entry and applies its effect.

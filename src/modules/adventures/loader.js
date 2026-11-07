@@ -326,6 +326,15 @@
         return null;
     }
 
+    // A general resting after a lost battle takes no order until the rest
+    // ends, and he goes home with the map, so the map-end steps do not wait
+    // on him. A key that cannot be looked up does not count as recovering,
+    // so an unreadable general is still waited on.
+    function recovering(key) {
+        var spec = S.core.specialists.lookup(key).spec;
+        return !!spec && S.core.specialists.orders.taskKind(spec) === S.GeneralTask.Recovering;
+    }
+
     // A free placeable grid for each key. Landing fields are the only grids a
     // general at the star can be placed on, and the vector also lists other
     // players' fields, so the client's own placeable test decides; the move's
@@ -910,6 +919,7 @@
         leaving:           leaving,
         onMap:             onMap,
         movingKey:         movingKey,
+        recovering:        recovering,
         chooseGrids:       chooseGrids,
         anyAttacking:      anyAttacking,
         startRound:        startRound,

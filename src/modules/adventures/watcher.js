@@ -14,14 +14,25 @@
  * are packed. claim() is called without allowLast, so core/quests.js
  * refuses it here as well.
  *
+ * Before any claim, the same plan() reads at most one unread quest: one
+ * the client shows with a "New Quest" pointer and that waits for the
+ * player to open it. Until it is read the server starts none of its
+ * sub-quests, so their progress is never claimable. The adventure's last
+ * quest is read too, since reading it only starts it. Reads use the same
+ * guards as claims (never at home, never on another zone), never pause the
+ * run, and retry after QUEST_RETRY_MS. Their retry times share the claim
+ * table under READ_PREFIX + key, so a failed read never delays the claim
+ * of the same quest. Whether a quest is unread is decided in core/quests.js.
+ *
  * A failed or refused claim never pauses the run; the quest is retried
  * after QUEST_RETRY_MS. The retry times live in runState.questRetry, which
  * is memory only: after a client restart every finished quest is simply
  * tried again.
  *
- * One claim per plan() call keeps the module inside the scheduler's busy
+ * One read or claim per plan() call keeps the module inside the scheduler's busy
  * contract: plan() runs only when no adventures queue entry is pending, so
- * a claim is never started while the previous one is still in flight.
+ * a read or claim is never started while the previous one is still in
+ * flight.
  *
  * The island's map objects are read here as well, for the steps that wait
  * on them. This file never clicks them: the collect module does, and
@@ -39,6 +50,8 @@
     if (!S.modules.adventures) S.modules.adventures = {};
 
     var QUEST_RETRY_MS = 60000;
+    // Read retries share the claim table under their own keys.
+    var READ_PREFIX = 'read:';
 
     function stateApi() {
         return S.modules.adventures.state;
@@ -70,15 +83,64 @@
         return out;
     }
 
-    function claimable(list, table, t) {
+    // Unread quests of the viewed zone (the last one included); null when
+    // the quest pool cannot be read, as in pending().
+    function unread() {
+        var all;
+        try {
+            all = S.core.quests.unread();
+        } catch (e) {
+            S.kernel.warn('adventures', 'unread quests read threw:', e);
+            return null;
+        }
+        if (all === null || all === undefined) return null;
+        return all;
+    }
+
+    // First entry whose retry time under prefix + key has passed.
+    function claimable(list, table, t, prefix) {
         for (var i = 0; i < list.length; i++) {
-            var until = table[list[i].key];
+            if (!list[i]) continue;
+            var until = table[prefix + list[i].key];
             if (typeof until !== 'number' || t >= until) return list[i];
         }
         return null;
     }
 
-    // Claims the first pending quest that is not waiting for a retry.
+    // Reads one unread quest that is not waiting for a retry and returns.
+    // Returns false when no read was due, so the claim may run instead.
+    function readOne(st) {
+        var list = unread();
+        if (!list || list.length === 0) return false;
+        var table = retries();
+        var q = claimable(list, table, st.now(), READ_PREFIX);
+        if (!q) return false;
+
+        var rkey = READ_PREFIX + q.key;
+        var name = q.name || q.key;
+        var started = false;
+        try {
+            started = S.core.actions.attempt(S.core.quests.read(q.key), function (result) {
+                // Read at callback time: a stop or reload may have replaced the table.
+                var t = retries();
+                if (result && result.status === S.ActionResult.Verified) {
+                    delete t[rkey];
+                    S.kernel.log('adventures', 'quest ' + name + ' read');
+                } else {
+                    t[rkey] = stateApi().now() + QUEST_RETRY_MS;
+                    S.kernel.debug('adventures', 'quest ' + name + ': read not confirmed, retry after ' +
+                        Math.round(QUEST_RETRY_MS / 1000) + ' s if still unread');
+                }
+            }) === true;
+        } catch (e) {
+            S.kernel.warn('adventures', 'quest ' + name + ': read threw:', e);
+        }
+        if (!started) table[rkey] = st.now() + QUEST_RETRY_MS;
+        return true;
+    }
+
+    // Reads the first unread quest, or else claims the first pending quest,
+    // skipping those waiting for a retry. One action per call.
     function plan() {
         var st = stateApi();
         var r = st.run();
@@ -86,11 +148,13 @@
         if (typeof r.zoneId !== 'number' || S.core.zone.id() !== r.zoneId) return;
         if (st.partOf(r.step) === 'home') return;
 
+        if (readOne(st)) return;
+
         var list = pending();
         if (!list || list.length === 0) return;
 
         var table = retries();
-        var q = claimable(list, table, st.now());
+        var q = claimable(list, table, st.now(), '');
         if (!q) return;
 
         var key = q.key;
@@ -154,6 +218,7 @@
     S.modules.adventures.watcher = {
         QUEST_RETRY_MS: QUEST_RETRY_MS,
         pending:        pending,
+        unread:         unread,
         objects:        objects,
         patterns:       patterns,
         pickupText:     pickupText,

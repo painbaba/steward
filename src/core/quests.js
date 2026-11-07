@@ -1,10 +1,10 @@
 /*
- * Quests: listing and claiming.
+ * Quests: listing, reading and claiming.
  *
- * Reads the quest pool of the current zone and builds the def that claims one
- * finished quest through message 100. Run the def with
- * S.core.actions.attempt(def, onDone); this file decides nothing about which
- * quest to claim or when.
+ * Reads the quest pool of the current zone and builds the defs that read one
+ * unread quest or claim one finished quest through message 100. Run a def
+ * with S.core.actions.attempt(def, onDone); this file decides nothing about
+ * which quest to read or claim or when.
  *
  * list() distinguishes a failed read (null) from an empty pool ([]): a def
  * that verifies by absence must never mistake an unreadable pool for a
@@ -20,6 +20,17 @@
  *
  * Claiming the last quest of an adventure closes the adventure, so claim()
  * refuses it unless the caller passes allowLast.
+ *
+ * A quest is unread while it waits in mode 2 for the player's "New Quest"
+ * click and the client counts it as active (IsActive, or IsQuestActive where
+ * IsActive is absent). An unread quest has not started: a main quest's
+ * sub-quests do not enter the pool until it is read. read() sends what the
+ * client sends when the player opens it: SetQuestMode(3) and message 100 with
+ * server-action type 0 and the quest uid. It is verified by the server's
+ * result for the current send, or by new quests entering the same zone's
+ * pool. Mode 3 is never proof, because the send sets it on the client itself.
+ * The last quest can be read: reading starts it, only claiming closes the
+ * adventure.
  *
  * clickNames() names the map objects that open quests still wait to have
  * clicked. It applies the client's own pick-up-all filter: the quest is not
@@ -37,14 +48,23 @@
     // specialType_string of the adventure's final quest contains this marker.
     var LAST_QUEST_MARK = 'lastQuest';
 
-    // Message that claims a quest, and the server-action type it carries.
-    var CLAIM_MESSAGE = 100;
+    // Message that carries both the read and the claim of a quest
+    // (COMMAND.QUEST_TRIGGER), and the server-action types it carries:
+    // SERVER_STACK_QUEST_BUTTON_OK for the read, SERVER_STACK_REWARD_BUTTON_OK
+    // for the claim.
+    var TRIGGER_MESSAGE = 100;
+    var READ_TYPE = 0;
     var CLAIM_TYPE = 1;
 
-    // Quest mode set on the client when a claim is sent.
+    // Quest modes. The client sets CLAIM_MODE when a claim is sent and
+    // READ_MODE (QUEST_MODE_RUNNING) when a read is sent. UNREAD_MODE
+    // (QUEST_MODE_START_WINDOW_DESCRIPTION_WAIT_FOR_BUTTON_PRESSED) is a quest
+    // that waits for the player's "New Quest" click.
     var CLAIM_MODE = 1;
+    var UNREAD_MODE = 2;
+    var READ_MODE = 3;
 
-    var CLAIM_TIMEOUT_MS = 15000;
+    var TRIGGER_TIMEOUT_MS = 15000;
 
     // Trigger type and condition of "click the named map object".
     var CLICK_TRIGGER_TYPE = 1;
@@ -93,9 +113,9 @@
         return !!q && typeof q.isFinished === 'function';
     }
 
-    // The host responder for a claim, or null when the host has none. Called
-    // as a method on game because createResponder reads its own this.
-    function claimResponder(onResult, onFault) {
+    // The host responder for a read or claim, or null when the host has none.
+    // Called as a method on game because createResponder reads its own this.
+    function triggerResponder(onResult, onFault) {
         try {
             if (typeof game === 'undefined' || !game || typeof game.createResponder !== 'function') return null;
             return game.createResponder(onResult, onFault) || null;
@@ -131,9 +151,35 @@
         }
     }
 
-    // [{ key, name, finished, last }] for the quests on this zone; null when
-    // the pool cannot be read, [] for a pool that reads fine and is empty. An
-    // entry that cannot be read is skipped.
+    // The quest's mode (mQuestMode), or null when it is not a number or the
+    // read throws.
+    function modeOf(q) {
+        try {
+            var m = q.mQuestMode;
+            return typeof m === 'number' ? m : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // True when the client counts the quest as active. IsActive is the
+    // client's own gate for the read; IsQuestActive stands in where it is
+    // absent. A missing method means the quest does not count.
+    function isActive(q) {
+        if (typeof q.IsActive === 'function') return q.IsActive() === true;
+        if (typeof q.IsQuestActive === 'function') return q.IsQuestActive() === true;
+        return false;
+    }
+
+    // True for a quest the player could open now: it waits for "New Quest"
+    // and is active. The adventure's last quest is included on purpose.
+    function isUnread(q) {
+        return modeOf(q) === UNREAD_MODE && isActive(q);
+    }
+
+    // [{ key, name, finished, last, unread }] for the quests on this zone;
+    // null when the pool cannot be read, [] for a pool that reads fine and is
+    // empty. An entry that cannot be read is skipped.
     function list() {
         var qs = readPool();
         if (qs === null) return null;
@@ -149,7 +195,10 @@
                 if (key === null) continue;
                 var name = '';
                 try { name = String(q.getQuestName_string()); } catch (e1) { /* leave default */ }
-                out.push({ key: key, name: name, finished: q.isFinished() === true, last: isLast(q) });
+                out.push({
+                    key: key, name: name, finished: q.isFinished() === true,
+                    last: isLast(q), unread: isUnread(q)
+                });
             } catch (e2) {
                 S.kernel.warn('quests', 'quest entry ' + i + ' threw:', e2);
             }
@@ -164,6 +213,17 @@
         var out = [];
         for (var i = 0; i < all.length; i++) {
             if (all[i].finished) out.push(all[i]);
+        }
+        return out;
+    }
+
+    // The unread entries of list(); null when the pool cannot be read.
+    function unread() {
+        var all = list();
+        if (all === null) return null;
+        var out = [];
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].unread) out.push(all[i]);
         }
         return out;
     }
@@ -236,6 +296,58 @@
         return false;
     }
 
+    // Send state of one def: whether it has sent at all, and a per-send
+    // token. sendTrigger numbers each message, and a result callback records
+    // its own number only while that send is still the latest one, so a late
+    // answer to an earlier send never verifies a later one.
+    function sendState() {
+        return { sent: false, seq: 0, ack: 0 };
+    }
+
+    // Sets the quest's mode on the client and sends message 100 with the
+    // given server-action type and the quest uid, as the client does. False
+    // when the quest or the server action is missing or the send fails.
+    function sendTrigger(key, mode, type, label, ss) {
+        var q = findQuest(key);
+        if (!q) return false;
+        var sa = game.def('Communication.VO::dServerAction', true);
+        if (!sa) return false;
+        q.SetQuestMode(mode);
+        ss.sent = true;
+        sa.type = type;
+        sa.data = q.GetUniqueId();
+        ss.seq++;
+        var seq = ss.seq;
+        // Both callbacks run inside the host's dispatch loop, so nothing may
+        // escape them.
+        var responder = triggerResponder(
+            function () {
+                try {
+                    if (seq === ss.seq) ss.ack = seq;
+                    S.kernel.debug('quests', label + ': server result for send ' + seq +
+                        (seq === ss.seq ? '' : ' (stale, ignored)'));
+                } catch (e) {
+                    S.kernel.error('quests', label + ': result callback threw:', e);
+                }
+            },
+            function (f) {
+                try {
+                    S.kernel.warn('quests', label + ': server fault for send ' + seq, f);
+                } catch (e) {
+                    S.kernel.error('quests', label + ': fault callback threw:', e);
+                }
+            }
+        );
+        if (!responder) S.kernel.debug('quests', label + ': no host responder, verifying by absence only');
+        return S.core.packets.sendMessage(TRIGGER_MESSAGE, sa, responder) === true;
+    }
+
+    // True when the server answered the latest send. That send carried the
+    // zone id at send time, so no zone guard is needed with it.
+    function answered(ss) {
+        return ss.seq > 0 && ss.ack === ss.seq;
+    }
+
     // Def that claims the finished quest with this uid key. opts.allowLast
     // lets it claim the adventure's last quest (which closes the adventure).
     // Verified when the server's result callback for the current send fires,
@@ -248,19 +360,14 @@
     function claim(key, opts) {
         var allowLast = !!(opts && opts.allowLast);
         var label = 'claim quest ' + key;
-        // Set by send. The retry must not refuse because the quest no longer
-        // reads finished after our own SetQuestMode.
-        var sentOnce = false;
-        // Per-send token: send numbers each message, a result callback records
-        // its own number only while that send is still the latest one, so a
-        // late answer to an earlier send never verifies a later one.
-        var sendSeq = 0;
-        var ackSeq = 0;
+        // ss.sent is set by send. The retry must not refuse because the quest
+        // no longer reads finished after our own SetQuestMode.
+        var ss = sendState();
 
         return {
             label:     label,
             category:  'quests',
-            timeoutMs: CLAIM_TIMEOUT_MS,
+            timeoutMs: TRIGGER_TIMEOUT_MS,
 
             precheck: function () {
                 var all = list();
@@ -271,7 +378,7 @@
                 }
                 if (!entry) return 'quest not found';
                 if (entry.last && !allowLast) return 'last quest';
-                if (!entry.finished && !sentOnce) return 'quest not finished';
+                if (!entry.finished && !ss.sent) return 'quest not finished';
                 return null;
             },
 
@@ -282,45 +389,12 @@
             },
 
             send: function () {
-                var q = findQuest(key);
-                if (!q) return false;
-                var sa = game.def('Communication.VO::dServerAction', true);
-                if (!sa) return false;
-                q.SetQuestMode(CLAIM_MODE);
-                sentOnce = true;
-                sa.type = CLAIM_TYPE;
-                sa.data = q.GetUniqueId();
-                sendSeq++;
-                var seq = sendSeq;
-                // Both callbacks run inside the host's dispatch loop, so
-                // nothing may escape them.
-                var responder = claimResponder(
-                    function () {
-                        try {
-                            if (seq === sendSeq) ackSeq = seq;
-                            S.kernel.debug('quests', label + ': server result for send ' + seq +
-                                (seq === sendSeq ? '' : ' (stale, ignored)'));
-                        } catch (e) {
-                            S.kernel.error('quests', label + ': result callback threw:', e);
-                        }
-                    },
-                    function (f) {
-                        try {
-                            S.kernel.warn('quests', label + ': server fault for send ' + seq, f);
-                        } catch (e) {
-                            S.kernel.error('quests', label + ': fault callback threw:', e);
-                        }
-                    }
-                );
-                if (!responder) S.kernel.debug('quests', label + ': no host responder, verifying by absence only');
-                return S.core.packets.sendMessage(CLAIM_MESSAGE, sa, responder) === true;
+                return sendTrigger(key, CLAIM_MODE, CLAIM_TYPE, label, ss);
             },
 
             check: function (base) {
                 if (!base || base.found !== true) return false;
-                // The server answered our own latest send; that send carried
-                // the zone id at send time, so no zone guard is needed here.
-                if (sendSeq > 0 && ackSeq === sendSeq) return true;
+                if (answered(ss)) return true;
                 var zoneId = S.core.zone.id();
                 if (typeof zoneId !== 'number' || zoneId !== base.zoneId) return false;
                 var all = list();
@@ -330,12 +404,80 @@
         };
     }
 
+    // Def that reads the unread quest with this uid key, as the player's
+    // "New Quest" click does. Verified when the server's result callback for
+    // the current send fires, or when quests that were not in the baseline
+    // enter the same zone's pool (the server started a main quest's
+    // sub-quests). Mode 3, or the quest no longer reading unread, is never
+    // proof: the send sets mode 3 on the client itself. For the same reason a
+    // read that was sent and is neither answered nor followed by new quests
+    // fails and is not tried again by a caller that waits for the quest to
+    // read unread: on the client it no longer does. The last quest is not
+    // refused, since reading it only starts it. There is no satisfied().
+    function read(key) {
+        var label = 'read quest ' + key;
+        // ss.sent is set by send. The retry must not refuse because the quest
+        // no longer reads unread after our own SetQuestMode.
+        var ss = sendState();
+
+        return {
+            label:     label,
+            category:  'quests',
+            timeoutMs: TRIGGER_TIMEOUT_MS,
+
+            precheck: function () {
+                var all = list();
+                if (all === null) return 'quests unreadable';
+                var entry = null;
+                for (var i = 0; i < all.length; i++) {
+                    if (all[i].key === key) { entry = all[i]; break; }
+                }
+                if (!entry) return 'quest not found';
+                if (!entry.unread && !ss.sent) return 'quest not unread';
+                return null;
+            },
+
+            // The keys present before the send, so quests the server starts
+            // afterwards can be told apart. The zone is kept so another
+            // zone's pool is never read as new quests.
+            baseline: function () {
+                var all = list();
+                var keys = null;
+                if (all !== null) {
+                    keys = {};
+                    for (var i = 0; i < all.length; i++) keys[all[i].key] = true;
+                }
+                return { found: true, zoneId: S.core.zone.id(), keys: keys };
+            },
+
+            send: function () {
+                return sendTrigger(key, READ_MODE, READ_TYPE, label, ss);
+            },
+
+            check: function (base) {
+                if (!base || base.found !== true) return false;
+                if (answered(ss)) return true;
+                var zoneId = S.core.zone.id();
+                if (typeof zoneId !== 'number' || zoneId !== base.zoneId) return false;
+                if (base.keys === null) return false;
+                var all = list();
+                if (all === null) return false;
+                for (var i = 0; i < all.length; i++) {
+                    if (base.keys[all[i].key] !== true) return true;
+                }
+                return false;
+            }
+        };
+    }
+
     if (!S.core.quests) S.core.quests = {};
     S.core.quests.LAST_QUEST_MARK = LAST_QUEST_MARK;
     S.core.quests.list     = list;
     S.core.quests.finished = finished;
+    S.core.quests.unread   = unread;
     S.core.quests.isLast   = isLast;
     S.core.quests.claim    = claim;
+    S.core.quests.read     = read;
     S.core.quests.definition = definition;
     S.core.quests.clickNames = clickNames;
 

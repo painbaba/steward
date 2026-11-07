@@ -921,6 +921,25 @@ t.test('Arrive: a general still missing waits with no limit, past a stale arrive
     assertStep(w, 'Pickups');
 });
 
+t.test('arrival: an unread main quest is read during Arrive, before StarAll', function () {
+    var w = homeWorld();
+    onIsland(w, null, {});
+    w.quests = [{ key: 'm1', name: 'Main', unread: true, last: false }];
+    series(w, { step: w.S.RunStep.Arrive, zoneId: ZONE });
+    drive(w, { until: at('StarAll') });
+    assertStep(w, 'StarAll');
+    assert.deepStrictEqual(w.reads.map(function (r) { return r.key; }), ['m1']);
+    var logs = w.H.logs().map(function (l) { return l.args.join(' '); });
+    var readAt = -1;
+    var starAt = -1;
+    logs.forEach(function (text, i) {
+        if (/quest Main read/.test(text) && readAt < 0) readAt = i;
+        if (/-> StarAll/.test(text) && starAt < 0) starAt = i;
+    });
+    assert.ok(readAt >= 0, 'the read is logged');
+    assert.ok(starAt > readAt, 'the read comes before the transition into StarAll');
+});
+
 t.test('Arrive: a listed busy general far past the deadline stays Running, then goes to Pickups', function () {
     var w = homeWorld();
     onIsland(w);
@@ -1077,14 +1096,19 @@ t.test('waves: hand over to PackStar and reach Clear; the watcher claims a non-l
 
 t.test('watcher: claims nothing while home is viewed', function () {
     var w = homeWorld({ mapOpen: true });
-    w.quests = [{ key: 'q1', name: 'Side', finished: true, last: false }];
+    w.quests = [
+        { key: 'q1', name: 'Side', finished: true, last: false },
+        { key: 'q2', name: 'Main', unread: true, last: false }
+    ];
     series(w, { step: w.S.RunStep.Jump, zoneId: ZONE });
     w.auto.visit = false;
     for (var i = 0; i < 3; i++) { tick(w); play(w); }
     assert.strictEqual(w.claims.length, 0);
+    assert.strictEqual(w.reads.length, 0);
     series(w, { step: w.S.RunStep.LastQuest, zoneId: ZONE });
     for (i = 0; i < 3; i++) { tick(w); play(w); }
     assert.strictEqual(w.claims.length, 0);
+    assert.strictEqual(w.reads.length, 0);
 });
 
 // ---- 12. Clear --------------------------------------------------------------------
@@ -1139,6 +1163,46 @@ t.test('Clear: quest done, a general busy far past CLEAR_MAX_MS stays Running', 
     w.g1.state.task = null;
     tick(w);
     assertStep(w, 'LastQuest');
+});
+
+t.test('Clear: a recovering general is not waited on; Clear goes on to the last quest', function () {
+    var w = homeWorld();
+    onIsland(w, null, {});
+    var r = series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
+    lastQuest(w).finished = true;
+    w.g1.state.task = { type: w.code.recover };
+    tick(w);
+    w.t = r.since + w.S.modules.adventures.away.CLEAR_MAX_MS * 3;
+    tick(w);
+    assertStep(w, 'LastQuest');
+    assert.ok(!logged(w, /Anna \(1\.1\) busy/), 'no busy wait on him');
+    assert.ok(!logged(w, /left in the free pool/), 'nothing left over, no warning');
+});
+
+t.test('Clear: troops only the recovering general could hold stay, with one warning', function () {
+    var w = homeWorld();
+    onIsland(w, null, { Rifle: 4 });
+    series(w, { step: w.S.RunStep.Clear, zoneId: ZONE, keys: { '1.1': true } });
+    lastQuest(w).finished = true;
+    w.g1.state.task = { type: w.code.recover };
+    tick(w);
+    assertStep(w, 'LastQuest');
+    var hits = w.H.logs().filter(function (l) {
+        return l.category === 'adventures' && l.level === 'warn' &&
+            /left in the free pool while .*Anna.* recover/.test(l.args.join(' '));
+    });
+    assert.strictEqual(hits.length, 1, 'one warning');
+});
+
+t.test('Clear: a general on a move task still holds the step', function () {
+    var w = homeWorld();
+    onIsland(w, null, {});
+    series(w, { step: w.S.RunStep.Clear, zoneId: ZONE });
+    lastQuest(w).finished = true;
+    w.g1.state.task = { type: w.code.move, newGrid: 11 };
+    tick(w);
+    assertStep(w, 'Clear');
+    assert.ok(logged(w, /Anna \(1\.1\) busy/), 'busy logged');
 });
 
 t.test('Clear: a running battle is not quiet time; the quest unfinished pauses ClearTimeout after it', function () {
@@ -1778,6 +1842,18 @@ t.test('Recall: a busy general never pauses; the others leave; JumpHome once he 
     assertStep(w, 'JumpHome');
     assert.strictEqual(sendsOf(w, '1.1').length, 1);
     assert.strictEqual(sendsOf(w, '1.2').length, 1);
+});
+
+t.test('Recall: a recovering general is not sent and not waited on; he returns with the map', function () {
+    var w = homeWorld();
+    onIsland(w);
+    w.g2.state.task = { type: w.code.recover };
+    series(w, { step: w.S.RunStep.Recall, zoneId: ZONE });
+    drive(w, { until: at('JumpHome') });
+    assertStep(w, 'JumpHome');
+    assert.strictEqual(sendsOf(w, '1.1').length, 1);
+    assert.strictEqual(sendsOf(w, '1.2').length, 0);
+    assert.ok(logged(w, /1 recovering return with the map/), 'the log names him');
 });
 
 t.test('Recall: three generals ready one at a time never pause', function () {

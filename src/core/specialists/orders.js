@@ -16,6 +16,8 @@
  * autoTSO's GetOriginalType() values and have not been observed in steward
  * yet; they live in RAW_CODES only, and every finished order logs the raw
  * task type it observed so the codes can be confirmed from the console log.
+ * Code 6 (Recovering) is different: it was seen in steward logs as the task of
+ * a general resting after a lost battle. It is read only; sendTask refuses it.
  *
  * precheck finds the general by uid key through S.core.specialists.lookup.
  * send uses the object precheck found instead of reading the list again,
@@ -39,6 +41,7 @@
     S.GeneralTask.Attack       = 'GeneralTaskAttack';
     S.GeneralTask.TravelToZone = 'GeneralTaskTravelToZone';
     S.GeneralTask.ToStar       = 'GeneralTaskToStar';
+    S.GeneralTask.Recovering   = 'GeneralTaskRecovering';
 
     // The client's cursor edit mode for placing a garrison, used by its own
     // placeable check before a move.
@@ -50,6 +53,10 @@
     RAW_CODES[S.GeneralTask.Attack]       = 5;
     RAW_CODES[S.GeneralTask.TravelToZone] = 7;
     RAW_CODES[S.GeneralTask.ToStar]       = 12;
+    // Read only, never sent: the task a general holds while he recovers after a
+    // lost battle (seen in steward logs as raw 6 with a long remaining time). It
+    // lives here so taskKind names it; sendTask refuses it.
+    RAW_CODES[S.GeneralTask.Recovering]   = 6;
 
     // Verify windows per send. The star trip includes the unload, so it gets
     // the longer window.
@@ -171,6 +178,10 @@
     // The cursor is pointed at the general first because the client expects it;
     // dispatch builds and sends the packet.
     function sendTask(spec, kind, grid) {
+        if (kind === S.GeneralTask.Recovering) {
+            S.kernel.warn(CATEGORY, 'sendTask: not an order', kind);
+            return false;
+        }
         var code = RAW_CODES[kind];
         if (typeof code !== 'number') {
             S.kernel.warn(CATEGORY, 'sendTask: unknown order', kind);

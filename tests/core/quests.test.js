@@ -4,10 +4,13 @@ var t = require('../runner');
 var harness = require('../harness');
 var AC = require('../stubs/actions');
 
-// A fake quest pool. Each quest: { key, name, finished, special, throwOn, half }.
-// half: true yields an object that is not a quest (only GetUniqueId); throwOn
-// 'finished' makes isFinished throw. The pool can be made unreadable through
-// world.broken.
+// A fake quest pool. Each quest: { key, name, finished, special, throwOn, half,
+// mode, active, noIsActive }. half: true yields an object that is not a quest
+// (only GetUniqueId); throwOn 'finished' makes isFinished throw. mode sets
+// mQuestMode (left undefined when absent) and SetQuestMode changes it, so a
+// mode set by a send is observable. active (default true) feeds IsActive;
+// noIsActive drops IsActive so the fallback to IsQuestActive can be tested.
+// The pool can be made unreadable through world.broken.
 function world(H, quests) {
     var w = { quests: quests, broken: false, modes: [] };
     function fake(q) {
@@ -18,7 +21,7 @@ function world(H, quests) {
                 }
             };
         }
-        return {
+        var obj = {
             GetUniqueId:       function () {
                 if (q.throwOn === 'uid') throw new Error('uid failed');
                 return { toKeyString: function () { return q.key; } };
@@ -28,9 +31,17 @@ function world(H, quests) {
                 if (q.throwOn === 'finished') throw new Error('finished failed');
                 return q.finished === true;
             },
-            SetQuestMode:        function (mode) { w.modes.push(mode); },
-            GetQuestDefinition:  function () { return { specialType_string: q.special || '' }; }
+            SetQuestMode:        function (mode) {
+                w.modes.push(mode);
+                q.mode = mode;
+                obj.mQuestMode = mode;
+            },
+            GetQuestDefinition:  function () { return { specialType_string: q.special || '' }; },
+            IsQuestActive:       function () { return q.active !== false; }
         };
+        if (q.mode !== undefined) obj.mQuestMode = q.mode;
+        if (q.noIsActive !== true) obj.IsActive = function () { return q.active !== false; };
+        return obj;
     }
     H.host.game.quests = {
         GetQuestPool: function () {
@@ -88,7 +99,7 @@ t.test('list marks finished and last', function () {
     ]);
     var l = b.Q.list();
     t.assert.strictEqual(l.length, 2);
-    t.assert.strictEqual(JSON.stringify(l[0]), JSON.stringify({ key: 'a', name: 'First', finished: true, last: false }));
+    t.assert.strictEqual(JSON.stringify(l[0]), JSON.stringify({ key: 'a', name: 'First', finished: true, last: false, unread: false }));
     t.assert.strictEqual(l[1].last, true);
     t.assert.strictEqual(l[1].finished, false);
     t.assert.strictEqual(keys(b.Q.finished()), 'a');
@@ -313,6 +324,162 @@ t.test('claim refuses a key whose only entry is not a quest', function () {
     t.assert.strictEqual(r.reason, 'quest not found');
     t.assert.strictEqual(b.sent.messages.length, 0);
     t.assert.strictEqual(b.w.modes.length, 0);
+});
+
+// ---- unread and read ----------------------------------------------------------
+
+function unreadFlags(b) {
+    return b.Q.list().map(function (e) { return e.key + ':' + e.unread; }).join(',');
+}
+
+t.test('list marks unread only for mode 2 and active', function () {
+    var b = boot([
+        { key: 'a', mode: 2 },
+        { key: 'b', mode: 2, active: false },
+        { key: 'c', mode: 3 },
+        { key: 'd' },
+        { key: 'e', mode: 2, special: 'lastQuest' }
+    ]);
+    t.assert.strictEqual(unreadFlags(b), 'a:true,b:false,c:false,d:false,e:true');
+    t.assert.strictEqual(keys(b.Q.unread()), 'a,e');
+});
+
+t.test('unread is null when the pool cannot be read', function () {
+    var b = boot([{ key: 'a', mode: 2 }]);
+    b.w.broken = true;
+    t.assert.strictEqual(b.Q.unread(), null);
+});
+
+t.test('unread falls back to IsQuestActive when IsActive is absent', function () {
+    var b = boot([
+        { key: 'a', mode: 2, noIsActive: true },
+        { key: 'b', mode: 2, noIsActive: true, active: false }
+    ]);
+    t.assert.strictEqual(unreadFlags(b), 'a:true,b:false');
+});
+
+t.test('read sends 100 with type 0 and the quest uid and sets mode 3', function () {
+    var b = boot([{ key: 'a', mode: 2 }]);
+    var r = run(b, b.Q.read('a'), function () {
+        if (b.sent.messages.length === 1) respond(b, 0, 'onResult');
+    });
+    t.assert.strictEqual(r.status, b.S.ActionResult.Verified);
+    t.assert.strictEqual(b.sent.messages.length, 1);
+    var m = b.sent.messages[0];
+    t.assert.strictEqual(m.id, 100);
+    t.assert.strictEqual(m.data.type, 0);
+    t.assert.strictEqual(m.data.data.toKeyString(), 'a');
+    t.assert.ok(m.responder !== null);
+    t.assert.deepStrictEqual(b.w.modes, [3]);
+});
+
+t.test('read verified by the server result for the latest send', function () {
+    var b = boot([{ key: 'a', mode: 2 }]);
+    var r = run(b, b.Q.read('a'), function () {
+        if (b.sent.messages.length === 1) respond(b, 0, 'onResult');
+    });
+    t.assert.strictEqual(r.status, b.S.ActionResult.Verified);
+    t.assert.strictEqual(r.sends, 1);
+});
+
+t.test('read verified when new quests enter the same zone\'s pool', function () {
+    var b = boot([{ key: 'a', mode: 2 }]);
+    var added = false;
+    var r = run(b, b.Q.read('a'), function () {
+        if (!added && b.sent.messages.length === 1) {
+            added = true;
+            b.w.quests.push({ key: 'sub1', mode: 3 });
+        }
+    });
+    t.assert.strictEqual(r.status, b.S.ActionResult.Verified);
+    t.assert.strictEqual(r.sends, 1);
+});
+
+t.test('read is not verified by mode 3 alone', function () {
+    var b = boot([{ key: 'a', mode: 2 }]);
+    var r = run(b, b.Q.read('a'));
+    t.assert.strictEqual(b.w.quests[0].mode, 3);
+    t.assert.strictEqual(r.status, b.S.ActionResult.Failed);
+});
+
+t.test('read is not verified by a server fault', function () {
+    var b = boot([{ key: 'a', mode: 2 }]);
+    var fired = false;
+    var r = run(b, b.Q.read('a'), function () {
+        if (!fired && b.sent.messages.length === 1) {
+            fired = true;
+            respond(b, 0, 'onFault');
+        }
+    });
+    t.assert.strictEqual(r.status, b.S.ActionResult.Failed);
+    var warned = b.H.logs().filter(function (e) {
+        return e.level === 'warn' && e.category === 'quests' && String(e.args[0]).indexOf('server fault') >= 0;
+    });
+    t.assert.ok(warned.length >= 1);
+});
+
+t.test('read ignores a stale result', function () {
+    var b = boot([{ key: 'a', mode: 2 }]);
+    var fired = false;
+    var r = run(b, b.Q.read('a'), function () {
+        if (!fired && b.sent.messages.length === 2) {
+            fired = true;
+            respond(b, 0, 'onResult');
+        }
+    });
+    t.assert.strictEqual(r.status, b.S.ActionResult.Failed);
+    t.assert.strictEqual(r.sends, 2);
+
+    var c = boot([{ key: 'a', mode: 2 }]);
+    fired = false;
+    r = run(c, c.Q.read('a'), function () {
+        if (!fired && c.sent.messages.length === 2) {
+            fired = true;
+            respond(c, 1, 'onResult');
+        }
+    });
+    t.assert.strictEqual(r.status, c.S.ActionResult.Verified);
+    t.assert.strictEqual(r.sends, 2);
+});
+
+t.test('read is not verified when the zone changes', function () {
+    var b = boot([{ key: 'a', mode: 2 }]);
+    var done = false;
+    var r = run(b, b.Q.read('a'), function () {
+        if (!done && b.sent.messages.length >= 1) {
+            done = true;
+            b.H.host.game.gi.mCurrentViewedZoneID = 6;
+            b.w.quests.push({ key: 'sub1', mode: 3 });
+        }
+    });
+    t.assert.strictEqual(r.status, b.S.ActionResult.Failed);
+});
+
+t.test('read refuses a quest that is not unread or not found or while the pool is unreadable', function () {
+    var b = boot([{ key: 'a', mode: 3 }, { key: 'b', mode: 2, active: false }]);
+    var r = run(b, b.Q.read('a'));
+    t.assert.strictEqual(r.status, b.S.ActionResult.Refused);
+    t.assert.strictEqual(r.reason, 'quest not unread');
+    r = run(b, b.Q.read('b'));
+    t.assert.strictEqual(r.status, b.S.ActionResult.Refused);
+    t.assert.strictEqual(r.reason, 'quest not unread');
+    r = run(b, b.Q.read('nope'));
+    t.assert.strictEqual(r.status, b.S.ActionResult.Refused);
+    t.assert.strictEqual(r.reason, 'quest not found');
+    b.w.broken = true;
+    r = run(b, b.Q.read('a'));
+    t.assert.strictEqual(r.status, b.S.ActionResult.Refused);
+    t.assert.strictEqual(r.reason, 'quests unreadable');
+    t.assert.strictEqual(b.sent.messages.length, 0);
+});
+
+t.test('read of the last quest is allowed', function () {
+    var b = boot([{ key: 'z', mode: 2, special: 'lastQuest' }]);
+    var r = run(b, b.Q.read('z'), function () {
+        if (b.sent.messages.length === 1) respond(b, 0, 'onResult');
+    });
+    t.assert.strictEqual(r.status, b.S.ActionResult.Verified);
+    t.assert.strictEqual(b.sent.messages.length, 1);
 });
 
 // ---- clickNames and definition ------------------------------------------------
