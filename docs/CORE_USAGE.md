@@ -166,6 +166,17 @@ Steward.core.specialists.send(spec, taskType, params, responder);
 
 The composed operation — "send geologists to find iron until we have 3 deposits queued" — is **module concern**. Each module composes its own dispatch logic over `available` + `pickX` + `send`. We don't centralize these compositions because different modules want different policies.
 
+### Exception: the specialist send guard
+
+`Steward.core.specialists.sendGuard` is shared by every module that sends explorers or geologists. It is safety, not dispatch policy: if the client stops applying search tasks, an idle specialist stays idle and would otherwise be re-sent on every pass without limit. What to send and when stays in the module. A new specialist module must use the guard:
+
+- `note(owner, uid, label, tag)` after a send that really left (`send` returned true). Failed lookups, not-idle specialists and a false or thrown send record nothing.
+- `settle(owner, list, complete)` once per `plan()`, with the list that `plan()` already read and whether that read was complete (see Rule 3.5). A specialist seen busy counts as verified, one still Idle after the verify window counts as a miss.
+- Skip uids for which `blocked(uid)` is true (send still pending, or held after a miss).
+- `admit(n)` before queueing: it returns how many sends may go out. When several sends in a row changed nothing, the breaker opens and `admit` lets only one probe through per cooldown.
+
+State is shared across modules, lives in memory only and is reset by a script reload.
+
 ## Rule 7: wrap risky calls
 
 Every game-API call can throw — the API surface is large and not all of it is documented. Wrap calls in try/catch and log the failure:

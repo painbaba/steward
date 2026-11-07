@@ -3,6 +3,10 @@
  *
  * Dispatches idle geologists to deposit-search tasks. Each tick:
  *
+ *   0. Settle earlier sends through the shared send guard
+ *      (S.core.specialists.sendGuard): a send counts once the geologist
+ *      leaves Idle. Pending and held geologists are not candidates, and
+ *      pending ones count as on task for their deposit.
  *   1. Walk every enabled deposit type (ordered by S.core.deposits.types).
  *   2. Compute "wanted slots" per deposit:
  *        wanted = max - onMapCount - onTaskCount
@@ -15,7 +19,9 @@
  *      `overrides` is only eligible for deposits in its override list.
  *   4. Collect the picks, then enqueue them via
  *      queue.add('geologists.dispatch', ...) unless the specialist list
- *      lost entries during the pass; such a pass queues nothing.
+ *      lost entries during the pass; such a pass queues nothing. While
+ *      the guard's breaker is open it stops this step or limits it to
+ *      a single probe.
  *
  * Honours the kernel's busy contract: once plan() has enqueued one
  * dispatch per intended slot the module is "busy" until the queue
@@ -65,6 +71,15 @@
         return count;
     }
 
+    // Number of entries in `tags` equal to `name`.
+    function countTag(tags, name) {
+        var n = 0;
+        for (var i = 0; i < tags.length; i++) {
+            if (tags[i] === name) n++;
+        }
+        return n;
+    }
+
     // Filter `idle` to only those eligible for `depositName` given the
     // `overrides` map. Geologists with no override are always eligible.
     // Geologists with an override list are eligible only when that list
@@ -105,19 +120,25 @@
         // Dropped busy geologists would shorten busyOnDeposit, raise wanted
         // and over-dispatch the healthy idle ones, so this tick plans nothing.
         if (c.dropped() !== before) return;
+        // The check above makes this read complete, so the guard may judge
+        // an Idle geologist as a missed send.
+        c.sendGuard.settle('geologists', allGeos || [], true);
         if (!allGeos || !allGeos.length) return;
 
         // Idle pool: idle status AND a stable uniqueID. The reader already
         // leaves out entries without one; an entry can still lose its members
         // after that read, and the queue action could not re-find it at fire
-        // time.
+        // time. A geologist whose last send is pending or held stays out, so
+        // ranking picks another one for the slot.
         var idleGeos = [];
         for (var ig = 0; ig < allGeos.length; ig++) {
             var g0 = allGeos[ig];
             try {
                 if (c.status(g0) !== S.SpecialistStatus.Idle) continue;
             } catch (e) { continue; }
-            if (!c.uniqueIdKey(g0)) continue;
+            var uid0 = c.uniqueIdKey(g0);
+            if (!uid0) continue;
+            if (c.sendGuard.blocked(uid0)) continue;
             idleGeos.push(g0);
         }
         if (!idleGeos.length) return;
@@ -128,6 +149,9 @@
         var assigned = {};   // uid → true (this tick)
         var delay = (typeof s.dispatchDelay === 'number') ? s.dispatchDelay : 1500;
         var picks = [];
+        // A sent geologist can read Idle for a while before its task shows;
+        // counting it as on task keeps a second geologist off the same slot.
+        var pendingTags = c.sendGuard.pendingTags('geologists');
 
         for (var t = 0; t < types.length; t++) {
             var info = types[t];
@@ -144,7 +168,7 @@
                 S.kernel.warn('geologists', 'byType failed for', info.name, '- skipping this tick:', e);
                 continue;
             }
-            var onTask = busyOnDeposit(allGeos, info.index);
+            var onTask = busyOnDeposit(allGeos, info.index) + countTag(pendingTags, info.name);
             var wanted = max - onMap - onTask;
             if (wanted <= 0) continue;
 
@@ -172,11 +196,16 @@
         // counts above may be wrong. One last read decides before anything is
         // queued.
         if (!c.listComplete()) return;
+        // The shared breaker allows nothing, or a single probe, while
+        // recent sends keep failing to change their specialist.
+        var room = c.sendGuard.admit(picks.length);
+        if (room <= 0) return;
+        var count = Math.min(room, picks.length);
 
-        for (var p = 0; p < picks.length; p++) {
+        for (var p = 0; p < count; p++) {
             S.kernel.queue.add('geologists.dispatch', picks[p], p === 0 ? 0 : delay);
         }
-        S.kernel.log('geologists', 'queued dispatch for', picks.length, 'geologist(s)');
+        S.kernel.log('geologists', 'queued dispatch for', count, 'geologist(s)');
     }
 
     function boot() {
@@ -225,7 +254,8 @@
             try {
                 var ok = c.send(spec, S.GeologistTask.Search, depIdx);
                 if (ok) {
-                    S.kernel.log('geologists', 'sent', displayName, '→', depositName,
+                    c.sendGuard.note('geologists', uidKey, displayName, depositName);
+                    S.kernel.log('geologists', 'sent', displayName, '(uid', uidKey + ')', '→', depositName,
                                  '(subTaskId', depIdx + ')');
                 } else {
                     S.kernel.warn('geologists', 'send returned false for', displayName);
