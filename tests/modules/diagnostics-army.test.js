@@ -232,6 +232,7 @@ t.test('dumpQuests logs each trigger with its status and counter', function () {
                 ]
             };
         },
+        mQuestMode: 2,
         mQuestTriggersFinished_vector: [
             { status: 1, deltaStart: 0 },
             { status: 0, deltaStart: 2 }
@@ -252,8 +253,25 @@ t.test('dumpQuests logs each trigger with its status and counter', function () {
     t.assert.strictEqual(matching(out, /end pos=0 idx=0 action=x/).length, 1);
     t.assert.strictEqual(matching(out, /anyQuestsActive=true/).length, 1);
     t.assert.strictEqual(matching(out, /def=getter/).length, 1);
+    t.assert.strictEqual(matching(out, /mQuestMode=2/).length, 1);
     t.assert.strictEqual(lines(s, 'diag:quest', 'error').length, 0);
     t.assert.strictEqual(s.H.queued().length, 0);
+});
+
+t.test('dumpQuests logs an empty mQuestMode when the host field is absent', function () {
+    var s = setup();
+    var quest = {
+        isFinished: function () { return false; },
+        mQuestDefinition: { questTriggers_vector: [] },
+        mQuestTriggersFinished_vector: []
+    };
+    withQuests(s, [quest], function () { return 0; });
+    s.H.clearLogs();
+    s.army.dumpQuests();
+    var out = lines(s, 'diag:quest');
+    t.assert.strictEqual(matching(out, /mQuestMode=/).length, 1);
+    t.assert.strictEqual(matching(out, /mQuestMode=2/).length, 0);
+    t.assert.strictEqual(lines(s, 'diag:quest', 'error').length, 0);
 });
 
 t.test('dumpQuests falls back to mQuestDefinition', function () {

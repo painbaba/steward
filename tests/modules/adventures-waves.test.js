@@ -587,6 +587,123 @@ t.test('Position: a garrisoned general refused off a landing field keeps the cod
     assert.ok(/code 3/.test(w.st.run().blocker.reason), w.st.run().blocker.reason);
 });
 
+// ---- Position on swaps and rings --------------------------------------------
+
+// Anna and Bert stand on each other's line grid. The client refuses a grid
+// an own fighter stands on, so a straight move is impossible.
+[false, true].forEach(function (walk) {
+    t.test('Position: a swap sends one general to the star, then both reach their grids' + (walk ? ', walking' : ''), function () {
+        var w = attackWorld();
+        w.auto.taken = true;
+        w.auto.starKeep = true;
+        w.auto.walk = walk;
+        w.g1.state.grid = 20;
+        w.g2.state.grid = 10;
+        w.landing([500]);
+        startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+        throughPosition(w, walk ? function () { w.endWalks(); } : null);
+        assertSupply(w);
+        assert.deepStrictEqual(starsOf(w), ['1.1']);
+        assert.deepStrictEqual(moveText(w), ['1.2->20', '1.1->500', '1.1->10']);
+        assert.ok(!settled(w), 'no Settle');
+        assert.strictEqual(w.g1.state.grid, 10);
+        assert.strictEqual(w.g2.state.grid, 20);
+    });
+});
+
+t.test('Position: a ring of three sends one general to the star and settles all of them', function () {
+    var g3 = AC.general({ uid: '1.3', name: 'Cleo', grid: 20, army: { Rifle: 2 } });
+    var w = attackWorld({ extra: [g3] });
+    writeJson(w.fs, 'C:/b/w1.txt', {
+        '1.1': { grid: 10, target: 100, army: { Rifle: 5 }, order: 1, name: 'Anna' },
+        '1.2': { grid: 20, target: 200, army: { Rifle: 3 }, order: 2, name: 'Bert' },
+        '1.3': { grid: 30, target: 300, army: { Rifle: 2 }, order: 3, name: 'Cleo' }
+    });
+    w.auto.taken = true;
+    w.auto.starKeep = true;
+    w.landing([500]);
+    w.g1.state.grid = 30;
+    w.g2.state.grid = 10;
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    throughPosition(w);
+    assertSupply(w);
+    assert.deepStrictEqual(starsOf(w), ['1.1']);
+    assert.ok(!settled(w), 'no Settle');
+    assert.strictEqual(w.g1.state.grid, 10);
+    assert.strictEqual(w.g2.state.grid, 20);
+    assert.strictEqual(g3.state.grid, 30);
+});
+
+t.test('Position: a line whose target is held by a general leaving it waits and needs no star', function () {
+    var w = attackWorld();
+    w.auto.taken = true;
+    w.g1.state.grid = 30;
+    w.g2.state.grid = 10;
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    throughPosition(w);
+    assertSupply(w);
+    assert.deepStrictEqual(moveText(w), ['1.2->20', '1.1->10']);
+    assert.deepStrictEqual(starsOf(w), []);
+    assert.ok(!settled(w), 'no Settle');
+});
+
+t.test('Position: a holder outside the wave is a real blocker; the free line still moves first', function () {
+    var g3 = AC.general({ uid: '1.3', name: 'Cleo', grid: 10 });
+    var w = attackWorld({ extra: [g3] });
+    w.auto.taken = true;
+    w.g1.state.grid = 55;
+    w.g2.state.grid = 65;
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position, loadoutKeys: { '1.1': true, '1.2': true } });
+    throughPosition(w);
+    assert.strictEqual(stepName(w), 'Settle');
+    assert.deepStrictEqual(moveText(w), ['1.2->20']);
+    assertNotPlaceable(w, /not placeable at 10/);
+});
+
+t.test('Position: a grid the client refuses with no holder pauses NotPlaceable after the free line moved', function () {
+    var w = attackWorld();
+    w.auto.taken = true;
+    w.g1.state.grid = 55;
+    w.g2.state.grid = 65;
+    w.blocked[10] = true;
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Position });
+    throughPosition(w);
+    assert.strictEqual(stepName(w), 'Settle');
+    assert.deepStrictEqual(moveText(w), ['1.2->20']);
+    assertNotPlaceable(w, /not placeable at 10/);
+});
+
+t.test('Position: a Star line general standing on a line grid is sent to the star first', function () {
+    var g3 = AC.general({ uid: '1.3', name: 'Cleo', grid: 10 });
+    var w = attackWorld({ extra: [g3] });
+    writeJson(w.fs, 'C:/b/s1.txt', {
+        '1.1': { grid: 10, target: 100, army: { Rifle: 5 }, order: 1, name: 'Anna' },
+        '1.3': { grid: 0, army: {}, order: 2 }
+    });
+    w.auto.taken = true;
+    w.auto.starKeep = true;
+    w.g1.state.grid = 55;
+    startRun(w, ['C:/b/s1.txt'], { step: w.S.WaveStep.Position, loadoutKeys: { '1.1': true, '1.3': true } });
+    throughPosition(w);
+    assertSupply(w);
+    assert.deepStrictEqual(starsOf(w), ['1.3']);
+    assert.deepStrictEqual(moveText(w), ['1.1->10']);
+    assert.ok(!settled(w), 'no Settle');
+});
+
+t.test('Gate: a recovering field general waits and is logged by name, not as a raw code', function () {
+    var w = attackWorld();
+    w.g1.state.task = { type: w.code.recover };
+    startRun(w, ['C:/b/w1.txt']);
+    tick(w);
+    w.t += 3600000;
+    tick(w);
+    assert.strictEqual(stepName(w), 'Gate');
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+    assert.ok(logged(w, /task GeneralTaskRecovering/), 'named');
+    assert.ok(!logged(w, /raw 6/), 'not raw');
+});
+
 // ---- Supply / Load ----------------------------------------------------------
 
 t.test('Supply/Load: covered raises once per differing line and none for a matching one', function () {
@@ -1032,6 +1149,111 @@ t.test('watcher: claims nothing while the viewed zone is not the run island', fu
     tick(w);
     play(w);
     assert.deepStrictEqual(w.claims.map(function (c) { return c.key; }), ['q1']);
+});
+
+function readKeys(w) {
+    return w.reads.map(function (r) { return r.key; });
+}
+
+t.test('watcher: an unread quest is read before any claim', function () {
+    var w = attackWorld();
+    w.sent.pathLen = 0;
+    w.quests = [
+        { key: 'q1', name: 'Scout', unread: true, finished: false, last: false },
+        { key: 'q2', name: 'Open', finished: true, last: false }
+    ];
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Reach });
+    tick(w);
+    play(w);
+    assert.deepStrictEqual(readKeys(w), ['q1']);
+    assert.strictEqual(w.claims.length, 0, 'one action per plan: the read goes first');
+    for (var i = 0; i < 4; i++) { tick(w); play(w); }
+    assert.deepStrictEqual(readKeys(w), ['q1']);
+    assert.deepStrictEqual(w.claims.map(function (c) { return c.key; }), ['q2']);
+    assert.ok(w.H.logs().some(function (l) { return /quest Scout read/.test(l.args.join(' ')); }));
+});
+
+t.test('watcher: an unread last quest is read', function () {
+    var w = attackWorld();
+    w.sent.pathLen = 0;
+    w.quests = [{ key: 'q9', name: 'Final', unread: true, finished: false, last: true }];
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Reach });
+    for (var i = 0; i < 3; i++) { tick(w); play(w); }
+    assert.deepStrictEqual(readKeys(w), ['q9']);
+    assert.strictEqual(w.claims.length, 0);
+});
+
+t.test('watcher: a failed read retries after QUEST_RETRY_MS and never pauses', function () {
+    var w = attackWorld();
+    w.sent.pathLen = 0;
+    w.auto.readFails = true;
+    w.quests = [{ key: 'q1', name: 'Scout', unread: true, finished: false, last: false }];
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Reach });
+    tick(w);
+    play(w);
+    assert.strictEqual(w.reads.length, 1);
+    // Below the retry time no second read goes out.
+    var retry = w.S.modules.adventures.watcher.QUEST_RETRY_MS;
+    W.ticksFor(w, retry - 20000);
+    play(w);
+    assert.strictEqual(w.reads.length, 1, 'still waiting for the retry');
+    W.ticksFor(w, retry + 60000);
+    play(w);
+    assert.ok(w.reads.length >= 2, 'read again after the retry time: ' + w.reads.length);
+    assert.strictEqual(w.st.run().status, w.S.RunStatus.Running);
+});
+
+t.test('watcher: a quest that turns unread later is read on a later plan', function () {
+    var w = attackWorld();
+    w.sent.pathLen = 0;
+    w.quests = [{ key: 'q1', name: 'Scout', unread: false, finished: false, last: false }];
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Reach });
+    for (var i = 0; i < 2; i++) { tick(w); play(w); }
+    assert.strictEqual(w.reads.length, 0);
+    w.quests[0].unread = true;
+    tick(w);
+    play(w);
+    assert.deepStrictEqual(readKeys(w), ['q1']);
+});
+
+t.test('watcher: reads nothing while the viewed zone is not the run island', function () {
+    var w = attackWorld();
+    w.sent.pathLen = 0;
+    w.quests = [{ key: 'q1', name: 'Scout', unread: true, finished: false, last: false }];
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Reach });
+    w.H.host.game.gi.mCurrentViewedZoneID = ZONE + 1;
+    w.S.kernel._currentModule = 'adventures';
+    w.mod.plan({});
+    w.S.kernel._currentModule = null;
+    play(w);
+    w.st.go(w.S.RunStep.LastQuest, 'test');
+    for (var i = 0; i < 3; i++) { tick(w); play(w); }
+    assert.deepStrictEqual(readKeys(w), []);
+    w.H.host.game.gi.mCurrentViewedZoneID = ZONE;
+    w.st.go(w.S.WaveStep.Reach, 'test');
+    tick(w);
+    play(w);
+    assert.deepStrictEqual(readKeys(w), ['q1']);
+});
+
+t.test('Settle: an unread quest keeps the island unsettled', function () {
+    var w = attackWorld();
+    w.sent.pathLen = 0;
+    w.S.modules.adventures.watcher.unread = function () { return [{ key: 'q1' }]; };
+    startRun(w, ['C:/b/w1.txt'], { step: w.S.WaveStep.Reach });
+    tick(w);
+    assert.strictEqual(stepName(w), 'Settle');
+    for (var i = 0; i < 4; i++) tick(w);
+    assert.strictEqual(stepName(w), 'Settle');
+    assert.strictEqual(w.st.run().settledAt, null);
+
+    var w2 = attackWorld();
+    w2.sent.pathLen = 0;
+    w2.S.modules.adventures.watcher.unread = function () { return []; };
+    startRun(w2, ['C:/b/w1.txt'], { step: w2.S.WaveStep.Reach });
+    tick(w2);
+    tick(w2);
+    assert.strictEqual(typeof w2.st.run().settledAt, 'number');
 });
 
 t.test('Settle: a path that appears goes back to Reach and on to Attack', function () {

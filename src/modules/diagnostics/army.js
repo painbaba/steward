@@ -362,7 +362,9 @@
                         continue;
                     }
                     var parts = probe(q, ['getQuestName_string', 'GetUniqueId', 'isFinished',
-                                          'IsQuestActive', 'IsRunning']);
+                                          'IsQuestActive', 'IsActive', 'IsRunning']);
+                    // The mode shows whether a quest waits to be read (2) or runs (3).
+                    parts.push('mQuestMode=' + field(q, 'mQuestMode'));
                     var found = S.core.quests.definition(q);
                     var def = found.def;
                     parts.push('specialType=' + field(def, 'specialType_string'));

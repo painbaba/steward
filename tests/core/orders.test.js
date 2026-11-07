@@ -65,7 +65,7 @@ function hideGeneral(s) {
 
 t.test('orders: GeneralTask is filled and every kind has a raw code', function () {
     var s = setup();
-    var kinds = ['Move', 'Attack', 'TravelToZone', 'ToStar'];
+    var kinds = ['Move', 'Attack', 'TravelToZone', 'ToStar', 'Recovering'];
     for (var i = 0; i < kinds.length; i++) {
         var v = s.S.GeneralTask[kinds[i]];
         assert.strictEqual(typeof v, 'string');
@@ -73,6 +73,15 @@ t.test('orders: GeneralTask is filled and every kind has a raw code', function (
     }
     assert.strictEqual(s.orders.RAW_CODES[s.S.GeneralTask.Move], 4);
     assert.strictEqual(s.orders.RAW_CODES[s.S.GeneralTask.ToStar], 12);
+    assert.strictEqual(s.orders.RAW_CODES[s.S.GeneralTask.Recovering], 6);
+});
+
+t.test('orders: task type 6 reads as Recovering and sendTask refuses it', function () {
+    var g = AC.general({ uid: 'g1', task: { type: 6, newGrid: 0 } });
+    var s = setup({ generals: [g] });
+    assert.strictEqual(s.orders.taskKind(g), s.S.GeneralTask.Recovering);
+    assert.strictEqual(s.orders.sendTask(g, s.S.GeneralTask.Recovering, 42), false);
+    assert.strictEqual(s.sent.actions.length, 0);
 });
 
 t.test('orders: taskKind, rawTaskType and newGrid read the task and answer null otherwise', function () {
